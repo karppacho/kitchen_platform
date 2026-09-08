@@ -1,0 +1,23 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{js,jsx,ts,tsx,json,yml,yaml,css,html}]
+indent_size = 2
+
+[*.md]
+trim_trailing_whitespace = false
+
+# Шелл-скрипты обязаны быть с LF: 17.08.2026 CRLF из PowerShell порвал
+# кавычки в многострочной команде и запустил лишний процесс на бою.
+[*.sh]
+end_of_line = lf
+
+[Makefile]
+indent_style = tab

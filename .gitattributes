@@ -1,0 +1,21 @@
+# Переводы строк нормализуются к LF в репозитории И при выкладке.
+#
+# Это не косметика. 17.08.2026 многострочная команда, отправленная с
+# Windows-машины, приехала на сервер с CRLF: bash порвал кавычки и запустил
+# лишний процесс на бою. Шелл-скрипт с CRLF на Linux падает с невнятным
+# `\r: command not found`, и разбираться в этом посреди деплоя — худшее
+# время из возможных.
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+Makefile text eol=lf
+
+# Бинарное не трогать.
+*.png   binary
+*.jpg   binary
+*.pdf   binary
+*.docx  binary
+*.xlsx  binary

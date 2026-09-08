@@ -1,0 +1,49 @@
+# Локальный барьер перед коммитом. Дублирует часть CI намеренно: узнать о
+# проблеме за две секунды дешевле, чем за пять минут в PR.
+#
+# Установка: pre-commit install   (входит в `make install`)
+
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: detect-private-key
+      # Шелл-скрипты только с LF: CRLF из Windows уже ломал боевой сервер.
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+        files: \.(sh|yml|yaml)$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: ^backend/
+      - id: ruff-format
+        files: ^backend/
+
+  # Сканер секретов. Стоит здесь, а не только в CI, потому что вычистить
+  # секрет из истории git несоизмеримо дороже, чем не дать ему туда попасть.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: mypy-core
+        name: mypy (ядро: domain, sync)
+        entry: bash -c 'cd backend && uv run mypy src/kitchen/domain src/kitchen/sync'
+        language: system
+        pass_filenames: false
+        files: ^backend/src/kitchen/(domain|sync)/

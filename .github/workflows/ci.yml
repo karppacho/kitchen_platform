@@ -1,0 +1,136 @@
+# Блокирующий CI. Требование к нему одно и жёсткое: укладываться в 5 минут.
+# Проверки защищают, только пока их терпят; если PR ждёт двадцать минут,
+# дисциплина умрёт сама. Всё медленное (e2e, LLM-евалы) живёт отдельно.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.5.11"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+        working-directory: backend
+      - run: uv run ruff check --output-format=github .
+        working-directory: backend
+      - run: uv run ruff format --check .
+        working-directory: backend
+
+  types:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+        working-directory: backend
+      - run: uv run mypy src
+        working-directory: backend
+
+  arch:
+    name: слои (import-linter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+        working-directory: backend
+      - run: uv run lint-imports
+        working-directory: backend
+
+  test:
+    name: тесты
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: kitchen_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/kitchen_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+        working-directory: backend
+
+      # Офлайн-набор сразу с покрытием: три отдельных прогона pytest
+      # съели бы бюджет в пять минут ни за что.
+      - name: Офлайн-тесты и покрытие ядра
+        run: uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov-report=term-missing --cov-fail-under=85
+        working-directory: backend
+
+      # Интеграция против настоящего Postgres, включая обратимость миграций.
+      - name: Интеграционные тесты
+        run: uv run pytest -m integration --cov-append
+        working-directory: backend
+
+  secrets:
+    name: секреты (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Вся история, а не только диф: нужно знать, не закоммичено ли
+          # что-то раньше.
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  deps:
+    name: зависимости
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+      - run: uv sync --all-extras --dev
+        working-directory: backend
+      # Lock-файл обязан соответствовать pyproject: иначе на сервере
+      # встанут не те версии, что проверял CI.
+      - name: Lock-файл актуален
+        run: uv lock --check
+        working-directory: backend
+      # Блокирующе. Исключения добавляются точечно через --ignore-vuln
+      # с комментарием, почему конкретная уязвимость нас не касается.
+      - name: Известные уязвимости
+        run: uv run pip-audit
+        working-directory: backend

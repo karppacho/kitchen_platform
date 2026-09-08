@@ -1,0 +1,179 @@
+[project]
+name = "kitchen-platform"
+version = "0.1.0"
+description = "Веб-платформа R&D кухни: справочник, себестоимость, расчётка, конкуренты, дегустации"
+requires-python = ">=3.12"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14",
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+    "gspread>=6.1.4",
+    "google-auth>=2.36",
+    "google-api-python-client>=2.151",
+    "openai>=1.54",
+    "httpx>=0.27",
+    "apscheduler>=3.10",
+    "loguru>=0.7",
+    "python-multipart>=0.0.17",
+    "pyjwt[crypto]>=2.10",
+]
+
+[project.optional-dependencies]
+# Скрапинг конкурентов: тяжёлые зависимости, нужны только воркеру.
+scraping = [
+    "playwright>=1.48",
+    "beautifulsoup4>=4.12",
+]
+# Генерация ТТК.
+docs = [
+    "docxtpl>=0.16",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "import-linter>=2.1",
+    "pip-audit>=2.7",
+    "types-requests",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kitchen"]
+
+
+# ===========================================================================
+# ruff — настроен явно. В ботах ruff объявлен зависимостью, но не настроен и
+# фактически не запускается; здесь он блокирующий с первого дня.
+# ===========================================================================
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # isort
+    "N",         # pep8-naming
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "A",         # не затенять builtins
+    "C4",        # comprehensions
+    "DTZ",       # наивные datetime — реальный источник багов там, где есть кроны в Europe/Moscow
+    "T20",       # никаких print в проде
+    "SIM",       # упрощения
+    "RET",       # возвраты
+    "PTH",       # pathlib вместо os.path
+    "ERA",       # закомментированный код
+    "RUF",
+]
+ignore = [
+    "E501",      # длину строк держит форматтер; в тексте на русском переносы вручную вредны
+    "RUF001",    # кириллица в строках — это норма проекта, а не «похожий символ»
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# В тестах print допустим (характеризационные прогоны печатают расхождения),
+# как и «магические» числа-эталоны.
+"tests/**" = ["T20", "ERA"]
+# Скрипты — это CLI, им print родной.
+"scripts/**" = ["T20"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["kitchen"]
+
+
+# ===========================================================================
+# mypy — strict в ядре, обычный режим снаружи.
+# Граница проходит там, где ошибка стоит денег шефа.
+# ===========================================================================
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+pretty = true
+
+# Список расширяется по мере появления модулей: mypy предупреждает о
+# секциях для несуществующих пакетов, и этот шум в логах вреден — к нему
+# быстро привыкают и перестают читать вывод целиком.
+[[tool.mypy.overrides]]
+module = ["kitchen.domain.*", "kitchen.sync.*"]
+strict = true
+disallow_any_explicit = true
+
+# Секции ignore_missing_imports для gspread / google-api добавляются вместе
+# с первым импортом этих библиотек: mypy шумит о конфиге для того, чего ещё
+# нет, а шум в логах приучает их не читать.
+
+
+# ===========================================================================
+# pytest. Живые тесты по умолчанию ИСКЛЮЧЕНЫ — но через маркер и skip,
+# а не через ранний return, как в kitchen_bot: там прогон выглядел зелёным,
+# хотя четыре теста молча не выполнялись.
+# ===========================================================================
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers -m 'not live and not e2e and not integration'"
+markers = [
+    "live: ходит в настоящие Google Sheets и требует кредов (запуск: make test-live)",
+    "integration: требует поднятого Postgres",
+    "e2e: браузерный сценарий через Playwright",
+    "llm: обращается к платной модели (запуск: make eval)",
+]
+filterwarnings = ["error::DeprecationWarning"]
+
+
+# ===========================================================================
+# coverage — порог только на ядре. Общий процент как цель вреден:
+# он вознаграждает тесты на геттеры.
+# ===========================================================================
+[tool.coverage.run]
+source = ["src/kitchen"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]
+
+
+# ===========================================================================
+# import-linter — превращает «три слоя, строго разделены» из декларации
+# в проверяемое CI утверждение.
+# ===========================================================================
+[tool.importlinter]
+root_package = "kitchen"
+# Нужно, потому что среди запрещённых есть внешние пакеты: ядро не должно
+# знать ни про gspread, ни про SQLAlchemy, ни про FastAPI.
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Слои: web и worker сверху, domain снизу"
+type = "layers"
+layers = ["kitchen.web | kitchen.worker", "kitchen.sync", "kitchen.db", "kitchen.domain"]
+
+[[tool.importlinter.contracts]]
+name = "domain не знает ни про транспорт, ни про хранилище"
+type = "forbidden"
+source_modules = ["kitchen.domain"]
+forbidden_modules = [
+    "kitchen.web", "kitchen.db", "kitchen.sync", "kitchen.worker",
+    "gspread", "sqlalchemy", "fastapi", "openai", "httpx",
+]
