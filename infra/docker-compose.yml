@@ -1,0 +1,82 @@
+# Наши сервисы. Стек Supabase живёт отдельно — см. infra/supabase/README.md,
+# он поднимается из официального compose с нашим оверлеем.
+#
+# Правило, которое здесь важнее всех остальных: **ни один порт не
+# публикуется на 0.0.0.0**. Наружу смотрит только nginx на 80 и 443.
+# Postgres на 5432 и Kong на 8000, выставленные во внешний интерфейс,
+# начинают сканироваться в течение часов — это главный футган
+# self-hosted Supabase.
+
+name: kitchen-platform
+
+x-backend: &backend
+  build:
+    context: ../backend
+    args:
+      APP_VERSION: ${APP_VERSION:-dev}
+  image: kitchen-platform-backend:${APP_VERSION:-dev}
+  restart: unless-stopped
+  env_file: ../.env
+  environment:
+    APP_VERSION: ${APP_VERSION:-dev}
+  networks: [kitchen, supabase]
+  # Один файл ключа на сервер, только чтение. Не копия в каждом каталоге —
+  # три копии приватного ключа и были частью проблемы.
+  volumes:
+    - /etc/kitchen-platform/service_account.json:/etc/kitchen-platform/service_account.json:ro
+  logging: &logging
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+services:
+  api:
+    <<: *backend
+    # 127.0.0.1, а не 0.0.0.0: снаружи сюда ходит только nginx.
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status == 200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    <<: *backend
+    # Фоновые задачи и кроны отдельным процессом. В kitchen_bot планировщик
+    # живёт внутри процесса бота: двадцатитрёхминутный обход конкурентов
+    # делит судьбу с транспортом, и падение одного уносит другое.
+    command: ["python", "-m", "kitchen.worker"]
+    ports: []
+    healthcheck:
+      disable: true
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    # Единственный сервис, которому положено смотреть наружу.
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../infra/nginx/kitchen-platform.conf:/etc/nginx/conf.d/default.conf:ro
+      - certbot-webroot:/var/www/certbot:ro
+      - letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [kitchen]
+    logging: *logging
+
+networks:
+  kitchen:
+    driver: bridge
+  # Внешняя сеть стека Supabase: приложение ходит в базу по ней, а не через
+  # опубликованные наружу порты.
+  supabase:
+    external: true
+    name: supabase_default
+
+volumes:
+  certbot-webroot:
+  letsencrypt:

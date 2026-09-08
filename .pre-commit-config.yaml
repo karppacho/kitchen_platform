@@ -42,7 +42,7 @@ repos:
   - repo: local
     hooks:
       - id: mypy-core
-        name: mypy (ядро: domain, sync)
+        name: "mypy (ядро: domain, sync)"
         entry: bash -c 'cd backend && uv run mypy src/kitchen/domain src/kitchen/sync'
         language: system
         pass_filenames: false
