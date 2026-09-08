@@ -91,3 +91,13 @@ def test_percent_boundary_one() -> None:
     """
     assert parse_percent("1") == Decimal("1")
     assert parse_percent("1%") == Decimal("0.01")
+
+
+@pytest.mark.parametrize("raw", [None, "", "   ", "%", "мусор", "н/д"])
+def test_parse_percent_survives_garbage(raw: object) -> None:
+    """Пустое и неразбираемое даёт None, а не исключение и не ноль.
+
+    Ноль здесь был бы худшим исходом: «потерь 0%» и «потери не заполнены» —
+    разные утверждения, и второе обязано дойти до предупреждения.
+    """
+    assert parse_percent(raw) is None
