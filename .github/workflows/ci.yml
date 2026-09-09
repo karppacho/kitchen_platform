@@ -109,7 +109,7 @@ jobs:
           # Вся история, а не только диф: нужно знать, не закоммичено ли
           # что-то раньше.
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
