@@ -54,6 +54,9 @@ COPY --chown=kitchen:kitchen alembic.ini ./alembic.ini
 # Эксплуатационные скрипты (отчёт по таблицам, сверка) едут в образ: их
 # запускают на сервере, а значит они должны быть там же, где зависимости.
 COPY --chown=kitchen:kitchen scripts ./scripts
+# Эталон расчёта — справочные данные для сверки, а не тестовый код.
+# Остальное из tests/ в образ не попадает.
+COPY --chown=kitchen:kitchen tests/golden ./tests/golden
 
 USER kitchen
 
