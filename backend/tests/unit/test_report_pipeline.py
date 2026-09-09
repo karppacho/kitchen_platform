@@ -15,8 +15,8 @@ from kitchen.sync.reader import SheetsReader
 
 IDS = {"kitchen": "kitchen-id", "ingredient_cards": "cards-id"}
 
-ING_HEADER = [c.title for c in specs.INGREDIENTS.columns]
-CARDS_HEADER = [c.title for c in specs.INGREDIENT_CARDS.columns]
+ING_HEADER = [c.expected_header for c in specs.INGREDIENTS.columns]
+CARDS_HEADER = [c.expected_header for c in specs.INGREDIENT_CARDS.columns]
 
 
 def _ing(id_: str, name: str, status: str = "активное") -> list[str]:

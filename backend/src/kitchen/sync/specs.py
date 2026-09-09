@@ -36,21 +36,49 @@ INGREDIENTS = SheetSpec(
         Column("E", "Короткое для айки", "short_name", _T, _SHARED),
         Column("F", "Изготовитель", "manufacturer", _T, _SHARED),
         Column("G", "Состав", "composition", _T, _SHARED),
-        Column("H", "Белки", "protein", _D, _SHARED),
-        Column("I", "Жиры", "fat", _D, _SHARED),
-        Column("J", "Углеводы", "carbs", _D, _SHARED),
-        Column("K", "Ккал", "kcal", _D, _SHARED),
-        Column("L", "Цена за 1 кг", "price_per_kg", _D, _SHARED),
-        Column("M", "Закупочная цена за упаковку", "price_per_pack", _D, _SHARED),
+        Column("H", "Белки", "protein", _D, _SHARED, header="Белки на 100г"),
+        Column("I", "Жиры", "fat", _D, _SHARED, header="Жиры на 100г"),
+        Column("J", "Углеводы", "carbs", _D, _SHARED, header="Углеводы на 100г"),
+        Column("K", "Ккал", "kcal", _D, _SHARED, header="Ккал на 100г"),
+        Column(
+            "L",
+            "Цена за 1 кг",
+            "price_per_kg",
+            _D,
+            _SHARED,
+            header="Цена за 1 кг (или 1 шт / 1 л), ₽",
+        ),
+        Column(
+            "M",
+            "Закупочная цена за упаковку",
+            "price_per_pack",
+            _D,
+            _SHARED,
+            header="Закупочная цена за упаковку, ₽",
+        ),
         Column("N", "Единица измерения", "unit", _T, _SHARED),
         # Без этого поля штучный ингредиент посчитать нельзя: в ТТК граммы,
         # а цена за штуку.
         Column("O", "Вес 1 шт, г", "weight_per_piece_g", _D, _SHARED),
-        Column("P", "Общие потери", "losses_total", _P, _SHARED),
-        Column("Q", "потери перетарка", "losses_unpacking", _P, _SHARED),
-        Column("R", "нарезка", "losses_cutting", _P, _SHARED),
+        Column("P", "Общие потери", "losses_total", _P, _SHARED, header="Общие потери, %"),
+        Column(
+            "Q",
+            "Потери: перетарка",
+            "losses_unpacking",
+            _P,
+            _SHARED,
+            header="потери перетарка/дефрост",
+        ),
+        Column("R", "Потери: нарезка", "losses_cutting", _P, _SHARED, header="потери нарезка"),
         # Читается, но нигде не применяется. Осознанный пробел, не баг.
-        Column("S", "тепловая", "losses_thermal", _P, _SHARED),
+        Column(
+            "S",
+            "Потери: тепловая",
+            "losses_thermal",
+            _P,
+            _SHARED,
+            header="потери тепловая обработка",
+        ),
         Column("T", "Статус", "status", _T, _SHARED),
     ),
 )
@@ -63,7 +91,14 @@ PACKAGING = SheetSpec(
         Column("A", "id", "id", _T, _SHARED),
         Column("B", "Название", "name", _T, _SHARED),
         Column("C", "Полное наименование", "full_name", _T, _SHARED),
-        Column("D", "Цена за 1 шт", "price_per_piece", _D, _SHARED),
+        Column(
+            "D",
+            "Цена за 1 шт",
+            "price_per_piece",
+            _D,
+            _SHARED,
+            header="Цена за 1 кг (или 1 шт / 1 л), ₽",
+        ),
         Column("E", "Категория блюд", "dish_category", _T, _SHARED),
         Column("F", "Поставщик", "supplier", _T, _SHARED),
         Column("G", "Статус", "status", _T, _SHARED),
@@ -81,11 +116,13 @@ DISHES = SheetSpec(
         Column("C", "Категория блюд", "category", _T, _SHARED),
         # Цену меню ставит шеф, и он главнее любого расчёта: resolve_price
         # в kitchen_bot берёт её первой. Мы её только читаем.
-        Column("D", "Цена меню", "price_menu", _D, _HUMAN),
-        Column("E", "UC фактический", "uc_actual", _D, _SHARED),
+        Column("D", "Цена меню", "price_menu", _D, _HUMAN, header="Цена меню, ₽"),
+        Column("E", "UC фактический", "uc_actual", _D, _SHARED, header="UC фактический iiko"),
         Column("F", "Статус", "status", _T, _SHARED),
         Column("G", "Дата создания", "created_at", _T, _SHARED),
-        Column("H", "Дата изменения", "updated_at", _T, _SHARED),
+        Column(
+            "H", "Дата изменения", "updated_at", _T, _SHARED, header="Дата последнего изменения"
+        ),
         Column("I", "Комментарий", "comment", _T, _SHARED),
     ),
 )
@@ -99,7 +136,7 @@ TTK = SheetSpec(
         Column("C", "id_упаковки", "packaging_id", _T, _SHARED),
         # Шеф пишет НЕТТО — сколько должно оказаться в блюде. Потери
         # калькулятор накидывает сверху, получая брутто.
-        Column("D", "Вес нетто г", "net_weight_g", _D, _SHARED),
+        Column("D", "Вес нетто, г", "net_weight_g", _D, _SHARED, header="Веснетто,г"),
         Column("E", "Способ_приготовления_id", "cooking_method_id", _T, _SHARED),
         Column("F", "Тип строки", "row_type", _T, _SHARED),
         Column("G", "Комментарий", "comment", _T, _SHARED),
@@ -115,10 +152,17 @@ COOKING_METHODS = SheetSpec(
     columns=(
         Column("A", "id", "id", _T, _SHARED),
         Column("B", "Позиция", "position", _T, _SHARED),
-        Column("C", "Способ", "method", _T, _SHARED),
-        Column("D", "Норма впитывания", "absorption_rate", _P, _SHARED),
-        Column("E", "Масло на 100 г", "oil_per_100g", _D, _SHARED),
-        Column("F", "Рекомендация", "recommendation", _T, _SHARED),
+        Column("C", "Способ", "method", _T, _SHARED, header="Способ приготовления"),
+        Column(
+            "D",
+            "Норма впитывания",
+            "absorption_rate",
+            _P,
+            _SHARED,
+            header="Норма впитывания масла %",
+        ),
+        Column("E", "Масло на 100 г", "oil_per_100g", _D, _SHARED, header="Масло на 100 г сырья"),
+        Column("F", "Рекомендация", "recommendation", _T, _SHARED, header="Рекомендация для ТТК"),
         Column("G", "Комментарий", "comment", _T, _SHARED),
     ),
 )
@@ -162,6 +206,13 @@ PRICING_MENU = SheetSpec(
 # Карточки ингредиентов. Пишет pizza_bot_new.
 # ===========================================================================
 
+# Шапка занимает две строки с объединёнными ячейками: в первой групповые
+# названия («Пищевая и энергетическая ценность ингредиента»), во второй —
+# подзаголовки под ними. Для колонок вне групп вторая строка пуста, и
+# значащий заголовок остаётся в первой; читатель ищет снизу вверх.
+#
+# В этой таблице есть и другие листы — «Фритюрные продукты», «Топпинги»,
+# «Овощи», «Соусы», «Заявки», — но бот пишет только в «Лист1».
 INGREDIENT_CARDS = SheetSpec(
     spreadsheet="ingredient_cards",
     title="Лист1",
@@ -179,18 +230,46 @@ INGREDIENT_CARDS = SheetSpec(
         Column("I", "Жиры", "fat", _D, _SHARED),
         Column("J", "Углеводы", "carbs", _D, _SHARED),
         Column("K", "Ккал", "kcal", _D, _SHARED),
-        Column("L", "Срок годности в закрытой упаковке", "shelf_life_sealed", _T, _SHARED),
-        Column("M", "Срок после дефростации", "shelf_life_defrost", _T, _SHARED),
-        Column("N", "Срок после нарезки / фасовки", "shelf_life_after", _T, _SHARED),
-        Column("O", "Условия дефростации", "defrost_conditions", _T, _SHARED),
-        Column("P", "Ссылка на этикетку", "label_url", _T, _SHARED),
+        Column(
+            "L",
+            "Срок в закрытой упаковке",
+            "shelf_life_sealed",
+            _T,
+            _SHARED,
+            header="В закрытой упаковке и условиях хранения производителя. Для необработанных овощей - до проведения обработки и нарезки.",
+        ),
+        Column(
+            "M",
+            "Срок после дефростации",
+            "shelf_life_defrost",
+            _T,
+            _SHARED,
+            header="Срок годности после дефростации в закрытой упаковке производителя. Срок годности после дефростации в таре пиццерии, если упаковка производителя негерметична.",
+        ),
+        Column(
+            "N",
+            "Срок после нарезки / фасовки",
+            "shelf_life_after",
+            _T,
+            _SHARED,
+            header="Сроки годности после: - нарезки; - фасовки из упаковки производителя; - изменения температурного режима хранения.",
+        ),
+        Column(
+            "O",
+            "Условия дефростации",
+            "defrost_conditions",
+            _T,
+            _SHARED,
+            header="Условия и срок дефростации, если требуется разморозка",
+        ),
+        Column("P", "Ссылка на этикетку", "label_url", _T, _SHARED, header="Этикетка ссылкой"),
         # Q и R бот не трогает намеренно: их заполняют люди.
         Column("Q", "Декларация о соответствии", "declaration", _T, _HUMAN),
         Column("R", "Сертификат халяль", "halal_certificate", _T, _HUMAN),
-        Column("S", "Фото в упаковке", "package_url", _T, _SHARED),
-        Column("T", "Фото до обработки", "before_url", _T, _SHARED),
-        Column("U", "Фото после обработки", "after_url", _T, _SHARED),
-        Column("V", "Статус согласования", "approval_status", _T, _SHARED),
+        Column("S", "Фото в упаковке", "package_url", _T, _SHARED, header="В упаковке"),
+        Column("T", "Фото до обработки", "before_url", _T, _SHARED, header="До обработки"),
+        Column("U", "Фото после обработки", "after_url", _T, _SHARED, header="После обработки"),
+        Column("V", "Статус согласования", "approval_status", _T, _SHARED, header="Согласован"),
     ),
 )
 
@@ -222,7 +301,7 @@ COMPETITOR_CHANGES = SheetSpec(
         Column("C", "Вес", "weight", _T, _SHARED),
         Column("D", "Было", "old_price", _D, _SHARED),
         Column("E", "Стало", "new_price", _D, _SHARED),
-        Column("F", "Изменение руб", "delta_rub", _D, _SHARED),
+        Column("F", "Изменение, ₽", "delta_rub", _D, _SHARED, header="Изменение ₽"),
         Column("G", "Изменение %", "delta_percent", _P, _SHARED),
         Column("H", "Тип", "change_type", _T, _SHARED),
         Column("I", "Дата обнаружения", "detected_at", _T, _SHARED),

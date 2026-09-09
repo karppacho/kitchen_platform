@@ -24,7 +24,7 @@ IDS = {
 }
 
 # Шапка ING целиком — берётся из описания, чтобы тест не разъезжался с ним.
-ING_HEADER = [c.title for c in specs.INGREDIENTS.columns]
+ING_HEADER = [c.expected_header for c in specs.INGREDIENTS.columns]
 
 
 def _ing_row(**overrides: str) -> list[str]:
@@ -105,7 +105,7 @@ def test_skips_empty_rows(make_client) -> None:
 def test_pricing_data_starts_below_two_header_rows(make_client) -> None:
     """Строка 1 — подсказки коммерсам, строка 2 — шапка."""
     hint = ["", "⬇️ тут ставим цену ⬇️", "тут не трогать — считает бот"]
-    header = [c.title for c in specs.PRICING_NEW.columns]
+    header = [c.expected_header for c in specs.PRICING_NEW.columns]
     client = make_client(
         {"kitchen-id": {"Расчётка новинки": [hint, header, ["Ролл гриль", "280", "149,08"]]}}
     )
@@ -161,7 +161,7 @@ def test_empty_sheet_is_reported(make_client) -> None:
 # ---------------------------------------------------------------------------
 def test_falls_back_to_previous_sheet_name(make_client) -> None:
     """«Способы приготовления» когда-то назывался «Впитывание масла»."""
-    header = [c.title for c in specs.COOKING_METHODS.columns]
+    header = [c.expected_header for c in specs.COOKING_METHODS.columns]
     client = make_client({"kitchen-id": {"Впитывание масла": [header, ["1", "фри", "жарка"]]}})
 
     data = _reader(client).read(specs.COOKING_METHODS)
@@ -178,7 +178,7 @@ def test_missing_sheet_names_what_was_tried(make_client) -> None:
 
 def test_explicit_title_overrides_spec(make_client) -> None:
     """Листы дегустаций называются датой."""
-    header = [c.title for c in specs.TASTING_RATINGS.columns]
+    header = [c.expected_header for c in specs.TASTING_RATINGS.columns]
     client = make_client(
         {"tastings-id": {"05.05.2026": [header, ["1", "Иван", "Соус — Heinz", "8", "9"]]}}
     )
@@ -227,3 +227,38 @@ def test_content_hash_tracks_values_not_formatting(make_client) -> None:
 
     assert a == b
     assert a != c, "хвостовой пробел — тоже правка, и синхронизация обязана её увидеть"
+
+
+def test_merged_two_row_header_is_understood(make_client) -> None:
+    """Шапка карточек занимает две строки с объединёнными ячейками.
+
+    В первой строке групповые названия («Пищевая и энергетическая ценность
+    ингредиента»), во второй — подзаголовки под ними («белки», «жиры»). Для
+    колонок вне групп вторая строка пуста, и значащий заголовок остаётся в
+    первой. Читатель ищет снизу вверх; иначе половина колонок выглядела бы
+    как «заголовок пропал», и настоящий переезд таблицы утонул бы в шуме.
+    """
+    spec = specs.INGREDIENT_CARDS
+    group_row: list[str] = []
+    sub_row: list[str] = []
+    for column in spec.columns:
+        # H..K и S..U — под групповыми названиями: подзаголовок во второй
+        # строке, в первой стоит название группы.
+        if column.letter in {"H", "I", "J", "K", "S", "T", "U"}:
+            group_row.append("Пищевая ценность" if column.letter in {"H", "I", "J", "K"} else "Вид")
+            sub_row.append(column.expected_header)
+        else:
+            group_row.append(column.expected_header)
+            sub_row.append("")
+
+    client = make_client({"cards-id": {"Лист1": [group_row, sub_row, _card_row()]}})
+    data = _reader(client).read(spec)
+
+    assert data.ok, f"расхождения: {data.header_issues}"
+    assert len(data) == 1
+
+
+def _card_row() -> list[str]:
+    row = dict.fromkeys((c.field for c in specs.INGREDIENT_CARDS.columns), "")
+    row["name"] = "Томаты"
+    return [row[c.field] for c in specs.INGREDIENT_CARDS.columns]

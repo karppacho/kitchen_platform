@@ -206,18 +206,34 @@ def _check_header(spec: SheetSpec, raw: Cells) -> tuple[str, ...]:
     if not raw:
         return ("лист пуст",)
 
-    header_index = spec.header_rows - 1
-    if header_index >= len(raw):
+    if spec.header_rows > len(raw):
         return (f"нет строки заголовков (ожидалась строка {spec.header_rows})",)
 
     issues: list[str] = []
     for column in spec.columns:
-        actual = _cell(raw, header_index, column.index)
-        if _normalise(actual) != _normalise(column.title):
+        actual = _header_text(raw, spec.header_rows, column.index)
+        expected = column.expected_header
+        if _normalise(actual) != _normalise(expected):
             issues.append(
-                f"колонка {column.letter}: ожидался заголовок «{column.title}», в листе «{actual}»"
+                f"колонка {column.letter}: ожидался заголовок «{expected}», в листе «{actual}»"
             )
     return tuple(issues)
+
+
+def _header_text(raw: Cells, header_rows: int, column_index: int) -> str:
+    """Заголовок колонки при многострочной шапке.
+
+    Ищем снизу вверх. У листа карточек ингредиентов шапка занимает две
+    строки с объединёнными ячейками: в первой групповые названия
+    («Пищевая и энергетическая ценность ингредиента»), во второй —
+    подзаголовки под ними («белки», «жиры»). Для колонок вне групп вторая
+    строка пуста, и значащий заголовок остаётся в первой.
+    """
+    for row_index in range(header_rows - 1, -1, -1):
+        value = _cell(raw, row_index, column_index).strip()
+        if value:
+            return value
+    return ""
 
 
 def _normalise(text: str) -> str:
