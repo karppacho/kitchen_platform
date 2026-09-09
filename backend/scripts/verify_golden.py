@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import sys
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -31,8 +32,15 @@ from kitchen.domain.costs import calculate
 GOLDEN = Path(__file__).resolve().parents[1] / "tests" / "golden" / "dishes_uc.json"
 RULE = "─" * 78
 
-# Поля результата, сравниваемые как строки. Строкой, а не числом, потому
-# что «84.66» и «84.660» — разные ответы: второй означает другую точность.
+# Поля результата. Сравниваются как Decimal — по ВЕЛИЧИНЕ, а не по записи.
+#
+# Первая версия сверяла строки, и все 130 блюд «разошлись» на записи вида
+# «369.00 ≠ 369»: Postgres возвращает Numeric(12,2) с двумя знаками, а бот
+# брал число таким, как разобрал из листа. Величина при этом одна и та же.
+#
+# Это НЕ послабление. Decimal сравнивается точно, без допуска:
+# Decimal("84.66") != Decimal("84.67"). Убрана сверка начертания, а не
+# строгость до копейки.
 FIELDS = (
     "price_menu",
     "uc_rub",
@@ -65,6 +73,16 @@ def text(value: object) -> str | None:
     return None if value is None else str(value)
 
 
+def same_number(ours: object, theirs: object) -> bool:
+    """Равны ли величины. Пусто равно пусто, число равно числу."""
+    if ours is None or theirs is None:
+        return ours is None and theirs is None
+    try:
+        return Decimal(str(ours)) == Decimal(str(theirs))
+    except (InvalidOperation, ValueError):
+        return str(ours) == str(theirs)
+
+
 def compare_components(ours: object, theirs: list[dict[str, object]]) -> list[str]:
     """Построчный разбор состава — чтобы расхождение было локализовано."""
     lines: list[str] = []
@@ -82,11 +100,11 @@ def compare_components(ours: object, theirs: list[dict[str, object]]) -> list[st
             continue
         if mine.name != gold.get("name"):
             lines.append(f"      [{index}] имя: «{mine.name}» ≠ «{gold.get('name')}»")
-        if text(mine.cost_rub) != gold.get("cost_rub"):
+        if not same_number(mine.cost_rub, gold.get("cost_rub")):
             lines.append(
                 f"      [{index}] «{mine.name}»: стоимость {mine.cost_rub} ≠ {gold.get('cost_rub')}"
             )
-        if text(mine.gross_weight_g) != gold.get("weight_brutto_g"):
+        if not same_number(mine.gross_weight_g, gold.get("weight_brutto_g")):
             lines.append(
                 f"      [{index}] «{mine.name}»: брутто {mine.gross_weight_g} "
                 f"≠ {gold.get('weight_brutto_g')}"
@@ -127,7 +145,7 @@ def main() -> int:
         diffs: list[str] = []
 
         for field in FIELDS:
-            if text(getattr(mine, OURS[field])) != gold[field]:
+            if not same_number(getattr(mine, OURS[field]), gold[field]):
                 diffs.append(f"      {field}: {getattr(mine, OURS[field])} ≠ {gold[field]}")
 
         if list(mine.warnings) != list(gold["warnings"]):
