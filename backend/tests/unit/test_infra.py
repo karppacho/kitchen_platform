@@ -5,7 +5,7 @@
 
 Самый вероятный способ пострадать здесь — не изощрённая атака, а забытое
 двоеточие: `"5432:5432"` вместо `"127.0.0.1:5432:5432"`. У self-hosted
-Supabase Postgres и Kong по умолчанию публикуются на все интерфейсы, и на
+Supabase пулер и шлюз по умолчанию публикуются на все интерфейсы, и на
 машине с белым адресом их начинают сканировать в течение часов.
 
 Поэтому правило проверяется тестом, а не внимательностью при код-ревью.
@@ -29,8 +29,27 @@ SUPABASE_OVERRIDE = REPO / "infra" / "supabase" / "docker-compose.override.yml"
 PUBLIC_ALLOWED: dict[str, set[str]] = {"nginx": {"80:80", "443:443"}}
 
 
+class _ComposeLoader(yaml.SafeLoader):
+    """Понимает теги Compose (`!override`, `!reset`).
+
+    Обычный SafeLoader на них падает, а без них оверлей не написать: без
+    `!override` списки портов дописываются вместо замены.
+    """
+
+
+def _passthrough(loader: yaml.SafeLoader, node: yaml.Node) -> Any:
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    return loader.construct_scalar(node)
+
+
+_ComposeLoader.add_multi_constructor("!", lambda loader, suffix, node: _passthrough(loader, node))
+
+
 def _load(path: Path) -> dict[str, Any]:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    return yaml.load(path.read_text(encoding="utf-8"), Loader=_ComposeLoader)
 
 
 def _published(service: dict[str, Any]) -> list[str]:
@@ -51,7 +70,7 @@ def _all_yaml_files() -> list[Path]:
 @pytest.mark.parametrize("path", _all_yaml_files(), ids=lambda p: str(p.name))
 def test_yaml_files_parse(path: Path) -> None:
     """Синтаксическая ошибка в конфиге обнаруживается здесь, а не на сервере."""
-    yaml.safe_load(path.read_text(encoding="utf-8"))
+    yaml.load(path.read_text(encoding="utf-8"), Loader=_ComposeLoader)
 
 
 def test_only_nginx_is_published_outside() -> None:
@@ -68,27 +87,48 @@ def test_only_nginx_is_published_outside() -> None:
 
 
 def test_supabase_ports_are_local_only() -> None:
-    """Postgres, пулер и Kong не должны быть видны из интернета."""
+    """Пулер и шлюз не должны быть видны из интернета.
+
+    Имена сервисов сверены с upstream 09.09.2026: шлюз называется `api-gw`
+    и работает на Envoy, Kong вынесен в отдельный необязательный файл.
+    `db` портов не публикует вовсе — доступ к Postgres идёт через пулер.
+    """
     override = _load(SUPABASE_OVERRIDE)["services"]
-    for name in ("db", "supavisor", "kong"):
+    for name in ("supavisor", "api-gw"):
         ports = _published(override[name])
         assert ports, f"«{name}»: оверлей обязан переопределить порты, иначе останутся базовые"
         for port in ports:
             assert port.startswith("127.0.0.1:"), f"«{name}»: {port} смотрит наружу"
 
 
-def test_studio_publishes_nothing() -> None:
-    """За Studio — полный доступ к базе, а защита одна пара логин/пароль.
+def test_port_overrides_replace_rather_than_append() -> None:
+    """Тег !override обязателен, и это не стилистика.
 
-    Доступ только через SSH-туннель.
+    Списки портов при слиянии compose ДОПИСЫВАЮТСЯ. Без тега рядом с нашей
+    привязкой к 127.0.0.1 осталась бы исходная 0.0.0.0 — то есть Postgres,
+    открытый в интернет, при внешне правильном на вид оверлее.
     """
-    assert _load(SUPABASE_OVERRIDE)["services"]["studio"].get("ports") == []
+    port_lines = [
+        line.strip()
+        for line in SUPABASE_OVERRIDE.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("ports:")
+    ]
+    assert port_lines, "в оверлее вообще нет переопределения портов"
+    for line in port_lines:
+        assert line == "ports: !override", (
+            f"«{line}» — без тега !override привязка допишется к исходной 0.0.0.0, а не заменит её"
+        )
+
+
+def test_db_is_not_published() -> None:
+    """Прямой доступ к Postgres наружу не публикуется совсем."""
+    assert "db" not in _load(SUPABASE_OVERRIDE)["services"]
 
 
 def test_unused_supabase_services_are_disabled() -> None:
     """То, чем не пользуемся, не поднимаем: это память, которой в обрез."""
     override = _load(SUPABASE_OVERRIDE)["services"]
-    for name in ("rest", "realtime", "storage", "imgproxy", "functions", "analytics", "vector"):
+    for name in ("rest", "realtime", "storage", "imgproxy", "functions"):
         assert override[name].get("profiles") == ["unused"], (
             f"«{name}» должен быть выключен профилем. PostgREST отдельно: "
             f"решение не использовать его принято в docs/adr/0002."
