@@ -69,6 +69,21 @@ OURS = {
 }
 
 
+# Расхождения, признанные и объяснённые. Ключ — блюдо, значение — почему.
+#
+# Это храповик, а не список исключений «чтобы прошло»: он не должен расти.
+# Появилось новое расхождение — разбираемся, а не дописываем сюда строку.
+KNOWN_DIVERGENCES = {
+    "B129": (
+        "строка ТТК 697 не ссылается ни на ингредиент, ни на упаковку. "
+        "Бот держал такую строку и предупреждал при каждом расчёте; наш "
+        "импорт её отвергает — ограничение базы требует ровно одну ссылку. "
+        "Сообщение не потерялось, а переехало в отчёт импорта, где оно "
+        "точнее: там назван номер строки в листе. Чинится правкой листа."
+    ),
+}
+
+
 def text(value: object) -> str | None:
     return None if value is None else str(value)
 
@@ -139,6 +154,7 @@ def main() -> int:
         problems.append(f"  ✗ {key} «{ours[key].name}»: есть у нас, нет в эталоне")
 
     identical = 0
+    known: list[str] = []
     for key in sorted(set(expected) & set(ours)):
         gold = expected[key]
         mine = ours[key]
@@ -153,15 +169,31 @@ def main() -> int:
             for line in set(mine.warnings) ^ set(gold["warnings"]):
                 diffs.append(f"        · {line[:100]}")
 
-        if diffs:
+        if not diffs:
+            identical += 1
+        elif key in KNOWN_DIVERGENCES:
+            known.append(f"  ! {key} «{mine.name}»: {KNOWN_DIVERGENCES[key]}")
+        else:
             problems.append(f"  ✗ {key} «{mine.name}»")
             problems.extend(diffs)
             problems.extend(compare_components(mine.components, gold["ingredients"]))
-        else:
-            identical += 1
 
     print()
     print(f"  СОВПАЛО ПОЛНОСТЬЮ: {identical} из {len(expected)}")
+
+    if known:
+        print()
+        print("ПРИЗНАННЫЕ РАСХОЖДЕНИЯ")
+        print(RULE)
+        for line in known:
+            print(line)
+
+    unexpected_known = sorted(set(KNOWN_DIVERGENCES) - {line.split()[1] for line in known})
+    if unexpected_known:
+        print()
+        print("  Эти блюда числятся в признанных расхождениях, но сошлись:")
+        for key in unexpected_known:
+            print(f"    · {key} — строку из KNOWN_DIVERGENCES пора убрать")
 
     if problems:
         print()
@@ -175,7 +207,11 @@ def main() -> int:
         return 1
 
     print()
-    print("  Расхождений нет. Перенос калькулятора принят.")
+    if known:
+        print(f"  Необъяснённых расхождений нет ({len(known)} признанных).")
+    else:
+        print("  Расхождений нет.")
+    print("  Перенос калькулятора принят.")
     print()
     return 0
 
