@@ -80,6 +80,10 @@ jobs:
           - 5432:5432
     env:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/kitchen_test
+      # Alembic ходит прямым соединением: миграции держат одну сессию от
+      # начала до конца, и transaction-режим пулера им не подходит. В CI
+      # пулера нет, но переменная должна называться так же, как в бою.
+      DATABASE_URL_DIRECT: postgresql+psycopg://postgres:postgres@localhost:5432/kitchen_test
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4

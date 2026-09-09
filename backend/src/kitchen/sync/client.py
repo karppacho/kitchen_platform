@@ -87,17 +87,30 @@ class GspreadClient:
         from google.auth.transport.requests import AuthorizedSession
         from google.oauth2.service_account import Credentials
 
-        credentials = Credentials.from_service_account_file(
+        # google-auth и gspread не типизированы: под strict каждый их вызов
+        # выглядит как обращение к нетипизированной функции. Это граница с
+        # чужой библиотекой, а не наш долг.
+        credentials = Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
             str(self._credentials_path), scopes=list(self.SCOPES)
         )
 
-        # Таймауты обязательны. У google-auth их по умолчанию нет вообще:
-        # зависший запрос вешает воркер молча и навсегда. В kitchen_bot эти
-        # числа появились после реального зависания.
-        session = AuthorizedSession(credentials, refresh_timeout=self._refresh_timeout)
-        session.timeout = self._timeout
+        # Таймауты обязательны: по умолчанию их нет вообще, и зависший запрос
+        # вешает воркер молча и навсегда. Ставятся они в двух РАЗНЫХ местах,
+        # и это не дублирование:
+        #
+        #   refresh_timeout у сессии  — на обновление токена;
+        #   client.set_timeout(...)   — на сами запросы к Sheets.
+        #
+        # Присвоить `session.timeout` нельзя: AuthorizedSession — наследник
+        # requests.Session, у которого такого атрибута нет, и присваивание
+        # молча ничего не делает. Поймано mypy в полном окружении.
+        session = AuthorizedSession(  # type: ignore[no-untyped-call]
+            credentials, refresh_timeout=self._refresh_timeout
+        )
 
-        self._gc = gspread.Client(auth=credentials, session=session)
+        client = gspread.Client(auth=credentials, session=session)
+        client.set_timeout(self._timeout)
+        self._gc = client
         return self._gc
 
     def open(self, spreadsheet_id: str) -> Spreadsheet:
