@@ -26,6 +26,10 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from kitchen.config import load_settings
+
+# Импорт ради побочного эффекта: модели регистрируются в Base.metadata.
+# Без него автогенерация выпустит ПУСТУЮ ревизию — молча и с видом успеха.
+from kitchen.db import models as _models  # noqa: F401
 from kitchen.db.base import Base
 
 config = context.config

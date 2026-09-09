@@ -13,6 +13,7 @@
 
 ## Документация
 
+- [docs/ROADMAP.md](docs/ROADMAP.md) — что сделано, что дальше, чем доказано
 - [CLAUDE.md](CLAUDE.md) — правила проекта, архитектура, журнал разборов
 - [CONTRIBUTING.md](CONTRIBUTING.md) — установка, проверки, процесс
 - [docs/adr/](docs/adr/) — почему принято так, а не иначе
