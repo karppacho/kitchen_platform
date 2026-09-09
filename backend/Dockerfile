@@ -51,6 +51,9 @@ COPY --chown=kitchen:kitchen pyproject.toml uv.lock ./
 COPY --chown=kitchen:kitchen src ./src
 COPY --chown=kitchen:kitchen alembic ./alembic
 COPY --chown=kitchen:kitchen alembic.ini ./alembic.ini
+# Эксплуатационные скрипты (отчёт по таблицам, сверка) едут в образ: их
+# запускают на сервере, а значит они должны быть там же, где зависимости.
+COPY --chown=kitchen:kitchen scripts ./scripts
 
 USER kitchen
 
