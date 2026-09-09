@@ -1,0 +1,166 @@
+"""Сверить новый расчёт себестоимости с эталоном старого бота.
+
+Приёмка переноса калькулятора: 130 блюд обязаны совпасть **до копейки**.
+Не «примерно», не «в пределах округления» — точное равенство.
+
+Сравниваются и предупреждения: шеф читает именно их. Расхождение в тексте
+означает, что он получит другое объяснение тех же цифр.
+
+Запуск (нужна база с импортированными данными)::
+
+    docker compose -f infra/docker-compose.yml exec api python scripts/verify_golden.py
+
+Расхождения печатаются с указанием блюда, поля и обеих величин, а при
+разнице в себестоимости — с построчным разбором состава: без него понятно
+только «не сошлось», но не «где».
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from kitchen.config import load_settings
+from kitchen.db.recipes import load_recipes
+from kitchen.db.session import make_session_factory
+from kitchen.domain.costs import calculate
+
+GOLDEN = Path(__file__).resolve().parents[1] / "tests" / "golden" / "dishes_uc.json"
+RULE = "─" * 78
+
+# Поля результата, сравниваемые как строки. Строкой, а не числом, потому
+# что «84.66» и «84.660» — разные ответы: второй означает другую точность.
+FIELDS = (
+    "price_menu",
+    "uc_rub",
+    "uc_percent",
+    "margin_rub",
+    "margin_percent",
+    "output_grams",
+    "proteins_g",
+    "fats_g",
+    "carbs_g",
+    "kcal",
+)
+
+# Как поле называется у нас и как оно называлось у бота.
+OURS = {
+    "price_menu": "price_menu",
+    "uc_rub": "uc_rub",
+    "uc_percent": "uc_percent",
+    "margin_rub": "margin_rub",
+    "margin_percent": "margin_percent",
+    "output_grams": "output_grams",
+    "proteins_g": "protein_g",
+    "fats_g": "fat_g",
+    "carbs_g": "carbs_g",
+    "kcal": "kcal",
+}
+
+
+def text(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def compare_components(ours: object, theirs: list[dict[str, object]]) -> list[str]:
+    """Построчный разбор состава — чтобы расхождение было локализовано."""
+    lines: list[str] = []
+    our_items = list(ours)  # type: ignore[call-overload]
+    if len(our_items) != len(theirs):
+        lines.append(f"      строк состава: у нас {len(our_items)}, в эталоне {len(theirs)}")
+    for index in range(max(len(our_items), len(theirs))):
+        mine = our_items[index] if index < len(our_items) else None
+        gold = theirs[index] if index < len(theirs) else None
+        if mine is None:
+            lines.append(f"      [{index}] лишняя в эталоне: {gold.get('name') if gold else ''}")
+            continue
+        if gold is None:
+            lines.append(f"      [{index}] лишняя у нас: {mine.name}")
+            continue
+        if mine.name != gold.get("name"):
+            lines.append(f"      [{index}] имя: «{mine.name}» ≠ «{gold.get('name')}»")
+        if text(mine.cost_rub) != gold.get("cost_rub"):
+            lines.append(
+                f"      [{index}] «{mine.name}»: стоимость {mine.cost_rub} ≠ {gold.get('cost_rub')}"
+            )
+        if text(mine.gross_weight_g) != gold.get("weight_brutto_g"):
+            lines.append(
+                f"      [{index}] «{mine.name}»: брутто {mine.gross_weight_g} "
+                f"≠ {gold.get('weight_brutto_g')}"
+            )
+    return lines
+
+
+def main() -> int:
+    golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    expected = golden["dishes"]
+
+    settings = load_settings()
+    sessions = make_session_factory(settings.database_url)
+    with sessions() as session:
+        recipes = load_recipes(session)
+
+    print(RULE)
+    print("СВЕРКА С ЭТАЛОНОМ СТАРОГО БОТА")
+    print(RULE)
+    print(f"  эталон: {len(expected)} блюд")
+    print(f"  у нас:  {len(recipes)} блюд")
+
+    ours = {recipe.key: calculate(recipe) for recipe in recipes}
+
+    missing = sorted(set(expected) - set(ours))
+    extra = sorted(set(ours) - set(expected))
+    problems: list[str] = []
+
+    for key in missing:
+        problems.append(f"  ✗ {key} «{expected[key]['name']}»: есть в эталоне, нет у нас")
+    for key in extra:
+        problems.append(f"  ✗ {key} «{ours[key].name}»: есть у нас, нет в эталоне")
+
+    identical = 0
+    for key in sorted(set(expected) & set(ours)):
+        gold = expected[key]
+        mine = ours[key]
+        diffs: list[str] = []
+
+        for field in FIELDS:
+            if text(getattr(mine, OURS[field])) != gold[field]:
+                diffs.append(f"      {field}: {getattr(mine, OURS[field])} ≠ {gold[field]}")
+
+        if list(mine.warnings) != list(gold["warnings"]):
+            diffs.append(f"      предупреждений: {len(mine.warnings)} ≠ {len(gold['warnings'])}")
+            for line in set(mine.warnings) ^ set(gold["warnings"]):
+                diffs.append(f"        · {line[:100]}")
+
+        if diffs:
+            problems.append(f"  ✗ {key} «{mine.name}»")
+            problems.extend(diffs)
+            problems.extend(compare_components(mine.components, gold["ingredients"]))
+        else:
+            identical += 1
+
+    print()
+    print(f"  СОВПАЛО ПОЛНОСТЬЮ: {identical} из {len(expected)}")
+
+    if problems:
+        print()
+        print(f"РАСХОЖДЕНИЯ ({len([p for p in problems if p.startswith('  ✗')])} блюд)")
+        print(RULE)
+        for line in problems[:200]:
+            print(line)
+        if len(problems) > 200:
+            print(f"  … и ещё {len(problems) - 200} строк")
+        print()
+        return 1
+
+    print()
+    print("  Расхождений нет. Перенос калькулятора принят.")
+    print()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
