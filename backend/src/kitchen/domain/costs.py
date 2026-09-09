@@ -48,6 +48,30 @@ COVERAGE_COMPLETE = Decimal("0.999")
 COVERAGE_POOR = Decimal("0.5")
 
 
+def money_text(value: Decimal) -> str:
+    """Число для ЧЕЛОВЕКА: без незначащих нулей в хвосте.
+
+    Цена меню в предупреждениях печатается так, как её написал шеф: «99 ₽»,
+    а не «99.00 ₽». В листе она и записана без копеек, но база хранит
+    Numeric(12,2) и возвращает их всегда — потерянную разницу восстанавливаем
+    здесь.
+
+    Себестоимость через это НЕ проходит: она получена round_money, и два
+    знака у неё значащие.
+
+    `normalize()` в одиночку не годится: для Decimal("100.00") он даёт
+    1E+2. Отсюда возврат к обычной записи для целых.
+    """
+    normalized = value.normalize()
+    # У NaN и бесконечности exponent — буква, а не число. В расчёт такое
+    # попасть не должно, но падать на форматировании предупреждения было бы
+    # особенно обидно: сообщение как раз о том, что с данными непорядок.
+    exponent = normalized.as_tuple().exponent
+    if isinstance(exponent, int) and exponent > 0:
+        normalized = normalized.quantize(Decimal(1))
+    return str(normalized)
+
+
 def round_money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
@@ -157,7 +181,7 @@ def calculate(recipe: Recipe) -> DishCost:
         margin_percent = round_percent(margin / price * _HUNDRED)
         if uc > price:
             state.warnings.append(
-                f"Себестоимость ({uc} ₽) выше цены меню ({price} ₽) — "
+                f"Себестоимость ({uc} ₽) выше цены меню ({money_text(price)} ₽) — "
                 f"маржа отрицательная. Проверь единицы измерения и цены "
                 f"ингредиентов, обычно это ошибка в данных"
             )
@@ -228,7 +252,9 @@ class _Accumulator:
     def add_main(self, component: Component) -> None:
         ingredient = component.ingredient
         if ingredient is None:
-            self.warnings.append(f"Строка ТТК без id_ингредиента (вес {component.net_weight_g} г)")
+            self.warnings.append(
+                f"Строка ТТК без id_ингредиента (вес {money_text(component.net_weight_g)} г)"
+            )
             return
 
         cost = self._main_cost(ingredient, component.net_weight_g)
