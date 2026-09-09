@@ -136,7 +136,7 @@ ignore_missing_imports = true
 # ===========================================================================
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "scripts"]
 addopts = "-q --strict-markers -m 'not live and not e2e and not integration'"
 markers = [
     "live: ходит в настоящие Google Sheets и требует кредов (запуск: make test-live)",
