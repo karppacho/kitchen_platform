@@ -30,8 +30,18 @@ RUN uv sync --frozen --no-dev --no-install-project
 FROM base AS runtime
 
 # Не root. Если процесс скомпрометируют, у него не будет прав на систему.
-RUN groupadd --system kitchen \
-    && useradd --system --gid kitchen --create-home --home-dir /home/kitchen kitchen
+#
+# uid и gid закреплены числом намеренно. Ключ сервисного аккаунта лежит на
+# хосте и монтируется внутрь; при плавающем uid (`--system` выдаёт из
+# системного диапазона, у нас вышел 999) контейнер не может его прочитать.
+# На хосте нужно отдать группе и файл, и каталог — без права прохода через
+# каталог доступ к файлу не поможет:
+#     chown artem:10001 /etc/kitchen-platform /etc/kitchen-platform/service_account.json
+#     chmod 750 /etc/kitchen-platform
+#     chmod 640 /etc/kitchen-platform/service_account.json
+# так владельцем остаётся человек, а читать может процесс.
+RUN groupadd --gid 10001 kitchen \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/kitchen kitchen
 
 COPY --from=deps /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
