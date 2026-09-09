@@ -27,7 +27,7 @@ from kitchen.sync.client import SheetNotFoundError
 from kitchen.sync.ownership import Kind
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from kitchen.sync.client import Cells, SheetsClient
     from kitchen.sync.ownership import SheetSpec
@@ -170,6 +170,83 @@ class SheetsReader:
             )
         )
 
+    def read_many(self, specs: Sequence[SheetSpec]) -> dict[str, SheetData | str]:
+        """Прочитать пачку листов, тратя минимум запросов.
+
+        На каждую таблицу уходит два обращения — список листов и один
+        `values.batchGet` на все нужные диапазоны, — вместо одного запроса
+        на лист. Квота Google 60 запросов в минуту на пользователя, и
+        полный отчёт по-старому её выбирал за два прогона.
+
+        Отказ по одному листу не рушит остальные: вместо данных в словарь
+        кладётся строка с объяснением. Одна переименованная вкладка не
+        должна лишать нас картины целиком.
+        """
+        by_book: dict[str, list[SheetSpec]] = {}
+        for spec in specs:
+            by_book.setdefault(spec.spreadsheet, []).append(spec)
+
+        result: dict[str, SheetData | str] = {}
+        for book_key, book_specs in by_book.items():
+            self._read_book(book_key, book_specs, result)
+        return result
+
+    def _read_book(
+        self,
+        book_key: str,
+        specs: Sequence[SheetSpec],
+        result: dict[str, SheetData | str],
+    ) -> None:
+        spreadsheet_id = self._ids.get(book_key)
+        if not spreadsheet_id:
+            for spec in specs:
+                result[_label(spec)] = (
+                    f"не задан идентификатор таблицы «{book_key}» "
+                    f"(переменные SHEETS_ID_* в окружении)"
+                )
+            return
+
+        try:
+            book = self._client.open(spreadsheet_id)
+            existing = {sheet.title for sheet in book.worksheets()}
+        except Exception as error:
+            for spec in specs:
+                result[_label(spec)] = f"не открылась таблица: {error}"
+            return
+
+        resolved: list[tuple[SheetSpec, str]] = []
+        for spec in specs:
+            title = next(
+                (name for name in (spec.title, *spec.fallback_titles) if name in existing),
+                None,
+            )
+            if title is None:
+                result[_label(spec)] = f"листа «{spec.title}» нет в таблице"
+                continue
+            resolved.append((spec, title))
+
+        if not resolved:
+            return
+
+        try:
+            payload = book.values_batch_get([_quote_range(title) for _, title in resolved])
+        except Exception as error:
+            for spec, _ in resolved:
+                result[_label(spec)] = f"не прочитан: {error}"
+            return
+
+        # Ответ Sheets API приходит нетипизированным, и сузить его надо
+        # явно: strict в этом пакете запрещает Any, а доверять форме чужого
+        # JSON без проверки — способ получить падение на пустом листе.
+        blocks = payload.get("valueRanges")
+        ranges: list[object] = blocks if isinstance(blocks, list) else []
+
+        for index, (spec, title) in enumerate(resolved):
+            if index >= len(ranges):
+                result[_label(spec)] = "ответ Google короче запроса"
+                continue
+            result[_label(spec)] = self._parse(spec, title, _values_of(ranges[index]))
+
     def _parse(self, spec: SheetSpec, title: str, raw: Cells) -> SheetData:
         issues = _check_header(spec, raw)
 
@@ -250,3 +327,33 @@ def _looks_missing(error: Exception) -> bool:
         base.__name__ for base in type(error).__mro__
     }
     return "WorksheetNotFound" in names or isinstance(error, SheetNotFoundError | KeyError)
+
+
+def _values_of(block: object) -> Cells:
+    """Достать матрицу значений из одного valueRange.
+
+    Пустой лист приезжает без ключа `values` вовсе — это не отказ, а
+    нормальный ответ, и превращается он в пустую матрицу.
+    """
+    if not isinstance(block, dict):
+        return []
+    values = block.get("values")
+    if not isinstance(values, list):
+        return []
+    return [[str(cell) for cell in row] if isinstance(row, list) else [] for row in values]
+
+
+def _label(spec: SheetSpec) -> str:
+    """Ключ листа в результатах: «таблица/лист»."""
+    return f"{spec.spreadsheet}/{spec.title}"
+
+
+def _quote_range(title: str) -> str:
+    """Имя листа как диапазон для batchGet.
+
+    Кавычки обязательны: имена вроде «Расчётка меню» и «История изменений»
+    содержат пробелы, а без кавычек Sheets API разбирает их как ошибку
+    синтаксиса диапазона. Одинарная кавычка внутри имени удваивается.
+    """
+    escaped = title.replace("'", "''")
+    return f"'{escaped}'"

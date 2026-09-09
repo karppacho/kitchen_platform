@@ -25,6 +25,11 @@ Cells = list[list[str]]
 class Worksheet(Protocol):
     """Лист таблицы."""
 
+    @property
+    def title(self) -> str:
+        """Имя листа, как его видит человек."""
+        ...
+
     def get_all_values(self) -> Cells:
         """Все значения листа. Строки бывают рваными: хвостовые пустые
         ячейки gspread не возвращает, и читатель обязан это учитывать."""
@@ -39,6 +44,19 @@ class Spreadsheet(Protocol):
 
         Отсутствующий лист — исключение; читатель ловит его и пробует
         прежние имена из ``SheetSpec.fallback_titles``.
+        """
+        ...
+
+    def worksheets(self) -> list[Worksheet]:
+        """Все листы таблицы. Один запрос вместо попытки открыть каждый."""
+        ...
+
+    def values_batch_get(self, ranges: list[str]) -> dict[str, object]:
+        """Несколько диапазонов ОДНИМ запросом.
+
+        Ради этого метода всё и затевалось: квота Google — 60 запросов в
+        минуту на пользователя, и чтение по листу за раз её выбирает.
+        Возвращает ответ Sheets API как есть: ``{"valueRanges": [...]}``.
         """
         ...
 
@@ -71,6 +89,7 @@ class GspreadClient:
         self._timeout = timeout
         self._refresh_timeout = refresh_timeout
         self._gc: object | None = None
+        self._books: dict[str, Spreadsheet] = {}
 
     # Достаточно для чтения и записи листов; drive нужен, чтобы открыть
     # таблицу по ключу. Более широких прав не просим.
@@ -114,5 +133,15 @@ class GspreadClient:
         return self._gc
 
     def open(self, spreadsheet_id: str) -> Spreadsheet:
-        client = self._client()
-        return client.open_by_key(spreadsheet_id)  # type: ignore[attr-defined, no-any-return]
+        """Таблица по ключу. Результат кешируется.
+
+        `open_by_key` — это сетевой запрос, а не разыменование ссылки.
+        Открывать таблицу заново перед чтением каждого листа значит удвоить
+        расход квоты на ровном месте.
+        """
+        cached = self._books.get(spreadsheet_id)
+        if cached is not None:
+            return cached
+        book: Spreadsheet = self._client().open_by_key(spreadsheet_id)  # type: ignore[attr-defined]
+        self._books[spreadsheet_id] = book
+        return book

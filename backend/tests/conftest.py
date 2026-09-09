@@ -43,8 +43,9 @@ class FakeWorksheet:
     или, хуже, читает не ту колонку.
     """
 
-    def __init__(self, values: Cells) -> None:
+    def __init__(self, values: Cells, title: str = "") -> None:
         self._values = [list(row) for row in values]
+        self.title = title
         self.reads = 0
 
     def get_all_values(self) -> Cells:
@@ -55,12 +56,39 @@ class FakeWorksheet:
 class FakeSpreadsheet:
     def __init__(self, sheets: dict[str, FakeWorksheet]) -> None:
         self._sheets = sheets
+        # Счётчики запросов: пакетное чтение затевалось ради экономии квоты,
+        # и проверять эту экономию надо числом, а не на слово.
+        self.requests = 0
 
     def worksheet(self, title: str) -> FakeWorksheet:
+        self.requests += 1
         try:
             return self._sheets[title]
         except KeyError:
             raise WorksheetNotFound(title) from None
+
+    def worksheets(self) -> list[FakeWorksheet]:
+        self.requests += 1
+        return list(self._sheets.values())
+
+    def values_batch_get(self, ranges: list[str]) -> dict[str, object]:
+        """Дублёр `values.batchGet`.
+
+        Воспроизводит две особенности настоящего ответа: диапазоны
+        приходят В ТОМ ЖЕ ПОРЯДКЕ, что и запрос, а у пустого листа ключа
+        `values` нет вовсе.
+        """
+        self.requests += 1
+        blocks: list[dict[str, object]] = []
+        for item in ranges:
+            title = item.strip("'").replace("''", "'")
+            sheet = self._sheets.get(title)
+            rows = [_trim(row) for row in sheet._values] if sheet else []
+            block: dict[str, object] = {"range": item}
+            if rows:
+                block["values"] = rows
+            blocks.append(block)
+        return {"valueRanges": blocks}
 
 
 class FakeSheetsClient:
@@ -105,7 +133,7 @@ def make_client() -> object:
         return FakeSheetsClient(
             {
                 key: FakeSpreadsheet(
-                    {title: FakeWorksheet(cells) for title, cells in sheets.items()}
+                    {title: FakeWorksheet(cells, title) for title, cells in sheets.items()}
                 )
                 for key, sheets in spreadsheets.items()
             }

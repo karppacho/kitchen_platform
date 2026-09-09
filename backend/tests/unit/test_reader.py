@@ -262,3 +262,79 @@ def _card_row() -> list[str]:
     row = dict.fromkeys((c.field for c in specs.INGREDIENT_CARDS.columns), "")
     row["name"] = "Томаты"
     return [row[c.field] for c in specs.INGREDIENT_CARDS.columns]
+
+
+# ---------------------------------------------------------------------------
+# Пакетное чтение
+# ---------------------------------------------------------------------------
+def test_read_many_spends_two_requests_per_spreadsheet(make_client) -> None:
+    """Экономия квоты — числом, а не на слово.
+
+    Квота Google — 60 запросов в минуту на пользователя, и полный отчёт по
+    листу за раз её выбирал за два прогона. На таблицу должно уходить два
+    обращения: список листов и один batchGet, сколько бы листов ни читали.
+    """
+    header = [c.expected_header for c in specs.INGREDIENTS.columns]
+    pack_header = [c.expected_header for c in specs.PACKAGING.columns]
+    dish_header = [c.expected_header for c in specs.DISHES.columns]
+    client = make_client(
+        {
+            "kitchen-id": {
+                "ING": [header, _ing_row(id="1", name="Томаты")],
+                "Упаковка": [pack_header, ["u1", "Коробка"]],
+                "Блюда": [dish_header, ["B001", "Ролл"]],
+            }
+        }
+    )
+
+    data = _reader(client).read_many([specs.INGREDIENTS, specs.PACKAGING, specs.DISHES])
+
+    assert len(data) == 3
+    book = client._spreadsheets["kitchen-id"]
+    assert book.requests == 2, f"на три листа ушло {book.requests} запросов вместо двух"
+
+
+def test_read_many_returns_parsed_rows(make_client) -> None:
+    header = [c.expected_header for c in specs.INGREDIENTS.columns]
+    client = make_client(
+        {"kitchen-id": {"ING": [header, _ing_row(id="1", name="Томаты", price_per_kg="177")]}}
+    )
+
+    data = _reader(client).read_many([specs.INGREDIENTS])
+    sheet = data["kitchen/ING"]
+
+    assert not isinstance(sheet, str)
+    assert sheet.rows[0]["name"] == "Томаты"
+    assert sheet.rows[0]["price_per_kg"] == Decimal("177")
+
+
+def test_read_many_survives_missing_sheet(make_client) -> None:
+    """Одна переименованная вкладка не должна лишать картины целиком."""
+    header = [c.expected_header for c in specs.INGREDIENTS.columns]
+    client = make_client({"kitchen-id": {"ING": [header, _ing_row(id="1", name="Томаты")]}})
+
+    data = _reader(client).read_many([specs.INGREDIENTS, specs.DISHES])
+
+    assert not isinstance(data["kitchen/ING"], str), "этот лист прочитан"
+    assert data["kitchen/Блюда"] == "листа «Блюда» нет в таблице"
+
+
+def test_read_many_uses_fallback_title(make_client) -> None:
+    header = [c.expected_header for c in specs.COOKING_METHODS.columns]
+    client = make_client({"kitchen-id": {"Впитывание масла": [header, ["1", "фри"]]}})
+
+    sheet = _reader(client).read_many([specs.COOKING_METHODS])["kitchen/Способы приготовления"]
+
+    assert not isinstance(sheet, str)
+    assert sheet.title == "Впитывание масла"
+
+
+def test_read_many_handles_empty_sheet(make_client) -> None:
+    """У пустого листа Google не присылает ключ values вовсе."""
+    client = make_client({"kitchen-id": {"ING": []}})
+
+    sheet = _reader(client).read_many([specs.INGREDIENTS])["kitchen/ING"]
+
+    assert not isinstance(sheet, str)
+    assert len(sheet) == 0
+    assert sheet.header_issues == ("лист пуст",)

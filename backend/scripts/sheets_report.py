@@ -44,15 +44,16 @@ def _text(value: object) -> str:
 
 
 def read_everything(reader: SheetsReader) -> dict[str, SheetData | str]:
-    """Прочитать все описанные листы. Отказ по одному не рушит остальные."""
-    result: dict[str, SheetData | str] = {}
-    for spec in specs.ALL_SPECS:
-        label = f"{spec.spreadsheet}/{spec.title}"
-        try:
-            result[label] = reader.read(spec)
-        except Exception as error:
-            result[label] = f"не прочитан: {error}"
-    return result
+    """Прочитать все описанные листы одним пакетом на таблицу.
+
+    Раньше здесь был цикл с отдельным чтением каждого листа, и два прогона
+    подряд выбирали квоту Google (60 запросов в минуту на пользователя).
+    Теперь на таблицу уходит два обращения независимо от числа листов.
+
+    Отказ по одному листу по-прежнему не рушит остальные: вместо данных в
+    словаре оказывается строка с объяснением.
+    """
+    return reader.read_many(specs.ALL_SPECS)
 
 
 def report_sheets(sheets: dict[str, SheetData | str]) -> None:

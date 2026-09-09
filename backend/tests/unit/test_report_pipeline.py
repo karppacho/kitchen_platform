@@ -103,6 +103,11 @@ def test_report_survives_unreadable_sheet(make_client) -> None:
     sheets = sheets_report.read_everything(reader)
 
     assert not isinstance(sheets["kitchen/ING"], str), "этот лист прочитан"
-    unreadable = [label for label, data in sheets.items() if isinstance(data, str)]
+
+    unreadable = {label: data for label, data in sheets.items() if isinstance(data, str)}
     assert unreadable, "остальные не прочитаны, и это записано, а не проглочено"
-    assert all("не прочитан" in str(sheets[label]) for label in unreadable)
+
+    # Причина отказа называется словами, а не общим «не прочитан»: у листов
+    # чужих таблиц не задан идентификатор, у листов этой — их просто нет.
+    assert unreadable["ingredient_cards/Лист1"].startswith("не задан идентификатор")
+    assert unreadable["kitchen/Блюда"] == "листа «Блюда» нет в таблице"
