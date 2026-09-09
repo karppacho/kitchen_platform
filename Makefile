@@ -40,8 +40,10 @@ test-int:  ## Тесты, которым нужен поднятый Postgres
 test-live:  ## Живые тесты: настоящие Sheets, нужны креды
 	cd $(BACKEND) && uv run pytest -m live
 
-cov:  ## Покрытие с порогом на ядре
-	cd $(BACKEND) && uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov-fail-under=85
+cov:  ## Покрытие с порогом на ядре. Нужен поднятый Postgres: часть кода
+      ## осмысленно покрывается только интеграционными тестами
+	cd $(BACKEND) && uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov-report=
+	cd $(BACKEND) && uv run pytest -m integration --cov=kitchen.domain --cov=kitchen.sync --cov-append --cov-report=term-missing --cov-fail-under=85
 
 eval:  ## LLM-евалы. Стоят денег, в CI не входят
 	cd $(BACKEND) && uv run pytest -m llm

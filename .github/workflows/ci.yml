@@ -93,15 +93,21 @@ jobs:
       - run: uv sync --all-extras --dev
         working-directory: backend
 
-      # Офлайн-набор сразу с покрытием: три отдельных прогона pytest
-      # съели бы бюджет в пять минут ни за что.
-      - name: Офлайн-тесты и покрытие ядра
-        run: uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov-report=term-missing --cov-fail-under=85
+      # Порог покрытия проверяется ОДИН раз и по сумме обоих наборов.
+      # Часть кода — импорт в базу — осмысленно покрывается только
+      # интеграционными тестами, и проверка порога до них показывала бы
+      # заведомо заниженное число.
+      - name: Офлайн-тесты
+        run: uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov-report=
         working-directory: backend
 
-      # Интеграция против настоящего Postgres, включая обратимость миграций.
-      - name: Интеграционные тесты
-        run: uv run pytest -m integration --cov-append
+      # Интеграция против настоящего Postgres: обратимость миграций и
+      # ограничения схемы, которых нет в коде.
+      - name: Интеграционные тесты и порог покрытия
+        run: >-
+          uv run pytest -m integration
+          --cov=kitchen.domain --cov=kitchen.sync --cov-append
+          --cov-report=term-missing --cov-fail-under=85
         working-directory: backend
 
   secrets:
