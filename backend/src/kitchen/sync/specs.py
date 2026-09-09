@@ -221,7 +221,14 @@ INGREDIENT_CARDS = SheetSpec(
     columns=(
         Column("A", "Категория", "category", _T, _SHARED),
         Column("B", "Наименование ингредиента", "name", _T, _SHARED),
-        Column("C", "Наименование по маркировочному ярлыку", "label_name", _T, _SHARED),
+        Column(
+            "C",
+            "Наименование по ярлыку",
+            "label_name",
+            _T,
+            _SHARED,
+            header="Наименование ингредиента по маркировочному ярлыку",
+        ),
         Column("D", "Описание", "description", _T, _SHARED),
         Column("E", "Изготовитель", "manufacturer", _T, _SHARED),
         Column("F", "Поставщик", "supplier", _T, _SHARED),
