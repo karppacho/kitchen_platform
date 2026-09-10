@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,6 +19,8 @@ from kitchen import __version__
 from kitchen.config import Settings, load_settings
 from kitchen.db.session import make_session_factory
 from kitchen.web.api import router
+from kitchen.web.auth_api import GOTRUE_TIMEOUT
+from kitchen.web.auth_api import router as auth_router
 
 
 class Health(BaseModel):
@@ -57,6 +60,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.sessions = make_session_factory(config.database_url)
 
     app.include_router(router)
+    app.include_router(auth_router)
+
+    # Один клиент на приложение: httpx держит пул соединений, и создавать
+    # его на каждый вход значит платить рукопожатием TLS за каждый вход.
+    app.state.http = httpx.Client(timeout=GOTRUE_TIMEOUT)
 
     app.add_middleware(
         CORSMiddleware,
