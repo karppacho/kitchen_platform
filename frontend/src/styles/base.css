@@ -1,0 +1,21 @@
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import './tokens.css';
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--fon);
+  color: var(--tekst);
+  font: 14px/1.4 var(--shrift);
+  /* Табличные цифры глобально: шеф весь день сравнивает столбцы, и цифры
+     разной ширины делают это невозможным. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Горизонтальная прокрутка всей страницы запрещена на любой ширине.
+   Прокручиваться вправе только таблица внутри своего контейнера. */
+html, body { overflow-x: hidden; }

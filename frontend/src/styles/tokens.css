@@ -1,0 +1,18 @@
+/* Палитра снята с макета docs/design. Один акцент и два семантических —
+   больше цветов рабочему инструменту не нужно. */
+:root {
+  --fon: #f2f2ef;
+  --poverhnost: #fbfbf9;
+  --tekst: #1a1b1d;
+  --priglushyonnyy: #6b6e73;
+  --granitsa: #e2e2de;
+  --aktsent: #2f5ecb;
+  --vnimanie: #9a6400;
+  --oshibka: #b3261e;
+  --oshibka-fon: #fbe9e7;
+
+  --shag: 4px;
+  --radius: 3px;
+  --shrift: 'IBM Plex Sans', system-ui, sans-serif;
+  --shrift-tsifry: 'IBM Plex Mono', ui-monospace, monospace;
+}
