@@ -211,3 +211,24 @@ def test_run_is_recorded(sessions) -> None:
         sheets = {s.title: s for s in session.scalars(select(models.SyncSheet)).all()}
         assert sheets["ING"].rows == 3
         assert sheets["ING"].header_issues == ""
+
+
+def test_duplicate_card_names_are_reported(sessions) -> None:
+    """Две карточки с одним именем — дефект данных, а не мелочь.
+
+    Ключа кроме имени у карточек нет, поэтому вторая затирает первую.
+    В живой таблице таких пар шесть, и повар заполнял обе. Молчать об
+    этом значит потерять чужую работу без следа.
+    """
+    cards = [
+        _header(specs.INGREDIENT_CARDS),
+        [""] * len(specs.INGREDIENT_CARDS.columns),
+        _row(specs.INGREDIENT_CARDS, name="Томаты", supplier="Первый"),
+        _row(specs.INGREDIENT_CARDS, name="томаты ", supplier="Второй"),
+    ]
+    client = _client()
+    client._spreadsheets["cards-id"] = FakeSpreadsheet({"Лист1": FakeWorksheet(cards, "Лист1")})
+    result = Importer(SheetsReader(client, IDS), sessions).run()
+
+    assert result.counts["карточки"] == 1, "по имени они одно и то же"
+    assert any("уже была выше" in w for w in result.warnings)

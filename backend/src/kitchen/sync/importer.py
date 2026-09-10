@@ -377,6 +377,14 @@ class Importer:
             if not name:
                 continue
             key = normalise_name(name)
+            if key in seen:
+                # Две карточки с одним именем — дефект данных: ключа, кроме
+                # имени, у карточек нет, и вторая молча затирает первую.
+                # Молчать об этом нельзя: повар заполнял обе.
+                result.warnings.append(
+                    f"Карточки строка {row.number}: «{name}» уже была выше — "
+                    f"вторая карточка затрёт первую, ключа кроме имени у них нет"
+                )
             seen.add(key)
 
             card = existing.get(key) or models.IngredientCard(name=name)
