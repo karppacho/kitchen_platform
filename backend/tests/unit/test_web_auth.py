@@ -141,6 +141,16 @@ def cookies_of(reply: httpx.Response) -> dict[str, str]:
     return {item.split("=", 1)[0]: item for item in reply.headers.get_list("set-cookie")}
 
 
+def attrs_of(cookie: str) -> set[str]:
+    """Атрибуты Set-Cookie как точные токены, а не подстроки.
+
+    Подстрочная проверка ``"Path=/api" in cookie`` прошла бы и при
+    ``Path=/api/auth`` — именно ту склейку путей, которую спека запрещает
+    отдельным абзацем.
+    """
+    return set(cookie.split("; "))
+
+
 def test_login_sets_both_cookies_httponly() -> None:
     handler = gotrue()
     reply = make_client(handler=handler).post(
@@ -150,14 +160,16 @@ def test_login_sets_both_cookies_httponly() -> None:
     assert reply.status_code == 200
     jar = cookies_of(reply)
 
-    access = jar[auth.ACCESS_COOKIE]
+    access = attrs_of(jar[auth.ACCESS_COOKIE])
     assert "HttpOnly" in access, "иначе XSS уносит доступ"
     assert "Secure" in access
-    assert "SameSite=strict" in access.replace("SameSite=Strict", "SameSite=strict")
-    assert "Path=/api" in access
+    assert any(a.casefold() == "samesite=strict" for a in access)
+    assert "Path=/api" in access, "не /api/auth — иначе кука едет в каждый запрос"
 
-    refresh = jar[auth.REFRESH_COOKIE]
+    refresh = attrs_of(jar[auth.REFRESH_COOKIE])
     assert "HttpOnly" in refresh
+    assert "Secure" in refresh
+    assert any(a.casefold() == "samesite=strict" for a in refresh)
     assert "Path=/api/auth" in refresh, "продление не должно ездить в каждом запросе"
 
 
@@ -191,15 +203,19 @@ def test_wrong_password_gives_401_and_no_cookies() -> None:
 
 def test_login_does_not_say_which_half_was_wrong() -> None:
     """Разница «нет такого пользователя» и «пароль не тот» — подсказка тому,
-    кто подбирает. Наружу она не выносится."""
-    unknown = make_client(handler=gotrue(400, {"error": "invalid_grant"})).post(
-        "/api/auth/login", json={"email": "нет@example.com", "password": "пароль"}
-    )
-    wrong = make_client(handler=gotrue(400, {"error": "invalid_grant"})).post(
-        "/api/auth/login", json={"email": "chef@example.com", "password": "не тот"}
-    )
+    кто подбирает. Наружу она не выносится.
 
-    assert unknown.json()["detail"] == wrong.json()["detail"]
+    Настоящий GoTrue отвечает на эти два случая разными телами — дублёры
+    здесь тоже разные, иначе тест проверяет не наш код, а то, что дублёр
+    сказал одно и то же дважды."""
+    unknown = make_client(
+        handler=gotrue(400, {"error_description": "User not found"})
+    ).post("/api/auth/login", json={"email": "нет@example.com", "password": "пароль"})
+    wrong = make_client(
+        handler=gotrue(400, {"error_description": "Invalid login credentials"})
+    ).post("/api/auth/login", json={"email": "chef@example.com", "password": "не тот"})
+
+    assert unknown.json()["detail"] == wrong.json()["detail"] == "Неверная почта или пароль"
 
 
 def test_gotrue_unreachable_gives_502_not_401() -> None:
@@ -209,6 +225,30 @@ def test_gotrue_unreachable_gives_502_not_401() -> None:
         raise httpx.ConnectError("соединение отвергнуто")
 
     reply = make_client(handler=dead).post(
+        "/api/auth/login", json={"email": "chef@example.com", "password": "пароль"}
+    )
+
+    assert reply.status_code == 502
+
+
+def test_wrong_signing_secret_gives_502_not_401() -> None:
+    """SUPABASE_JWT_SECRET у нас разошёлся с тем, чем подписывает GoTrue.
+
+    Пара логин/пароль верна, GoTrue её приняла и выдала токен — но нашей
+    проверке подписи он не пройдёт. Это наша поломка конфигурации, а не
+    чужой пароль: 401 здесь отправил бы шефа перебирать пароли, хотя
+    перебирать нечего."""
+    bad_token = jwt.encode(
+        {
+            "sub": str(PROFILE_ID),
+            "aud": "authenticated",
+            "exp": dt.datetime.now(tz=dt.UTC) + dt.timedelta(minutes=60),
+        },
+        "другой-секрет-подписи-для-проверки",
+        algorithm="HS256",
+    )
+    body = {**GOOD, "access_token": bad_token}
+    reply = make_client(handler=gotrue(200, body)).post(
         "/api/auth/login", json={"email": "chef@example.com", "password": "пароль"}
     )
 

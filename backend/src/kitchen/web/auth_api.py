@@ -86,7 +86,17 @@ def token_request(
     if reply.status_code != 200:
         raise _unavailable()
 
-    body = reply.json()
+    # На 200 GoTrue обязана прислать JSON-объект, но «обязана» — не «пришлёт»:
+    # nginx-заглушка, пустое тело или обрыв на полпути дают то же самое 200 с
+    # мусором. Разбор тела — тоже часть недоступности службы, а не наша
+    # внутренняя ошибка.
+    try:
+        body = reply.json()
+    except ValueError as error:
+        raise _unavailable() from error
+    if not isinstance(body, dict):
+        raise _unavailable()
+
     access, refresh = body.get("access_token"), body.get("refresh_token")
     if not isinstance(access, str) or not isinstance(refresh, str):
         raise _unavailable()
@@ -97,6 +107,13 @@ def token_request(
 def _unavailable() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_502_BAD_GATEWAY, detail="Служба входа не отвечает"
+    )
+
+
+def _misconfigured() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail="Вход настроен неверно: обратитесь к администратору",
     )
 
 
@@ -129,7 +146,14 @@ def set_cookies(response: Response, tokens: Tokens, settings: Settings) -> None:
 
 
 def _whoami(session: object, tokens: Tokens, settings: Settings) -> Me:
-    payload = decode_token(tokens.access, settings)
+    try:
+        payload = decode_token(tokens.access, settings)
+    except AuthError as error:
+        # GoTrue приняла пару логин/пароль и выдала токен — значит пароль
+        # верный. Если наша проверка подписи всё равно падает, разошлись
+        # секреты (SUPABASE_JWT_SECRET), а не логин с паролем: 401 отправил
+        # бы шефа перебирать пароли, хотя чинить нужно не пароль, а конфиг.
+        raise _misconfigured() from error
     subject = payload.get("sub")
     if not isinstance(subject, str):
         raise AuthError("токен недействителен")
