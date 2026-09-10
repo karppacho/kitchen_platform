@@ -16,6 +16,8 @@ from pydantic import BaseModel
 
 from kitchen import __version__
 from kitchen.config import Settings, load_settings
+from kitchen.db.session import make_session_factory
+from kitchen.web.api import router
 
 
 class Health(BaseModel):
@@ -47,6 +49,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # устройство, а пользователей у нас двое и им она не нужна.
         openapi_url="/openapi.json" if config.app_env == "development" else None,
     )
+
+    # Состояние приложения: настройки и фабрика сессий. Через request,
+    # а не через модульные глобалы, — иначе тест не сможет поднять
+    # приложение с другой конфигурацией, не трогая порядок импортов.
+    app.state.settings = config
+    app.state.sessions = make_session_factory(config.database_url)
+
+    app.include_router(router)
 
     app.add_middleware(
         CORSMiddleware,

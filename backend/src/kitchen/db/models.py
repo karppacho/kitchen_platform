@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from decimal import Decimal
 
@@ -33,6 +34,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -324,3 +326,64 @@ class SyncSheet(Base):
     run: Mapped[SyncRun] = relationship(back_populates="sheets")
 
     __table_args__ = (UniqueConstraint("run_id", "spreadsheet", "title"),)
+
+
+class Profile(Base):
+    """Пользователь платформы.
+
+    Учётки, пароли и сессии ведёт Supabase Auth в схеме `auth`; сюда мы не
+    лезем и своей таблицы под них не заводим. Здесь только то, что знает
+    о человеке наша предметная область: как его зовут и что ему можно.
+
+    Связь с `auth.users` по идентификатору, но без внешнего ключа: схема
+    `auth` принадлежит GoTrue, и вешать на неё ограничения из наших
+    миграций — способ однажды не пережить его обновление.
+    """
+
+    __tablename__ = "profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    """Тот же идентификатор, что у записи в `auth.users`."""
+
+    email: Mapped[str] = mapped_column(Text, unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(Text, default="")
+    is_active: Mapped[bool] = mapped_column(default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    roles: Mapped[list[UserRole]] = relationship(
+        back_populates="profile", cascade="all, delete-orphan"
+    )
+
+
+class Role(Base):
+    """Роль. Заводится с запасом: пользователей сейчас двое, но модель прав
+    должна пережить появление поваров и коммерсантов без переделки."""
+
+    __tablename__ = "roles"
+
+    CHEF = "chef"
+    COOK = "cook"
+    COMMERCE = "commerce"
+    DEVELOPER = "developer"
+
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text, default="")
+
+
+class UserRole(Base):
+    """Кто в какой роли."""
+
+    __tablename__ = "user_roles"
+
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True
+    )
+    role_code: Mapped[str] = mapped_column(
+        String(32), ForeignKey("roles.code", ondelete="RESTRICT"), primary_key=True
+    )
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    profile: Mapped[Profile] = relationship(back_populates="roles")
+
+    __table_args__ = (Index("ix_user_roles_role_code", "role_code"),)
