@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 from collections.abc import Callable
 
@@ -263,3 +264,60 @@ def test_login_without_profile_gives_403() -> None:
     )
 
     assert reply.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Продление и выход
+# ---------------------------------------------------------------------------
+def test_refresh_replaces_both_cookies() -> None:
+    """GoTrue вращает refresh-токены при использовании.
+
+    Сохранить старый значит получить отказ при следующем продлении — и
+    выкинуть шефа на форму входа посреди работы.
+    """
+    rotated = dict(GOOD, refresh_token="refresh-token-2")
+    client = make_client(handler=gotrue(200, rotated))
+    client.cookies.set(auth.REFRESH_COOKIE, "refresh-token-1", path="/api/auth")
+
+    reply = client.post("/api/auth/refresh")
+
+    assert reply.status_code == 200
+    jar = cookies_of(reply)
+    assert "refresh-token-2" in jar[auth.REFRESH_COOKIE]
+    assert auth.ACCESS_COOKIE in jar
+
+
+def test_refresh_sends_the_cookie_to_gotrue() -> None:
+    """Продлеваем именно тем, что лежит в куке, а не пустотой."""
+    handler = gotrue()
+    client = make_client(handler=handler)
+    client.cookies.set(auth.REFRESH_COOKIE, "refresh-token-1", path="/api/auth")
+
+    client.post("/api/auth/refresh")
+
+    assert handler.seen.url.params["grant_type"] == "refresh_token"  # type: ignore[attr-defined]
+    otpravleno = json.loads(handler.seen.content)  # type: ignore[attr-defined]
+    assert otpravleno == {"refresh_token": "refresh-token-1"}
+
+
+def test_refresh_without_cookie_gives_401() -> None:
+    assert make_client(handler=gotrue()).post("/api/auth/refresh").status_code == 401
+
+
+def test_refresh_rejected_by_gotrue_gives_401() -> None:
+    # "протухший" из брифа — тоже значение куки, едущее в HTTP-заголовок:
+    # та же причина заменить на ASCII, что и у refresh-token-1/2.
+    client = make_client(handler=gotrue(400, {"error": "invalid_grant"}))
+    client.cookies.set(auth.REFRESH_COOKIE, "refresh-expired", path="/api/auth")
+
+    assert client.post("/api/auth/refresh").status_code == 401
+
+
+def test_logout_clears_both_cookies() -> None:
+    reply = make_client().post("/api/auth/logout")
+
+    assert reply.status_code == 204
+    assert reply.content == b"", "204 не должен нести тела"
+    jar = cookies_of(reply)
+    assert "Max-Age=0" in jar[auth.ACCESS_COOKIE]
+    assert "Max-Age=0" in jar[auth.REFRESH_COOKIE]

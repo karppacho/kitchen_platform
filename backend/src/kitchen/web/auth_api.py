@@ -179,3 +179,44 @@ def login(
     me = _whoami(session, tokens, settings)
     set_cookies(response, tokens, settings)
     return me
+
+
+@router.post("/refresh", response_model=Me)
+def refresh(
+    request: Request,
+    response: Response,
+    session: SessionDep,
+    settings: SettingsDep,
+    http: HttpDep,
+) -> Me:
+    """Продлить сессию по куке.
+
+    Обе куки переставляются, а не одна: GoTrue вращает refresh-токены, и
+    старый после использования недействителен.
+    """
+    token = request.cookies.get(REFRESH_COOKIE)
+    if not token:
+        raise AuthError("сессия не найдена")
+    tokens = token_request(
+        http,
+        settings,
+        "refresh_token",
+        {"refresh_token": token},
+        denied="Сессия истекла, войдите заново",
+    )
+    me = _whoami(session, tokens, settings)
+    set_cookies(response, tokens, settings)
+    return me
+
+
+@router.post("/logout")
+def logout() -> Response:
+    """Гасит куки и всё.
+
+    В GoTrue не ходим: отзыв сессии на его стороне здесь ничего не даёт, а
+    лишний сетевой вызов на выходе — лишняя точка отказа.
+    """
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    response.delete_cookie(ACCESS_COOKIE, path="/api")
+    response.delete_cookie(REFRESH_COOKIE, path="/api/auth")
+    return response
