@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -113,6 +113,17 @@ class ReconciliationSummary(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+def _share(value: Decimal) -> Decimal:
+    """Доля для показа: три знака, не двадцать восемь.
+
+    В домене это результат деления и хранится с полной точностью — там она
+    нужна, потому что доля сравнивается с порогами. Наружу столько знаков
+    отдавать незачем: фронтенд получал «0.7777777777777777777777777778»
+    и был обязан сам решать, до чего это округлять.
+    """
+    return value.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+
+
 def _to_row(cost: DishCost, dish: models.Dish) -> DishRow:
     return DishRow(
         legacy_id=dish.legacy_id,
@@ -238,7 +249,7 @@ def dish_detail(
         fat_g=cost.fat_g,
         carbs_g=cost.carbs_g,
         kcal=cost.kcal,
-        kbju_coverage=cost.kbju_coverage,
+        kbju_coverage=_share(cost.kbju_coverage),
         components=[
             ComponentRow(
                 name=item.name,
