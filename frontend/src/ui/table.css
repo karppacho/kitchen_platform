@@ -1,0 +1,103 @@
+/* Плотность важнее воздуха: на экране должно помещаться 25–30 строк без
+   прокрутки. Шеф открывает это сравнивать числа, а не любоваться. */
+.tablitsa {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--poverhnost);
+}
+
+.tablitsa th,
+.tablitsa td {
+  padding: calc(var(--shag) * 1.5) calc(var(--shag) * 2);
+  border-bottom: 1px solid var(--granitsa);
+  text-align: left;
+}
+
+.tablitsa th {
+  position: sticky;
+  top: 0;
+  background: var(--poverhnost);
+  font-weight: 600;
+  color: var(--priglushyonnyy);
+  white-space: nowrap;
+}
+
+.tablitsa .vpravo,
+.spisok .vpravo {
+  text-align: right;
+}
+
+/* Прокручиваться вправе только таблица, и только внутри своей обёртки.
+   Страница целиком — никогда. */
+.tablitsa-obolochka {
+  overflow-x: auto;
+}
+
+.tablitsa tbody tr:hover {
+  background: var(--fon);
+}
+
+/* Себестоимость выше цены меню. Почти всегда это перепутанная единица
+   измерения, а не убыток, — поэтому подпись направляет к причине. */
+.stroka--ubytok {
+  background: var(--oshibka-fon);
+}
+
+.spisok {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.spisok > li {
+  background: var(--poverhnost);
+  border-bottom: 1px solid var(--granitsa);
+  padding: calc(var(--shag) * 2);
+}
+
+.spisok-glavnoe {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--shag);
+  align-items: baseline;
+}
+
+.spisok-glavnoe > span:first-child {
+  /* Имена бывают по 53 символа — «Контейнер бумажный без крышки
+     207х127х55 крафт/чёрный». Перенос обязателен, обрезка недопустима. */
+  overflow-wrap: anywhere;
+}
+
+.raskryt {
+  margin-top: var(--shag);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--aktsent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.spisok-podrobno {
+  margin: var(--shag) 0 0;
+}
+
+.spisok-podrobno > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--shag);
+  padding: calc(var(--shag) / 2) 0;
+}
+
+.spisok-podrobno dt {
+  color: var(--priglushyonnyy);
+}
+
+.spisok-podrobno dd {
+  margin: 0;
+}
+
+.pusto {
+  color: var(--priglushyonnyy);
+  padding: calc(var(--shag) * 4);
+}
