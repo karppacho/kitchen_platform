@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+﻿import { render, screen } from '@testing-library/react'
 import { describe, expect, test } from 'vitest'
 
 import { Num, formatNumber } from '../src/ui/Num'
@@ -8,8 +8,12 @@ describe('formatNumber', () => {
     expect(formatNumber('84.66', 2)).toBe('84,66')
   })
 
-  test('тысячи разделяются неразрывным пробелом', () => {
-    expect(formatNumber('1234.5', 1)).toBe('1 234,5')
+  test('тысячи разделяются неразрывным пробелом U+00A0', () => {
+    // Неразрывный пробел U+00A0, а не обычный U+0020
+    const result = formatNumber('1234.5', 1)
+    expect(result).toBe('1 234,5')
+    // Проверка что именно U+00A0
+    expect(result.charCodeAt(1)).toBe(0x00A0)
   })
 
   test('без указания разрядности хвостовые нули убираются', () => {
@@ -19,6 +23,26 @@ describe('formatNumber', () => {
 
   test('разрядность добивается нулями', () => {
     expect(formatNumber('100', 2)).toBe('100,00')
+  })
+
+  test('дробная часть округляется половины вверх', () => {
+    expect(formatNumber('22.96', 1)).toBe('23,0')
+  })
+
+  test('округление с переносом разряда: 9.96 → 10,0', () => {
+    expect(formatNumber('9.96', 1)).toBe('10,0')
+  })
+
+  test('округление с переносом разряда: 0.999 → 1,00', () => {
+    expect(formatNumber('0.999', 2)).toBe('1,00')
+  })
+
+  test('отрицательный ноль не показывает минус', () => {
+    expect(formatNumber('-0.001', 2)).toBe('0,00')
+  })
+
+  test('отрицательное число с округлением вверх к нулю теряет минус', () => {
+    expect(formatNumber('-0.004', 2)).toBe('0,00')
   })
 })
 
