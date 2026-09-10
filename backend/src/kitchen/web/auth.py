@@ -36,6 +36,11 @@ from kitchen.db import models
 ALGORITHMS = ["HS256"]
 AUDIENCE = "authenticated"
 
+# Имена кук. Фронтенд их не читает — они httpOnly, — но бэкенд и тесты
+# должны называть их из одного места.
+ACCESS_COOKIE = "kp_access"
+REFRESH_COOKIE = "kp_refresh"
+
 bearer = HTTPBearer(auto_error=False)
 
 
@@ -134,13 +139,21 @@ def get_session(request: Request) -> Iterator[Session]:
 
 
 def current_user(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
     settings: Annotated[Settings, Depends(get_settings)],
     session: Annotated[Session, Depends(get_session)],
 ) -> CurrentUser:
-    if credentials is None:
+    """Кто пришёл: по заголовку или по куке.
+
+    Заголовок проверяется первым и побеждает. Им пользуются curl, скрипты
+    выдачи доступа и тесты; кука — способ браузера, которому токен в руки
+    давать нельзя.
+    """
+    token = credentials.credentials if credentials else request.cookies.get(ACCESS_COOKIE)
+    if not token:
         raise AuthError("нужен токен")
-    payload = decode_token(credentials.credentials, settings)
+    payload = decode_token(token, settings)
     subject = payload.get("sub")
     if not isinstance(subject, str):
         raise AuthError("токен недействителен")
