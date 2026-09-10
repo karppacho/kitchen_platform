@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap&subset=cyrillic,latin">
+<style>
+html,body{margin:0;padding:0}
+body{background:#f2f2ef;color:#1a1b1d;font-family:"IBM Plex Sans",system-ui,sans-serif;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+a{color:#2f5ecb;text-decoration:none}a:hover{color:#1f47a0;text-decoration:underline}
+input,select,button{font-family:inherit;font-variant-numeric:tabular-nums}
+</style>
+</helmet>
+<div style="{{ rootStyle }}">
+
+<sc-if value="{{ isLogin }}" hint-placeholder-val="{{ false }}">
+<div style="min-height:100vh;display:grid;place-items:center;background:#f2f2ef;padding:16px;box-sizing:border-box">
+<div style="width:100%;max-width:380px;box-sizing:border-box;background:#fff;border:1px solid #e2e2de;padding:30px 26px 26px">
+<div style="display:flex;align-items:center;gap:9px;margin-bottom:26px">
+<div style="width:15px;height:15px;background:{{ accent }}"></div>
+<div style="font-size:14px;font-weight:600;letter-spacing:.16em;text-transform:uppercase">Тим Кук</div>
+</div>
+<div style="font-size:20px;font-weight:600;margin-bottom:4px">Вход в кухонный контур</div>
+<div style="font-size:13px;color:#6b6e73;line-height:1.5;margin-bottom:24px">Доступ заводит администратор</div>
+<label style="display:block;font-size:12px;color:#6b6e73;margin-bottom:6px">Почта</label>
+<input value="{{ loginEmail }}" onChange="{{ onLoginEmail }}" style="width:100%;box-sizing:border-box;padding:9px 11px;font-size:14px;border:1px solid #cfcfc9;background:#fff;outline:none;margin-bottom:16px">
+<label style="display:block;font-size:12px;color:#6b6e73;margin-bottom:6px">Пароль</label>
+<input type="password" value="{{ loginPass }}" onChange="{{ onLoginPass }}" style="width:100%;box-sizing:border-box;padding:9px 11px;font-size:14px;border:1px solid #cfcfc9;background:#fff;outline:none;margin-bottom:12px">
+<sc-if value="{{ loginError }}" hint-placeholder-val="{{ false }}">
+<div style="font-size:12.5px;color:#b3261e;line-height:1.45;margin-bottom:14px;border-left:2px solid #b3261e;padding-left:9px">Неверная почта или пароль. Если пароль забыт — его сбрасывает администратор.</div>
+</sc-if>
+<button onClick="{{ onLogin }}" style="{{ primaryBtn }}" style-hover="{{ primaryBtnHover }}">Войти</button>
+<div style="margin-top:22px;padding-top:14px;border-top:1px solid #eeeeea;font:400 11.5px/1.5 'IBM Plex Mono',monospace;color:#8b8e93">401 → сюда. 403 → сообщение об отсутствии доступа, без выхода на этот экран.</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isApp }}" hint-placeholder-val="{{ true }}">
+<div style="{{ shellStyle }}">
+
+<aside style="{{ asideStyle }}">
+<div style="{{ brandStyle }}">
+<span style="display:flex;align-items:center;gap:9px"><span style="width:13px;height:13px;background:{{ accent }};display:inline-block"></span><span style="font-size:12.5px;font-weight:600;letter-spacing:.16em;text-transform:uppercase">Тим Кук</span></span>
+<button onClick="{{ toggleMenu }}" style="{{ menuBtn }}">{{ menuLabel }}</button>
+</div>
+<nav style="{{ navStyle }}">
+<div style="{{ navGroup }}">Работает</div>
+<button onClick="{{ goIngredients }}" style="{{ navIng }}">Справочник ингредиентов</button>
+<button onClick="{{ goDishes }}" style="{{ navDish }}">Блюда</button>
+<button onClick="{{ goRecon }}" style="{{ navRec }}">Сверка справочника<span style="{{ reconBadge }}">16</span></button>
+<div style="{{ navGroup }}">Появится позже</div>
+<sc-for list="{{ phaseLater }}" as="n" hint-placeholder-count="5">
+<button onClick="{{ n.go }}" style="{{ n.style }}">{{ n.title }}<span style="{{ n.tagStyle }}">{{ n.tag }}</span></button>
+</sc-for>
+</nav>
+<div style="{{ userStyle }}">
+<div style="font-size:13px;font-weight:500">Александр</div>
+<div style="font:400 11px/1.5 'IBM Plex Mono',monospace;color:#8b8e93;margin-top:2px">karppacho123@yandex.ru</div>
+<div style="display:flex;gap:5px;margin-top:9px">
+<span style="font:500 10px/1 'IBM Plex Mono',monospace;padding:4px 6px;background:#2d2f31;color:#c9c9c3;letter-spacing:.05em">chef</span>
+<span style="font:500 10px/1 'IBM Plex Mono',monospace;padding:4px 6px;background:#2d2f31;color:#c9c9c3;letter-spacing:.05em">developer</span>
+</div>
+<button onClick="{{ goLogin }}" style="margin-top:14px;background:none;border:none;padding:0;color:#8b8e93;font-size:12px;cursor:pointer" style-hover="{{ dimHover }}">Выйти</button>
+</div>
+</aside>
+
+<main style="min-width:0">
+
+<sc-if value="{{ isIngredients }}" hint-placeholder-val="{{ true }}">
+<div style="{{ pageStyle }}">
+<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:3px;flex-wrap:wrap">
+<h1 style="margin:0;font-size:21px;font-weight:600;letter-spacing:-.01em">Справочник ингредиентов</h1>
+<span style="font:400 12px 'IBM Plex Mono',monospace;color:#6b6e73">{{ ingCount }} из 130</span>
+</div>
+<div style="font-size:12.5px;color:#6b6e73;margin-bottom:18px">Архивные позиции не скрыты: они стоят в составе живых блюд.</div>
+<div style="{{ filterRow }}">
+<input value="{{ ingSearch }}" onChange="{{ onIngSearch }}" placeholder="Поиск по наименованию" style="{{ searchStyle }}">
+<select value="{{ ingStatus }}" onChange="{{ onIngStatus }}" style="{{ selectStyle }}">
+<option value="">Статус: любой</option>
+<sc-for list="{{ ingStatuses }}" as="s" hint-placeholder-count="2"><option value="{{ s }}">{{ s }}</option></sc-for>
+</select>
+</div>
+<sc-if value="{{ narrow }}" hint-placeholder-val="{{ false }}">
+<div style="background:#fff;border:1px solid #e2e2de">
+<sc-for list="{{ ingRows }}" as="r" hint-placeholder-count="8">
+<button onClick="{{ r.toggle }}" style="{{ listRow }}">
+<span style="{{ mobileHead }}"><span style="{{ r.mobileName }}">{{ r.name }}</span><span style="{{ r.mobilePrice }}">{{ r.priceStr }}</span></span>
+<span style="{{ mobileSub }}"><span style="{{ r.cardStyle }}">{{ r.cardStr }}</span><span style="font-family:'IBM Plex Mono',monospace">{{ r.legacy_id }}</span></span>
+<sc-if value="{{ r.isOpen }}" hint-placeholder-val="{{ false }}">
+<span style="{{ mobileDetail }}">
+<span style="{{ mobileKey }}">Категория</span><span style="{{ mobileVal }}">{{ r.category }}</span>
+<span style="{{ mobileKey }}">Вес 1 шт</span><span style="{{ r.mobileWeight }}">{{ r.weightStr }}</span>
+<span style="{{ mobileKey }}">Статус</span><span style="{{ mobileVal }}">{{ r.status }}</span>
+</span>
+</sc-if>
+</button>
+</sc-for>
+</div>
+</sc-if>
+<sc-if value="{{ wide }}" hint-placeholder-val="{{ true }}">
+<div style="background:#fff;border:1px solid #e2e2de;overflow-x:auto">
+<table style="{{ tableStyle }}">
+<thead><tr>
+<th style="{{ thL }}">id</th><th style="{{ thL }}">Наименование</th><th style="{{ thL }}">Категория</th><th style="{{ thL }}">Ед.</th>
+<th style="{{ thR }}">Цена за единицу</th><th style="{{ thR }}">Вес 1 шт</th><th style="{{ thL }}">Статус</th><th style="{{ thL }}">Карточка</th>
+</tr></thead>
+<tbody>
+<sc-for list="{{ ingRows }}" as="r" hint-placeholder-count="12">
+<tr style="{{ r.rowStyle }}" style-hover="{{ rowHover }}">
+<td style="{{ tdMono }}">{{ r.legacy_id }}</td>
+<td style="{{ r.nameStyle }}">{{ r.name }}</td>
+<td style="{{ tdMuted }}">{{ r.category }}</td>
+<td style="{{ tdMuted }}">{{ r.unit }}</td>
+<td style="{{ tdNum }}">{{ r.priceStr }}</td>
+<td style="{{ r.weightStyle }}">{{ r.weightStr }}</td>
+<td style="{{ td }}"><span style="{{ r.statusStyle }}">{{ r.status }}</span></td>
+<td style="{{ td }}"><span style="{{ r.cardStyle }}">{{ r.cardStr }}</span></td>
+</tr>
+</sc-for>
+</tbody>
+</table>
+</div>
+</sc-if>
+<div style="margin-top:10px;font-size:12px;color:#8b8e93">Прочерк в «Весе 1 шт» — весовая позиция, а не пропущенное значение. Отсутствие карточки — позиция есть в справочнике, но повар её не заполнил.</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isDishes }}" hint-placeholder-val="{{ false }}">
+<div style="{{ pageStyle }}">
+<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:3px;flex-wrap:wrap">
+<h1 style="margin:0;font-size:21px;font-weight:600;letter-spacing:-.01em">Блюда</h1>
+<span style="font:400 12px 'IBM Plex Mono',monospace;color:#6b6e73">{{ dishCount }} из 130</span>
+</div>
+<div style="font-size:12.5px;color:#6b6e73;margin-bottom:18px">Себестоимость пересчитывается на каждый запрос. Строка по клику открывает карточку.</div>
+<div style="{{ filterRow }}">
+<input value="{{ dishSearch }}" onChange="{{ onDishSearch }}" placeholder="Поиск по названию" style="{{ searchStyle }}">
+<select value="{{ dishStatus }}" onChange="{{ onDishStatus }}" style="{{ selectStyle }}">
+<option value="">Статус: любой</option>
+<sc-for list="{{ dishStatuses }}" as="s" hint-placeholder-count="2"><option value="{{ s }}">{{ s }}</option></sc-for>
+</select>
+<button onClick="{{ toggleSort }}" style="{{ sortBtn }}">Сначала худшая маржа</button>
+</div>
+<sc-if value="{{ narrow }}" hint-placeholder-val="{{ false }}">
+<div style="background:#fff;border:1px solid #e2e2de">
+<sc-for list="{{ dishRows }}" as="r" hint-placeholder-count="8">
+<button onClick="{{ r.toggle }}" style="{{ r.mobileRow }}">
+<span style="{{ mobileHead }}"><span style="{{ r.mobileName }}">{{ r.name }}</span><span style="{{ r.mobileUc }}">{{ r.ucStr }}</span></span>
+<span style="{{ mobileSub }}"><span style="font-family:'IBM Plex Mono',monospace">{{ r.legacy_id }}</span><span style="{{ r.mobileMargin }}">маржа {{ r.marginStr }}</span><span style="{{ r.warnStyle }}">{{ r.warnStr }}</span></span>
+<sc-if value="{{ r.isOpen }}" hint-placeholder-val="{{ false }}">
+<span style="{{ mobileDetail }}">
+<span style="{{ mobileKey }}">Категория</span><span style="{{ mobileVal }}">{{ r.category }}</span>
+<span style="{{ mobileKey }}">Цена меню</span><span style="{{ r.mobilePriceStyle }}">{{ r.priceStr }}</span>
+<span style="{{ mobileKey }}">UC %</span><span style="{{ mobileVal }}">{{ r.ucPctStr }}</span>
+<span style="{{ mobileKey }}">Выход</span><span style="{{ mobileVal }}">{{ r.outStr }}</span>
+</span>
+<span style="display:block;margin-top:12px"><span onClick="{{ r.open }}" style="{{ primaryBtnSm }}">Открыть карточку</span></span>
+</sc-if>
+</button>
+</sc-for>
+</div>
+</sc-if>
+<sc-if value="{{ wide }}" hint-placeholder-val="{{ true }}">
+<div style="background:#fff;border:1px solid #e2e2de;overflow-x:auto">
+<table style="{{ tableStyle }}">
+<thead><tr>
+<th style="{{ thL }}">id</th><th style="{{ thL }}">Название</th><th style="{{ thL }}">Категория</th>
+<th style="{{ thR }}">Цена меню</th><th style="{{ thR }}">UC ₽</th><th style="{{ thR }}">UC %</th><th style="{{ thR }}">Маржа %</th><th style="{{ thR }}">Выход</th><th style="{{ thR }}">Замечания</th>
+</tr></thead>
+<tbody>
+<sc-for list="{{ dishRows }}" as="r" hint-placeholder-count="12">
+<tr style="{{ r.rowStyle }}" style-hover="{{ rowHover }}" onClick="{{ r.open }}">
+<td style="{{ tdMono }}">{{ r.legacy_id }}</td>
+<td style="{{ r.nameStyle }}">{{ r.name }}</td>
+<td style="{{ tdMuted }}">{{ r.category }}</td>
+<td style="{{ r.priceStyle }}">{{ r.priceStr }}</td>
+<td style="{{ r.ucStyle }}">{{ r.ucStr }}</td>
+<td style="{{ r.ucPctStyle }}">{{ r.ucPctStr }}</td>
+<td style="{{ r.marginStyle }}">{{ r.marginStr }}</td>
+<td style="{{ tdNum }}">{{ r.outStr }}</td>
+<td style="{{ tdNum }}"><span style="{{ r.warnStyle }}">{{ r.warnStr }}</span></td>
+</tr>
+</sc-for>
+</tbody>
+</table>
+</div>
+</sc-if>
+<div style="display:flex;gap:22px;margin-top:12px;font-size:12px;color:#8b8e93;flex-wrap:wrap">
+<span><span style="display:inline-block;width:9px;height:9px;background:#fbe9e7;border:1px solid #e8b4ae;margin-right:6px"></span>Себестоимость выше цены меню — почти всегда перепутана единица измерения, проверьте её.</span>
+<span>«—» — цены меню нет, маржу считать не из чего. Это не ноль.</span>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isDish }}" hint-placeholder-val="{{ false }}">
+<div style="{{ pageStyle }}">
+<button onClick="{{ goDishes }}" style="background:none;border:none;padding:0;margin-bottom:14px;color:#6b6e73;font-size:12.5px;cursor:pointer" style-hover="{{ dimHover2 }}">← К списку блюд</button>
+<div style="background:#fff;border:1px solid #e2e2de;padding:20px 22px">
+<div style="{{ headRow }}">
+<div>
+<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+<h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-.015em">{{ d.name }}</h1>
+<span style="font:500 12px 'IBM Plex Mono',monospace;color:#6b6e73;background:#f2f2ef;padding:3px 6px">{{ d.legacy_id }}</span>
+</div>
+<div style="display:flex;gap:10px;align-items:center;margin-top:8px;font-size:12.5px;color:#6b6e73">
+<span>{{ d.category }}</span><span style="color:#cfcfc9">·</span><span>{{ d.status }}</span>
+</div>
+</div>
+<div style="{{ kpiRow }}">
+<div><div style="{{ kpiLabel }}">Цена меню</div><div style="{{ kpiValue }}">{{ d.priceStr }}</div></div>
+<div><div style="{{ kpiLabel }}">Себестоимость</div><div style="{{ kpiValue }}">{{ d.ucStr }}</div></div>
+<div><div style="{{ kpiLabel }}">Маржа</div><div style="{{ kpiValueAccent }}">{{ d.marginStr }}</div></div>
+</div>
+</div>
+<div style="{{ miniWrap }}">
+<div style="{{ miniCell }}"><div style="{{ kpiLabel }}">Выход</div><div style="{{ miniVal }}">{{ d.outStr }}</div></div>
+<div style="{{ miniCell }}"><div style="{{ kpiLabel }}">Белки</div><div style="{{ miniVal }}">{{ d.protein }}</div></div>
+<div style="{{ miniCell }}"><div style="{{ kpiLabel }}">Жиры</div><div style="{{ miniVal }}">{{ d.fat }}</div></div>
+<div style="{{ miniCell }}"><div style="{{ kpiLabel }}">Углеводы</div><div style="{{ miniVal }}">{{ d.carbs }}</div></div>
+<div style="{{ miniCell }}"><div style="{{ kpiLabel }}">Ккал</div><div style="{{ miniVal }}">{{ d.kcal }}</div></div>
+<div style="padding:0 18px"><div style="{{ kpiLabel }}">Покрытие КБЖУ</div><div style="{{ d.coverageStyle }}">{{ d.coverageStr }}</div></div>
+</div>
+<div style="{{ d.coverageNoteStyle }}">{{ d.coverageNote }}</div>
+</div>
+
+<div style="{{ detailGrid }}">
+<div style="background:#fff;border:1px solid #e2e2de">
+<div style="padding:13px 16px;border-bottom:1px solid #e2e2de;display:flex;align-items:baseline;gap:10px">
+<div style="font-size:14px;font-weight:600">Состав</div>
+<div style="font-size:12px;color:#8b8e93">нетто — сколько в блюде, брутто — сколько взять со склада; деньги считаются по брутто</div>
+</div>
+<sc-if value="{{ narrow }}" hint-placeholder-val="{{ false }}">
+<div>
+<sc-for list="{{ compMain }}" as="c" hint-placeholder-count="5">
+<div style="{{ compMobile }}">
+<div style="{{ mobileHead }}"><span style="font-size:13.5px;font-weight:500;line-height:1.35">{{ c.name }}</span><span style="font:600 13.5px 'IBM Plex Mono',monospace;white-space:nowrap">{{ c.costStr }}</span></div>
+<div style="{{ compMobileMeta }}"><span>нетто {{ c.netStr }}</span><span>брутто {{ c.grossStr }}</span><span>{{ c.priceStr }}</span><span>доля {{ c.shareStr }}</span></div>
+</div>
+</sc-for>
+<div style="{{ groupHead }}">Упаковка · в выход блюда не входит, брутто нет</div>
+<sc-for list="{{ compPack }}" as="c" hint-placeholder-count="2">
+<div style="{{ compMobile }}">
+<div style="{{ mobileHead }}"><span style="font-size:13.5px;font-weight:500;line-height:1.35">{{ c.name }}</span><span style="font:600 13.5px 'IBM Plex Mono',monospace;white-space:nowrap">{{ c.costStr }}</span></div>
+<div style="{{ compMobileMeta }}"><span>нетто {{ c.netStr }}</span><span style="color:#c2c4c7">брутто —</span><span>{{ c.priceStr }}</span><span>доля {{ c.shareStr }}</span></div>
+</div>
+</sc-for>
+</div>
+</sc-if>
+<sc-if value="{{ wide }}" hint-placeholder-val="{{ true }}">
+<div style="{{ tableWrap }}">
+<table style="{{ tableStyle }}">
+<thead><tr>
+<th style="{{ thL }}">Ингредиент</th><th style="{{ thL }}">Для айки</th><th style="{{ thR }}">Нетто</th><th style="{{ thR }}">Брутто</th><th style="{{ thR }}">Цена за ед.</th><th style="{{ thR }}">Стоимость</th><th style="{{ thR }}">Доля</th>
+</tr></thead>
+<tbody>
+<sc-for list="{{ compMain }}" as="c" hint-placeholder-count="5">
+<tr style="{{ compRow }}">
+<td style="{{ tdName }}">{{ c.name }}</td>
+<td style="{{ tdMuted }}">{{ c.short_name }}</td>
+<td style="{{ tdNum }}">{{ c.netStr }}</td>
+<td style="{{ c.grossStyle }}">{{ c.grossStr }}</td>
+<td style="{{ tdNum }}">{{ c.priceStr }}</td>
+<td style="{{ tdNumStrong }}">{{ c.costStr }}</td>
+<td style="{{ tdNum }}"><span style="{{ c.barWrap }}"><span style="{{ c.bar }}"></span>{{ c.shareStr }}</span></td>
+</tr>
+</sc-for>
+<tr><td colspan="7" style="{{ groupHead }}">Упаковка · в выход блюда не входит, брутто нет</td></tr>
+<sc-for list="{{ compPack }}" as="c" hint-placeholder-count="2">
+<tr style="{{ compRow }}">
+<td style="{{ tdName }}">{{ c.name }}</td>
+<td style="{{ tdMuted }}">{{ c.short_name }}</td>
+<td style="{{ tdNum }}">{{ c.netStr }}</td>
+<td style="{{ c.grossStyle }}">{{ c.grossStr }}</td>
+<td style="{{ tdNum }}">{{ c.priceStr }}</td>
+<td style="{{ tdNumStrong }}">{{ c.costStr }}</td>
+<td style="{{ tdNum }}"><span style="{{ c.barWrap }}"><span style="{{ c.bar }}"></span>{{ c.shareStr }}</span></td>
+</tr>
+</sc-for>
+</tbody>
+</table>
+</div>
+</sc-if>
+</div>
+
+<div style="background:#fff;border:1px solid #e2e2de">
+<div style="padding:13px 16px;border-bottom:1px solid #e2e2de;font-size:14px;font-weight:600">Замечания к расчёту</div>
+<div style="padding:6px 16px 16px">
+<sc-for list="{{ warnings }}" as="w" hint-placeholder-count="2">
+<div style="display:flex;gap:10px;padding:11px 0;border-bottom:1px solid #f2f2ef">
+<div style="width:3px;background:#9a6400;flex:none;margin-top:2px;margin-bottom:2px"></div>
+<div style="font-size:12.5px;line-height:1.5;color:#3a3c3f">{{ w }}</div>
+</div>
+</sc-for>
+<div style="font-size:11.5px;color:#8b8e93;line-height:1.5;margin-top:12px">Замечания показаны текстом целиком: они объясняют, откуда взялось число.</div>
+</div>
+</div>
+</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isRecon }}" hint-placeholder-val="{{ false }}">
+<div style="{{ pageStyle }}">
+<h1 style="margin:0 0 3px;font-size:21px;font-weight:600;letter-spacing:-.01em">Сверка справочника</h1>
+<div style="font-size:12.5px;color:#6b6e73;margin-bottom:18px">Карточки поваров и справочник лежат в разных таблицах. Решение по каждой оставшейся строке принимает человек.</div>
+<div style="{{ sumWrap }}">
+<div style="{{ sumCell }}"><div style="{{ kpiLabel }}">Карточек всего</div><div style="{{ sumVal }}">101</div></div>
+<div style="{{ sumCell }}"><div style="{{ kpiLabel }}">Связано по имени</div><div style="{{ sumVal }}">85</div></div>
+<div style="{{ sumCell }}"><div style="{{ kpiLabel }}">Требуют решения</div><div style="{{ sumValAlert }}">16</div></div>
+<div style="flex:1 1 240px;min-width:0;background:#fff;padding:14px 18px;display:flex;align-items:center">
+<div style="font-size:12px;color:#8b8e93;line-height:1.5">Кнопки «связать всё» здесь нет и не будет: полные тёзки различаются только ценой и единицей.</div>
+</div>
+</div>
+
+<div style="{{ groupTitle }}"><span style="{{ dotAmb }}"></span>Неоднозначные · 3 <span style="{{ groupHint }}">Несколько активных позиций с этим именем — выберите, какая имелась в виду</span></div>
+<sc-for list="{{ ambiguous }}" as="r" hint-placeholder-count="3">
+<div style="{{ card }}">
+<div style="{{ cardHead }}">
+<div><div style="font-size:14.5px;font-weight:600">{{ r.name }}</div><div style="{{ cardMeta }}">карточка {{ r.card_id }} · поставщик: {{ r.supplier }}</div></div>
+</div>
+<div style="padding:12px 16px 14px;display:flex;gap:12px;flex-wrap:wrap">
+<sc-for list="{{ r.candidates }}" as="c" hint-placeholder-count="2">
+<div style="{{ optBox }}" style-hover="{{ optHover }}">
+<div style="display:flex;align-items:baseline;gap:8px"><span style="{{ idChip }}">{{ c.legacy_id }}</span><span style="font-size:13px">{{ c.name }}</span></div>
+<div style="display:flex;gap:16px;margin-top:9px;font:500 13px 'IBM Plex Mono',monospace"><span>{{ c.priceStr }}</span><span style="color:#6b6e73">{{ c.unit }}</span><span style="{{ c.statusStyle }}">{{ c.status }}</span></div>
+<button style="{{ ghostBtn }}" style-hover="{{ ghostHover }}">Выбрать эту</button>
+</div>
+</sc-for>
+<div style="{{ noteBox }}">Ни один вариант не выбран заранее. Цена и единица подтянуты из справочника по id.</div>
+</div>
+</div>
+</sc-for>
+
+<div style="{{ groupTitle }}"><span style="{{ dotCand }}"></span>Похожие · 4 <span style="{{ groupHint }}">Точного совпадения нет — подтвердите или отвергните</span></div>
+<sc-for list="{{ candidates }}" as="r" hint-placeholder-count="2">
+<div style="{{ card }}">
+<div style="{{ cardHead }}">
+<div><div style="font-size:14.5px;font-weight:600">{{ r.name }}</div><div style="{{ cardMeta }}">карточка {{ r.card_id }} · поставщик: {{ r.supplier }}</div></div>
+<sc-if value="{{ r.hasCandidate }}" hint-placeholder-val="{{ true }}"><div style="{{ r.scoreStyle }}">похожесть {{ r.scoreStr }}</div></sc-if>
+</div>
+<sc-if value="{{ r.hasCandidate }}" hint-placeholder-val="{{ true }}">
+<div style="padding:13px 16px 15px">
+<div style="display:grid;grid-template-columns:96px 1fr;gap:8px 14px;align-items:baseline">
+<div style="{{ diffLabel }}">карточка</div>
+<div style="{{ diffLine }}"><sc-for list="{{ r.diffA }}" as="p" hint-placeholder-count="10"><span style="{{ p.style }}">{{ p.ch }}</span></sc-for></div>
+<div style="{{ diffLabel }}">справочник</div>
+<div style="{{ diffLine }}"><sc-for list="{{ r.diffB }}" as="p" hint-placeholder-count="10"><span style="{{ p.style }}">{{ p.ch }}</span></sc-for></div>
+</div>
+<div style="{{ r.diffNoteStyle }}">{{ r.diffNote }}</div>
+<div style="display:flex;gap:8px;margin-top:14px;align-items:center">
+<button style="{{ primaryBtnSm }}" style-hover="{{ primaryBtnHover }}">Подтвердить связь</button>
+<button style="{{ ghostBtn2 }}" style-hover="{{ ghostHover }}">Отвергнуть</button>
+<span style="font-size:11.5px;color:#8b8e93;margin-left:6px">Ручки записи ещё нет — кнопки на макете неактивны</span>
+</div>
+</div>
+</sc-if>
+<sc-if value="{{ r.isStub }}" hint-placeholder-val="{{ false }}">
+<div style="padding:13px 16px 15px">
+<div style="{{ stubBox }}">
+<div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:.08em;color:#8b8e93;margin-bottom:9px">МЕСТО ПОД КАНДИДАТА</div>
+<div style="font-size:12.5px;color:#6b6e73;line-height:1.55">Бэкенд пока отдаёт <span style="font-family:'IBM Plex Mono',monospace">candidates: []</span>. Здесь появится предложенная позиция справочника, её id, цена, единица и степень похожести <span style="font-family:'IBM Plex Mono',monospace">score</span> 0–1 с посимвольной подсветкой отличий.</div>
+</div>
+</div>
+</sc-if>
+</div>
+</sc-for>
+
+<div style="{{ groupTitle }}"><span style="{{ dotOrph }}"></span>Без пары · 9 <span style="{{ groupHint }}">Карточка есть, позиции справочника нет — калькулятор такой ингредиент не видит</span></div>
+<sc-if value="{{ narrow }}" hint-placeholder-val="{{ false }}">
+<div style="background:#fff;border:1px solid #e2e2de">
+<sc-for list="{{ orphans }}" as="r" hint-placeholder-count="5">
+<div style="{{ compMobile }}">
+<div style="font-size:13.5px;font-weight:500;line-height:1.35">{{ r.name }}</div>
+<div style="{{ compMobileMeta }}"><span>карточка {{ r.card_id }}</span><span>{{ r.supplier }}</span></div>
+<div style="display:flex;gap:8px;margin-top:10px"><button style="{{ ghostBtnXs }}">Завести в справочник</button><button style="{{ ghostBtnXs }}">Отложить</button></div>
+</div>
+</sc-for>
+</div>
+</sc-if>
+<sc-if value="{{ wide }}" hint-placeholder-val="{{ true }}">
+<div style="background:#fff;border:1px solid #e2e2de;overflow-x:auto">
+<table style="{{ tableStyle }}">
+<thead><tr><th style="{{ thL }}">Карточка</th><th style="{{ thL }}">Имя из карточки повара</th><th style="{{ thL }}">Поставщик</th><th style="{{ thR }}">Действие</th></tr></thead>
+<tbody>
+<sc-for list="{{ orphans }}" as="r" hint-placeholder-count="6">
+<tr style="{{ compRow }}">
+<td style="{{ tdMono }}">{{ r.card_id }}</td>
+<td style="{{ tdName }}">{{ r.name }}</td>
+<td style="{{ tdMuted }}">{{ r.supplier }}</td>
+<td style="{{ tdActions }}"><span style="display:inline-flex;gap:6px"><button style="{{ ghostBtnXs }}" style-hover="{{ ghostHover }}">Завести в справочник</button><button style="{{ ghostBtnXs }}" style-hover="{{ ghostHover }}">Отложить</button></span></td>
+</tr>
+</sc-for>
+</tbody>
+</table>
+</div>
+</sc-if>
+<div style="margin-top:10px;font-size:12px;color:#8b8e93;line-height:1.55">Имена показаны как есть — с опечатками, лишними пробелами и поставщиком «Хз». Именно они и есть признак того, что запись требует внимания.</div>
+</div>
+</sc-if>
+
+<sc-if value="{{ isStub }}" hint-placeholder-val="{{ false }}">
+<div style="{{ pageStyle }}">
+<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:3px;flex-wrap:wrap">
+<h1 style="margin:0;font-size:21px;font-weight:600;letter-spacing:-.01em">{{ stub.title }}</h1>
+<span style="{{ stub.tagStyle }}">{{ stub.tag }}</span>
+</div>
+<div style="font-size:12.5px;color:#6b6e73;margin-bottom:20px">Раздел появится позже. Здесь — то, что о нём известно, чтобы место в оболочке было осмысленным.</div>
+<div style="background:#fff;border:1px solid #e2e2de;padding:20px 22px">
+<div style="font-size:14px;line-height:1.65;max-width:640px">{{ stub.text }}</div>
+<div style="display:flex;gap:0;margin-top:20px;border-top:1px solid #eeeeea;padding-top:16px">
+<div style="{{ miniCell }}"><div style="{{ kpiLabel }}">Источник</div><div style="{{ stubMeta }}">{{ stub.source }}</div></div>
+<div style="padding:0 18px"><div style="{{ kpiLabel }}">Устройство</div><div style="{{ stub.deviceStyle }}">{{ stub.device }}</div></div>
+</div>
+</div>
+<div style="{{ stubPlaceholder }}">
+<div style="font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:.08em;color:#8b8e93">МЕСТО ПОД ЭКРАН · {{ stub.shape }}</div>
+</div>
+</div>
+</sc-if>
+
+</main>
+</div>
+</sc-if>
+
+</div>
+
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accentColor&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#2f5ecb&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;options&quot;:[&quot;#2f5ecb&quot;,&quot;#1f6f4a&quot;,&quot;#6b3fa0&quot;,&quot;#a33b1f&quot;],&quot;section&quot;:&quot;Тема&quot;},&quot;density&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;default&quot;:&quot;плотно&quot;,&quot;options&quot;:[&quot;плотно&quot;,&quot;свободно&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Тема&quot;}}">
+class Component extends DCLogic {
+  componentDidMount() {
+    this.onResize = () => this.setState({ vw: window.innerWidth });
+    window.addEventListener('resize', this.onResize);
+    this.onResize();
+  }
+  componentWillUnmount() { window.removeEventListener('resize', this.onResize); }
+
+  state = { vw: 1440, open: {}, sortMargin: false, screen: 'ingredients', ingSearch: '', ingStatus: '', dishSearch: '', dishStatus: '', email: 'karppacho123@yandex.ru', pass: '', loginError: true };
+
+  ing = [
+    [12,'Сахар','Бакалея','кг','активный','100.00',null,false],
+    [123,'Сахар','Бакалея','шт','активный','0.00',null,false],
+    [15,'Мука пшеничная в/с','Бакалея','кг','активный','42.50',null,true],
+    [18,'Соль поваренная','Бакалея','кг','активный','18.00',null,true],
+    [21,'Масло подсолнечное','Бакалея','л','активный','132.00',null,true],
+    [26,'Молоко 3,2%','Молочка','л','активный','78.40',null,true],
+    [27,'Масло сливочное 82,5%','Молочка','кг','активный','890.00',null,true],
+    [29,'Сыр моцарелла','Молочка','кг','активный','640.00',null,true],
+    [31,'Салат айсберг','Овощи','кг','активный','213.38',null,false],
+    [104,'Салат айсберг','Овощи','шт','активный','149.00','320.0',false],
+    [33,'Помидоры свежие','Овощи','кг','активный','189.00',null,true],
+    [34,'Булочка для датского хот дога','Полуфабрикаты','шт','активный','21.00','70.0',true],
+    [121,'Булочка для датского хот дога','Полуфабрикаты','шт','активный','24.30','70.0',false],
+    [37,'Огурцы маринованные резанные','Овощи','кг','активный','245.00',null,true],
+    [41,'Мортаделла','Мясо','кг','активный','720.00',null,true],
+    [44,'Круассан сливочный 60гр','Полуфабрикаты','шт','активный','49.50','60.0',true],
+    [47,'Корж для римской пиццы','Полуфабрикаты','шт','активный','58.00','210.0',false],
+    [52,'Кетчуп томатный','Соусы','кг','активный','96.00',null,true],
+    [55,'Соус сырный','Соусы','кг','активный','310.00',null,true],
+    [58,'Курица филе охл.','Мясо','кг','активный','385.00',null,true],
+    [60,'Бекон варёно-копчёный','Мясо','кг','активный','610.00',null,true],
+    [63,'Лук красный','Овощи','кг','архивный','96.00',null,false],
+    [66,'Кофе зерно арабика','Бакалея','кг','архивный','1450.00',null,false],
+    [71,'Сироп карамельный','Бакалея','л','активный','420.00',null,true],
+    [88,'Контейнер бумажный без крышки 207х127х55 крафт/черный','Упаковка','шт','активный','7.99','12.0',false],
+    [89,'Крышка к контейнеру 207х127','Упаковка','шт','активный','4.20','6.0',false],
+    [92,'Пакет бумажный крафт с ручками','Упаковка','шт','архивный','3.10','9.0',false]
+  ].map(a => ({ id:a[0], legacy_id:String(a[0]), name:a[1], category:a[2], unit:a[3], status:a[4], price_per_kg:a[5], weight_per_piece_g:a[6], has_card:a[7] }));
+
+  dishes = [
+    ['B001','Круасан с мортаделой','Блюдо','активное','369.00','84.66','22.9','77.1','72.000',1],
+    ['B002','Круасан с курицей и сыром','Блюдо','активное','349.00','96.12','27.5','72.5','185.000',0],
+    ['B003','Кетчуп','Соус-топпинг','активное',null,'5.52',null,null,'25.000',1],
+    ['B004','Соус сырный','Соус-топпинг','активное',null,'11.30',null,null,'30.000',0],
+    ['B005','Хот-дог датский','Блюдо','активное','299.00','78.94','26.4','73.6','210.000',2],
+    ['B006','Хот-дог с беконом','Блюдо','активное','329.00','92.41','28.1','71.9','225.000',0],
+    ['B007','Римская пицца маргарита','Блюдо','активное','459.00','118.73','25.9','74.1','340.000',1],
+    ['B008','Римская пицца пепперони','Блюдо','активное','529.00','147.02','27.8','72.2','355.000',0],
+    ['B009','Салат овощной','Блюдо','активное','219.00','61.08','27.9','72.1','180.000',0],
+    ['B010','Кофе американо 300','Напиток','активное','189.00','214.30','113.4','-13.4','300.000',3],
+    ['B011','Кофе латте 400','Напиток','активное','249.00','62.85','25.2','74.8','400.000',1],
+    ['B012','Сироп карамельный','Соус-топпинг','активное',null,'8.40',null,null,'20.000',0],
+    ['B013','Круассан пустой','Блюдо','архивное','159.00','52.49','33.0','67.0','60.000',0],
+    ['B014','Сэндвич с курицей','Блюдо','активное','289.00','83.17','28.8','71.2','195.000',1],
+    ['B015','Сэндвич с ветчиной','Блюдо','активное','269.00','74.55','27.7','72.3','190.000',0],
+    ['B016','Упаковка навынос','Соус-топпинг','активное',null,'12.19',null,null,'0.000',2],
+    ['B017','Пицца четыре сыра','Блюдо','активное','569.00','176.44','31.0','69.0','360.000',1],
+    ['B018','Салат с курицей','Блюдо','активное','319.00','98.61','30.9','69.1','230.000',0],
+    ['B019','Молочный коктейль','Напиток','активное','229.00','58.02','25.3','74.7','350.000',0],
+    ['B020','Чай чёрный 400','Напиток','активное','129.00','9.87','7.7','92.3','400.000',0],
+    ['B021','Картофель по-деревенски','Блюдо','активное','179.00','44.28','24.7','75.3','150.000',1],
+    ['B022','Соус чесночный','Соус-топпинг','архивное',null,'6.71',null,null,'25.000',0]
+  ].map(a => ({ legacy_id:a[0], name:a[1], category:a[2], status:a[3], price_menu:a[4], uc_rub:a[5], uc_percent:a[6], margin_percent:a[7], output_grams:a[8], warnings:a[9] }));
+
+  detail = {
+    legacy_id:'B001', name:'Круасан с мортаделой', category:'Блюдо', status:'активное',
+    price_menu:'369.00', uc_rub:'84.66', uc_percent:'22.9', margin_percent:'77.1', output_grams:'72.000',
+    protein_g:'4.1', fat_g:'14.1', carbs_g:'3.6', kcal:'159', kbju_coverage:'0.778',
+    components:[
+      {name:'Круассан сливочный 60гр',short_name:'Круассан',row_type:'main',unit:'шт',net_weight_g:'1.000',gross_weight_g:'1.00',price_per_unit:'49.50',cost_rub:'0.83',share_percent:'1.0'},
+      {name:'Мортаделла',short_name:'Мортаделла фиш',row_type:'main',unit:'кг',net_weight_g:'35.000',gross_weight_g:'36.05',price_per_unit:'720.00',cost_rub:'25.96',share_percent:'30.7'},
+      {name:'Сыр моцарелла',short_name:'Моцарелла блок',row_type:'main',unit:'кг',net_weight_g:'18.000',gross_weight_g:'18.36',price_per_unit:'640.00',cost_rub:'11.75',share_percent:'13.9'},
+      {name:'Салат айсберг',short_name:'Салат айсберг пф',row_type:'main',unit:'кг',net_weight_g:'16.000',gross_weight_g:'22.19',price_per_unit:'213.38',cost_rub:'4.74',share_percent:'5.6'},
+      {name:'Соус сырный',short_name:'',row_type:'main',unit:'кг',net_weight_g:'2.000',gross_weight_g:'2.00',price_per_unit:'310.00',cost_rub:'0.62',share_percent:'0.7'},
+      {name:'Контейнер бумажный без крышки 207х127х55 крафт/черный',short_name:'',row_type:'packaging',unit:'шт',net_weight_g:'1.000',gross_weight_g:null,price_per_unit:'7.99',cost_rub:'7.99',share_percent:'9.4'},
+      {name:'Крышка к контейнеру 207х127',short_name:'',row_type:'packaging',unit:'шт',net_weight_g:'1.000',gross_weight_g:null,price_per_unit:'4.20',cost_rub:'4.20',share_percent:'5.0'}
+    ],
+    warning_texts:['КБЖУ нет у 1 ингр. (Салат айсберг) — нутриенты приблизительны']
+  };
+
+  recon = {
+    ambiguous:[
+      {card_id:7,name:'Булочка для датского хот дога',supplier:'Хз',candidates:[34,121]},
+      {card_id:11,name:'Сахар',supplier:'Метро',candidates:[12,123]},
+      {card_id:19,name:'Салат айсберг',supplier:'Овощебаза №3',candidates:[31,104]}
+    ],
+    candidates:[
+      {card_id:41,name:'Огурцы маринованные не резаные',supplier:'Глобус',match:'Огурцы маринованные резанные',score:0.95,note:'95 % совпадения, смысл противоположный: «не резаные» против «резанные». Читайте подсветку, а не число.'},
+      {card_id:25,name:'Корж для римской пиццы',supplier:'Папа наполи',match:null,score:null,note:''},
+      {card_id:52,name:'Масло сливочное 82.5%',supplier:'Молторг',match:'Масло сливочное 82,5%',score:0.98,note:'Отличие только в разделителе дробной части — вероятно, одна и та же позиция.'},
+      {card_id:63,name:'Курица филе охлажд',supplier:'Птицепром',match:null,score:null,note:''}
+    ],
+    orphans:[
+      {card_id:24,name:'Оснвова для пиццы круглая , неаполитанская.',supplier:'Папа наполи'},
+      {card_id:28,name:'Трюфельная паста',supplier:'Хз'},
+      {card_id:33,name:'Кунжут белый обжаренный',supplier:'Бакалея опт'},
+      {card_id:38,name:'Сыр  чеддер слайсы',supplier:'Молторг'},
+      {card_id:44,name:'соус барбекю (новый)',supplier:'Хз'},
+      {card_id:49,name:'Перец чили сушёный',supplier:'Бакалея опт'},
+      {card_id:57,name:'Кола 0,33 ж/б',supplier:'Дистрибьютор напитков'},
+      {card_id:71,name:'Стакан 400 мл с крышкой ,',supplier:'Упакофф'},
+      {card_id:80,name:'Тесто слоёное бездрожжевое',supplier:'Папа наполи'}
+    ]
+  };
+
+  stubs = {
+    calc: { title: 'Расчётка', tag: 'фаза 3', phase: 'Фаза 3', source: 'kitchen_bot · листы «Расчётка»', device: 'десктоп', shape: 'плоская таблица, две вкладки',
+      text: 'Сводная таблица, по которой коммерческий отдел назначает розничные цены: название, цена продажная, себестоимость в рублях и процентах, маржа, вес, КБЖУ. Две вкладки — новинки и действующее меню. Колонку цены заполняют люди, остальное считается. Похоже на «Блюда», но плоско и без перехода в карточку.' },
+    competitors: { title: 'Конкуренты', tag: 'фаза 4', phase: 'Фаза 4', source: 'kitchen_bot · отдельная таблица', device: 'десктоп', shape: 'две таблицы: срез и история',
+      text: 'Раз в неделю снимаются меню восьми сайтов конкурентов, цены сравниваются с прошлым срезом. Нужны два вида: текущие позиции (сайт, категория, позиция, вес, цена) и история изменений (было, стало, на сколько, когда). В архиве 6775 позиций и 675 изменений с июля.' },
+    cards: { title: 'Карточки ингредиентов', tag: 'фаза 3 · телефон', phase: 'Фаза 3', source: 'pizza_bot_new целиком', device: 'телефон', shape: 'поток из шагов, не таблица',
+      text: 'То, что повар заполняет о новом продукте: фотография этикетки, распознавание состава и сроков годности, правка распознанного, ещё три фотографии продукта, согласование. Единственный раздел, куда пишут с телефона, — и единственное исключение из правила «мобильная версия не нужна». Закладывается отдельным потоком, не строкой таблицы.' },
+    tasting: { title: 'Дегустации', tag: 'фаза 4 · телефон', phase: 'Фаза 4', source: 'tasting_bot целиком', device: 'телефон (жюри) + десктоп (шеф)', shape: 'слепая оценка + экран прогресса',
+      text: 'Шеф заводит список продуктов и их разновидностей, жюри оценивают вслепую: видят номера, а не названия производителей. Пять оценок на позицию — визуал, вкус, что понравилось, что нет, комментарий. Жюри заходят по ссылке без учётной записи, с телефона. Шефу нужен экран прогресса: кто сколько оценил.' },
+    assistant: { title: 'Чат с ассистентом', tag: 'фаза 3', phase: 'Фаза 3', source: 'kitchen_bot · 14 инструментов', device: 'десктоп', shape: 'поток ответа с настоящими таблицами',
+      text: 'Свободный вопрос текстом: «посчитай UC чизбургера», «что подорожает, если говядина вырастет на 20 %», «предложи блюдо из остатков». Ответ приходит потоком, и внутри бывают таблицы с числами. Главное требование к вёрстке: таблица должна быть таблицей — в боте их приходилось рисовать пробелами в моноширинном блоке, ровно от этого и уходим.' }
+  };
+
+  num(v, dec) { if (v === null || v === undefined) return null; return Number(v).toLocaleString('ru-RU', { minimumFractionDigits: dec, maximumFractionDigits: dec }); }
+
+  diff(a, b) {
+    const m = a.length, n = b.length, dp = [];
+    for (let i = 0; i <= m; i++) { dp.push(new Array(n + 1).fill(0)); }
+    for (let i = m - 1; i >= 0; i--) for (let j = n - 1; j >= 0; j--) dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    const A = [], B = [];
+    let i = 0, j = 0;
+    while (i < m && j < n) {
+      if (a[i] === b[j]) { A.push([a[i], 0]); B.push([b[j], 0]); i++; j++; }
+      else if (dp[i + 1][j] >= dp[i][j + 1]) { A.push([a[i], 1]); i++; }
+      else { B.push([b[j], 1]); j++; }
+    }
+    while (i < m) { A.push([a[i], 1]); i++; }
+    while (j < n) { B.push([b[j], 1]); j++; }
+    const map = (arr, col) => arr.map((p, k) => ({ ch: p[0] === ' ' ? '\u00a0' : p[0], style: p[1] ? { background: col, color: '#1a1b1d', fontWeight: 600, padding: '1px 0' } : { color: '#6b6e73' } }));
+    return { a: map(A, '#ffd8d3'), b: map(B, '#d9ecd6') };
+  }
+
+  renderVals() {
+    const s = this.state, P = this.props;
+    const accent = P.accentColor || '#2f5ecb';
+    const dense = (P.density || 'плотно') === 'плотно';
+    const cp = dense ? '5px' : '9px';
+    const fs = dense ? '13px' : '13.5px';
+    const mono = "'IBM Plex Mono',monospace";
+    const go = (screen) => () => this.setState({ screen });
+
+    const tableStyle = { width: '100%', minWidth: '900px', borderCollapse: 'collapse', fontSize: fs, tableLayout: 'auto' };
+    const thBase = { position: 'sticky', top: 0, background: '#fafaf8', borderBottom: '1px solid #d8d8d2', padding: cp + ' 10px', fontSize: '11px', fontWeight: 600, letterSpacing: '.04em', textTransform: 'uppercase', color: '#6b6e73', whiteSpace: 'nowrap' };
+    const td = { padding: cp + ' 10px', borderBottom: '1px solid #f0f0ec', verticalAlign: 'top' };
+    const tdNum = Object.assign({}, td, { textAlign: 'right', fontFamily: mono, whiteSpace: 'nowrap' });
+    const muted = { color: '#8b8e93' };
+    const dash = Object.assign({}, tdNum, { color: '#c2c4c7', fontWeight: 400 });
+    const rowBase = { background: '#fff' };
+    const nameBase = Object.assign({}, td, { fontWeight: 500, maxWidth: '360px' });
+
+    const navItem = (active) => ({ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', textAlign: 'left', padding: '9px 10px', fontSize: '13px', border: 'none', cursor: 'pointer', background: active ? '#2d2f31' : 'transparent', color: active ? '#fff' : '#a9aaae', borderLeft: '2px solid ' + (active ? accent : 'transparent') });
+
+    const narrow = s.vw < 1080;
+    const toggle = (k) => () => this.setState(st => ({ open: Object.assign({}, st.open, { [k]: !st.open[k] }) }));
+    const pageStyle = { padding: narrow ? '18px 14px 70px' : '26px 30px 60px' };
+    const listRow = { display: 'block', width: '100%', textAlign: 'left', background: '#fff', border: 'none', borderBottom: '1px solid #ececE6', padding: '11px 13px', cursor: 'pointer', font: 'inherit' };
+    const tagChip = (mobile) => ({ font: '500 10px ' + mono, letterSpacing: '.04em', padding: '3px 5px', background: mobile ? '#3a3226' : '#2d2f31', color: mobile ? '#d8b877' : '#8b8e93', whiteSpace: 'nowrap' });
+    const phaseNav = (keys) => keys.map(k => {
+      const st = this.stubs[k], mobile = st.device.indexOf('телефон') === 0;
+      return { title: st.title, tag: mobile ? 'телефон' : 'позже', tagStyle: tagChip(mobile), style: navItem(s.screen === 'stub' && s.stubKey === k), go: () => this.setState({ screen: 'stub', stubKey: k }) };
+    });
+    const sk = this.stubs[s.stubKey] || this.stubs.calc;
+    const skMobile = sk.device.indexOf('телефон') >= 0;
+    const stubView = Object.assign({}, sk, { tag: 'появится позже',
+      tagStyle: { font: '500 11px ' + mono, padding: '3px 7px', background: '#f2f2ef', color: '#6b6e73' },
+      deviceStyle: { fontSize: '13px', fontWeight: 500, marginTop: '5px', color: skMobile ? '#9a6400' : '#1a1b1d' }
+    });
+
+    const ingStatuses = Array.from(new Set(this.ing.map(i => i.status)));
+    const dishStatuses = Array.from(new Set(this.dishes.map(d => d.status)));
+
+    const ingRows = this.ing
+      .filter(i => (!s.ingSearch || i.name.toLowerCase().includes(s.ingSearch.toLowerCase())) && (!s.ingStatus || i.status === s.ingStatus))
+      .map(i => {
+        const arch = i.status !== 'активный';
+        return {
+          legacy_id: i.legacy_id, name: i.name, category: i.category, unit: i.unit, status: i.status,
+          isOpen: !!s.open['i' + i.id], toggle: toggle('i' + i.id),
+          mobileName: { fontSize: '14px', fontWeight: 500, lineHeight: 1.35, color: arch ? '#6b6e73' : '#1a1b1d' },
+          mobilePrice: { font: '600 14px ' + mono, whiteSpace: 'nowrap', marginLeft: '12px' },
+          mobileWeight: { fontFamily: mono, textAlign: 'right', color: i.weight_per_piece_g === null ? '#c2c4c7' : '#1a1b1d' },
+          priceStr: this.num(i.price_per_kg, 2) + ' ₽/' + i.unit,
+          weightStr: i.weight_per_piece_g === null ? '—' : this.num(i.weight_per_piece_g, 1) + ' г',
+          weightStyle: i.weight_per_piece_g === null ? dash : tdNum,
+          rowStyle: Object.assign({}, rowBase, arch ? { background: '#fbfbf9', color: '#8b8e93' } : null),
+          nameStyle: Object.assign({}, nameBase, arch ? { fontWeight: 400, color: '#6b6e73', textDecoration: 'line-through', textDecorationColor: '#d5d5cf' } : null),
+          statusStyle: { fontSize: '11.5px', padding: '2px 6px', background: arch ? '#eceae3' : '#eaf0fb', color: arch ? '#7a7466' : '#2b4c8f' },
+          cardStr: i.has_card ? 'есть' : 'нет карточки',
+          cardStyle: { fontSize: '11.5px', padding: '2px 6px', background: i.has_card ? 'transparent' : '#fdf3e3', color: i.has_card ? '#6b6e73' : '#9a6400', border: i.has_card ? '1px solid #e6e6e0' : '1px solid #f0dcb8' }
+        };
+      });
+
+    const dishRows = this.dishes
+      .filter(d => (!s.dishSearch || d.name.toLowerCase().includes(s.dishSearch.toLowerCase())) && (!s.dishStatus || d.status === s.dishStatus))
+      .slice()
+      .sort((a, b) => s.sortMargin ? (a.margin_percent === null ? 1 : b.margin_percent === null ? -1 : Number(a.margin_percent) - Number(b.margin_percent)) : 0)
+      .map(d => {
+        const loss = d.price_menu !== null && Number(d.uc_rub) > Number(d.price_menu);
+        const noPrice = d.price_menu === null;
+        const arch = d.status !== 'активное';
+        return {
+          legacy_id: d.legacy_id, name: d.name, category: d.category,
+          open: () => this.setState({ screen: 'dish' }),
+          isOpen: !!s.open['d' + d.legacy_id], toggle: toggle('d' + d.legacy_id),
+          mobileName: { fontSize: '14px', fontWeight: 500, lineHeight: 1.35, color: arch ? '#6b6e73' : '#1a1b1d' },
+          mobileUc: { font: '600 14px ' + mono, color: loss ? '#b3261e' : '#1a1b1d', whiteSpace: 'nowrap' },
+          mobileMargin: { font: '500 13px ' + mono, color: d.margin_percent === null ? '#c2c4c7' : (loss ? '#b3261e' : '#6b6e73'), whiteSpace: 'nowrap' },
+          mobileRow: Object.assign({}, listRow, loss ? { background: '#fbe9e7' } : null),
+          mobilePriceStyle: { fontFamily: mono, textAlign: 'right', color: noPrice ? '#c2c4c7' : '#1a1b1d' },
+          rowStyle: Object.assign({}, rowBase, { cursor: 'pointer' }, loss ? { background: '#fbe9e7' } : null, arch ? { background: '#fbfbf9', color: '#8b8e93' } : null),
+          nameStyle: Object.assign({}, nameBase, arch ? { fontWeight: 400, color: '#6b6e73' } : null),
+          priceStr: noPrice ? '—' : this.num(d.price_menu, 2) + ' ₽',
+          priceStyle: noPrice ? dash : tdNum,
+          ucStr: this.num(d.uc_rub, 2) + ' ₽',
+          ucStyle: Object.assign({}, tdNum, loss ? { color: '#b3261e', fontWeight: 600 } : null),
+          ucPctStr: d.uc_percent === null ? '—' : this.num(d.uc_percent, 1) + ' %',
+          ucPctStyle: d.uc_percent === null ? dash : Object.assign({}, tdNum, loss ? { color: '#b3261e' } : null),
+          marginStr: d.margin_percent === null ? '—' : this.num(d.margin_percent, 1) + ' %',
+          marginStyle: d.margin_percent === null ? dash : Object.assign({}, tdNum, loss ? { color: '#b3261e', fontWeight: 600 } : null),
+          outStr: this.num(d.output_grams, 0) + ' г',
+          warnStr: d.warnings === 0 ? '0' : String(d.warnings),
+          warnStyle: d.warnings === 0 ? { color: '#c2c4c7' } : { padding: '1px 6px', background: '#fdf3e3', color: '#9a6400', fontWeight: 600 }
+        };
+      });
+
+    const dt = this.detail;
+    const comp = (c) => ({
+      name: c.name, short_name: c.short_name || c.name,
+      netStr: this.num(c.net_weight_g, c.unit === 'шт' ? 0 : 1) + (c.unit === 'шт' ? ' шт' : ' г'),
+      grossStr: c.gross_weight_g === null ? '—' : this.num(c.gross_weight_g, 2) + ' г',
+      grossStyle: c.gross_weight_g === null ? dash : tdNum,
+      priceStr: this.num(c.price_per_unit, 2) + ' ₽/' + c.unit,
+      costStr: this.num(c.cost_rub, 2) + ' ₽',
+      shareStr: this.num(c.share_percent, 1) + ' %',
+      barWrap: { display: 'inline-flex', alignItems: 'center', gap: '7px' },
+      bar: { display: 'inline-block', width: Math.max(2, Number(c.share_percent) * 1.4) + 'px', height: '6px', background: accent, opacity: 0.55 }
+    });
+    const cov = Number(dt.kbju_coverage);
+    const lowCov = cov < 0.5;
+
+    const ambiguous = this.recon.ambiguous.map(r => Object.assign({}, r, {
+      candidates: r.candidates.map(id => {
+        const i = this.ing.find(x => x.id === id) || this.ing[0];
+        return { legacy_id: i.legacy_id, name: i.name, unit: i.unit, status: i.status, priceStr: this.num(i.price_per_kg, 2) + ' ₽/' + i.unit, statusStyle: { color: i.status === 'активный' ? '#6b6e73' : '#9a6400' } };
+      })
+    }));
+
+    const candidates = this.recon.candidates.map(r => {
+      const has = !!r.match;
+      const d = has ? this.diff(r.name, r.match) : { a: [], b: [] };
+      const risky = has && r.score >= 0.9 && /(^|\s)не\s/.test(r.name) !== /(^|\s)не\s/.test(r.match);
+      return {
+        card_id: r.card_id, name: r.name, supplier: r.supplier, hasCandidate: has, isStub: !has,
+        scoreStr: has ? this.num(r.score * 100, 0) + ' %' : '',
+        scoreStyle: { font: "500 12px " + mono, padding: '4px 8px', background: risky ? '#fbe9e7' : '#f2f2ef', color: risky ? '#b3261e' : '#6b6e73' },
+        diffA: d.a, diffB: d.b, diffNote: r.note,
+        diffNoteStyle: { marginTop: '11px', fontSize: '12.5px', lineHeight: 1.55, color: risky ? '#b3261e' : '#6b6e73', borderLeft: '2px solid ' + (risky ? '#b3261e' : '#e2e2de'), paddingLeft: '10px' }
+      };
+    });
+
+    return {
+      accent, narrow, wide: !narrow, pageStyle, listRow,
+      rootStyle: { minWidth: '320px', minHeight: '100vh', background: '#f2f2ef', overflowX: 'hidden' },
+      tableWrap: { overflowX: 'auto', maxWidth: '100%' },
+      shellStyle: narrow ? { display: 'block' } : { display: 'grid', gridTemplateColumns: '216px 1fr', minHeight: '100vh' },
+      asideStyle: narrow
+        ? { background: '#1a1b1d', color: '#e8e8e4', position: 'sticky', top: 0, zIndex: 5 }
+        : { background: '#1a1b1d', color: '#e8e8e4', display: 'flex', flexDirection: 'column', position: 'sticky', top: 0, height: '100vh' },
+      brandStyle: narrow
+        ? { padding: '12px 14px', display: 'flex', alignItems: 'center', gap: '9px', justifyContent: 'space-between' }
+        : { padding: '20px 18px 22px', display: 'flex', alignItems: 'center', gap: '9px' },
+      navStyle: narrow
+        ? { display: (s.menu ? 'flex' : 'none'), flexDirection: 'column', padding: '0 8px 10px', gap: '1px', borderTop: '1px solid #2d2f31' }
+        : { display: 'flex', flexDirection: 'column', padding: '0 8px', gap: '1px', overflowY: 'auto' },
+      userStyle: narrow
+        ? { display: (s.menu ? 'block' : 'none'), padding: '12px 18px 16px', borderTop: '1px solid #2d2f31' }
+        : { marginTop: 'auto', padding: '16px 18px', borderTop: '1px solid #2d2f31' },
+      menuBtn: { display: narrow ? 'inline-flex' : 'none', alignItems: 'center', gap: '7px', background: 'none', border: '1px solid #3a3c3f', color: '#c9c9c3', padding: '5px 9px', fontSize: '12px', cursor: 'pointer' },
+      menuLabel: s.menu ? 'Закрыть' : 'Разделы',
+      toggleMenu: () => this.setState({ menu: !s.menu }),
+      detailGrid: narrow ? { display: 'flex', flexDirection: 'column', gap: '14px', marginTop: '14px' } : { display: 'grid', gridTemplateColumns: '1fr 330px', gap: '18px', marginTop: '18px', alignItems: 'start' },
+      kpiRow: { display: 'flex', gap: narrow ? '18px' : '34px', flexWrap: 'wrap' },
+      headRow: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: narrow ? '14px' : '24px', flexWrap: narrow ? 'wrap' : 'nowrap' },
+      miniWrap: { display: 'flex', flexWrap: 'wrap', gap: narrow ? '14px 0' : '0', marginTop: '20px', borderTop: '1px solid #eeeeea', paddingTop: '16px' },
+      filterRow: { display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '14px' },
+      searchStyle: { width: narrow ? '100%' : '300px', boxSizing: 'border-box', padding: narrow ? '10px' : '7px 10px', fontSize: '13px', border: '1px solid #cfcfc9', background: '#fff', outline: 'none' },
+      selectStyle: { padding: narrow ? '9px 8px' : '7px 8px', fontSize: '13px', border: '1px solid #cfcfc9', background: '#fff', outline: 'none' },
+      sortBtn: { display: narrow ? 'inline-block' : 'none', padding: '9px 12px', fontSize: '13px', border: '1px solid ' + (s.sortMargin ? accent : '#cfcfc9'), color: s.sortMargin ? accent : '#1a1b1d', background: '#fff', cursor: 'pointer' },
+      toggleSort: () => this.setState({ sortMargin: !s.sortMargin }),
+      mobileHead: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: '10px' },
+      mobileSub: { display: 'flex', alignItems: 'center', gap: '8px', marginTop: '6px', fontSize: '12px', color: '#8b8e93' },
+      mobileDetail: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '6px 14px', marginTop: '11px', paddingTop: '10px', borderTop: '1px solid #f0f0ec', fontSize: '12.5px' },
+      mobileKey: { color: '#8b8e93' },
+      compMobile: { padding: '11px 13px', borderBottom: '1px solid #f0f0ec' },
+      compMobileMeta: { display: 'flex', flexWrap: 'wrap', gap: '4px 14px', marginTop: '7px', font: "400 12px 'IBM Plex Mono',monospace", color: '#6b6e73' },
+      mobileVal: { fontFamily: mono, textAlign: 'right' },
+      isLogin: s.screen === 'login', isApp: s.screen !== 'login',
+      isIngredients: s.screen === 'ingredients', isDishes: s.screen === 'dishes', isDish: s.screen === 'dish', isRecon: s.screen === 'recon',
+      goLogin: go('login'), goIngredients: go('ingredients'), goDishes: go('dishes'), goRecon: go('recon'),
+      navIng: navItem(s.screen === 'ingredients'), navDish: navItem(s.screen === 'dishes' || s.screen === 'dish'), navRec: navItem(s.screen === 'recon'),
+      navGroup: { padding: '16px 12px 6px', font: '600 10px ' + mono, letterSpacing: '.1em', textTransform: 'uppercase', color: '#68696d' },
+      phaseLater: phaseNav(['calc', 'cards', 'assistant', 'competitors', 'tasting']),
+      isStub: s.screen === 'stub', stub: stubView,
+      stubMeta: { fontSize: '13px', fontWeight: 500, marginTop: '5px' },
+      stubPlaceholder: { marginTop: '14px', height: '190px', display: 'grid', placeItems: 'center', border: '1px dashed #cfcfc9', background: 'repeating-linear-gradient(135deg,#fafaf8 0 8px,#f4f4f1 8px 16px)' },
+      reconBadge: { font: '600 11px ' + mono, padding: '2px 5px', background: '#9a6400', color: '#fff' },
+      dimHover: { color: '#e8e8e4' }, dimHover2: { color: '#1a1b1d' },
+      rowHover: { background: '#f6f6fb' },
+      loginEmail: s.email, loginPass: s.pass, loginError: s.loginError,
+      onLoginEmail: (e) => this.setState({ email: e.target.value }), onLoginPass: (e) => this.setState({ pass: e.target.value }),
+      onLogin: () => this.setState({ screen: 'ingredients' }),
+      primaryBtn: { width: '100%', padding: '10px', fontSize: '13.5px', fontWeight: 600, color: '#fff', background: accent, border: 'none', cursor: 'pointer' },
+      primaryBtnSm: { padding: '7px 13px', fontSize: '12.5px', fontWeight: 600, color: '#fff', background: accent, border: 'none', cursor: 'pointer' },
+      primaryBtnHover: { filter: 'brightness(.9)' },
+      ghostBtn: { marginTop: '11px', width: '100%', padding: '6px', fontSize: '12.5px', background: '#fff', border: '1px solid #cfcfc9', cursor: 'pointer', color: '#1a1b1d' },
+      ghostBtn2: { padding: '7px 13px', fontSize: '12.5px', background: '#fff', border: '1px solid #cfcfc9', cursor: 'pointer', color: '#1a1b1d' },
+      ghostBtnXs: { padding: '4px 9px', fontSize: '12px', background: '#fff', border: '1px solid #cfcfc9', cursor: 'pointer', color: '#1a1b1d' },
+      ghostHover: { borderColor: '#8b8e93' },
+      tableStyle, thL: Object.assign({}, thBase, { textAlign: 'left' }), thR: Object.assign({}, thBase, { textAlign: 'right' }),
+      td, tdMuted: Object.assign({}, td, muted), tdNum, tdNumStrong: Object.assign({}, tdNum, { fontWeight: 600 }),
+      tdMono: Object.assign({}, td, { fontFamily: mono, color: '#6b6e73', whiteSpace: 'nowrap' }),
+      tdName: Object.assign({}, td, { fontWeight: 500, maxWidth: '380px' }),
+      tdActions: Object.assign({}, td, { textAlign: 'right', whiteSpace: 'nowrap' }),
+      compRow: { background: '#fff' },
+      groupHead: { padding: '9px 10px', background: '#fafaf8', borderTop: '1px solid #e2e2de', borderBottom: '1px solid #f0f0ec', fontSize: '11px', letterSpacing: '.04em', textTransform: 'uppercase', color: '#8b8e93', fontWeight: 600 },
+      ingRows, ingCount: ingRows.length, ingStatuses, ingSearch: s.ingSearch, ingStatus: s.ingStatus,
+      onIngSearch: (e) => this.setState({ ingSearch: e.target.value }), onIngStatus: (e) => this.setState({ ingStatus: e.target.value }),
+      dishRows, dishCount: dishRows.length, dishStatuses, dishSearch: s.dishSearch, dishStatus: s.dishStatus,
+      onDishSearch: (e) => this.setState({ dishSearch: e.target.value }), onDishStatus: (e) => this.setState({ dishStatus: e.target.value }),
+      d: {
+        name: dt.name, legacy_id: dt.legacy_id, category: dt.category, status: dt.status,
+        priceStr: this.num(dt.price_menu, 2) + ' ₽', ucStr: this.num(dt.uc_rub, 2) + ' ₽', marginStr: this.num(dt.margin_percent, 1) + ' %',
+        outStr: this.num(dt.output_grams, 0) + ' г', protein: this.num(dt.protein_g, 1) + ' г', fat: this.num(dt.fat_g, 1) + ' г',
+        carbs: this.num(dt.carbs_g, 1) + ' г', kcal: dt.kcal,
+        coverageStr: this.num(cov * 100, 1) + ' %',
+        coverageStyle: { fontSize: '17px', fontWeight: 600, fontFamily: mono, marginTop: '5px', color: lowCov ? '#b3261e' : '#9a6400' },
+        coverageNote: 'КБЖУ заполнено у ' + this.num(cov * 100, 1) + ' % веса состава: у «Салата айсберг» данных нет, а он весит почти четверть блюда. ' + (lowCov ? 'Ниже 50 % цифрам доверять нельзя.' : 'Нутриенты приблизительны.'),
+        coverageNoteStyle: { marginTop: '14px', fontSize: '12.5px', lineHeight: 1.55, color: lowCov ? '#b3261e' : '#6b6e73', borderLeft: '2px solid ' + (lowCov ? '#b3261e' : '#e9c98a'), paddingLeft: '10px' }
+      },
+      compMain: dt.components.filter(c => c.row_type === 'main').map(comp),
+      compPack: dt.components.filter(c => c.row_type === 'packaging').map(comp),
+      warnings: dt.warning_texts,
+      kpiLabel: { fontSize: '11px', letterSpacing: '.04em', textTransform: 'uppercase', color: '#8b8e93', fontWeight: 600 },
+      kpiValue: { fontSize: '26px', fontWeight: 600, fontFamily: mono, marginTop: '4px', letterSpacing: '-.02em' },
+      kpiValueAccent: { fontSize: '26px', fontWeight: 600, fontFamily: mono, marginTop: '4px', letterSpacing: '-.02em', color: accent },
+      miniCell: { padding: '0 18px 0 0', marginRight: '18px', borderRight: '1px solid #eeeeea' },
+      miniVal: { fontSize: '17px', fontWeight: 600, fontFamily: mono, marginTop: '5px' },
+      sumWrap: { display: 'flex', flexWrap: 'wrap', gap: '1px', background: '#e2e2de', border: '1px solid #e2e2de', marginBottom: '22px' },
+      sumCell: { background: '#fff', padding: '14px 18px', flex: narrow ? '1 1 96px' : '0 0 auto', minWidth: narrow ? '0' : '150px' },
+      sumVal: { fontSize: '24px', fontWeight: 600, fontFamily: mono, marginTop: '4px' },
+      sumValAlert: { fontSize: '24px', fontWeight: 600, fontFamily: mono, marginTop: '4px', color: '#9a6400' },
+      groupTitle: { display: 'flex', alignItems: 'center', gap: '9px', flexWrap: 'wrap', margin: '26px 0 11px', fontSize: '14px', fontWeight: 600 },
+      groupHint: { fontSize: '12px', fontWeight: 400, color: '#8b8e93', marginLeft: '4px' },
+      dotAmb: { width: '9px', height: '9px', background: '#9a6400', display: 'inline-block' },
+      dotCand: { width: '9px', height: '9px', background: accent, display: 'inline-block' },
+      dotOrph: { width: '9px', height: '9px', background: '#b3261e', display: 'inline-block' },
+      card: { background: '#fff', border: '1px solid #e2e2de', marginBottom: '10px' },
+      cardHead: { display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '18px', padding: '13px 16px', borderBottom: '1px solid #f0f0ec' },
+      cardMeta: { font: '400 11.5px ' + mono, color: '#8b8e93', marginTop: '4px' },
+      optBox: { flex: '1 1 240px', maxWidth: narrow ? 'none' : '280px', minWidth: 0, border: '1px solid #e2e2de', padding: '12px 13px 13px', background: '#fdfdfc' },
+      optHover: { borderColor: '#8b8e93' },
+      idChip: { font: '500 11px ' + mono, padding: '2px 5px', background: '#f2f2ef', color: '#6b6e73' },
+      noteBox: { flex: 1, minWidth: '200px', fontSize: '12px', lineHeight: 1.55, color: '#8b8e93', alignSelf: 'center' },
+      stubBox: { border: '1px dashed #cfcfc9', background: 'repeating-linear-gradient(135deg,#fafaf8 0 8px,#f4f4f1 8px 16px)', padding: '14px 16px' },
+      diffLabel: { font: '500 11px ' + mono, letterSpacing: '.05em', textTransform: 'uppercase', color: '#8b8e93' },
+      diffLine: { fontFamily: mono, fontSize: '14px', lineHeight: 1.6, wordBreak: 'break-word' },
+      ambiguous, candidates, orphans: this.recon.orphans
+    };
+  }
+}
+</script>
+</body>
+</html>

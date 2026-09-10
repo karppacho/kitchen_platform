@@ -15,8 +15,13 @@ repos:
       - id: check-merge-conflict
       - id: check-yaml
       - id: check-toml
+      # Выгрузку макета не трогаем: она должна остаться байт в байт
+      # такой, какой её отдал дизайн-инструмент. Иначе каждая повторная
+      # выгрузка даёт разницу из-за хуков, а не из-за правок дизайна.
       - id: end-of-file-fixer
+        exclude: ^docs/design/
       - id: trailing-whitespace
+        exclude: ^docs/design/
       - id: detect-private-key
       # Шелл-скрипты только с LF: CRLF из Windows уже ломал боевой сервер.
       - id: mixed-line-ending

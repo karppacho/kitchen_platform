@@ -19,3 +19,8 @@ Makefile text eol=lf
 *.pdf   binary
 *.docx  binary
 *.xlsx  binary
+*.webp  binary
+
+# Превью макета: WebP без расширения, под общее правило `* text=auto` не
+# должен попадать ни при каких обстоятельствах.
+docs/design/.thumbnail binary
