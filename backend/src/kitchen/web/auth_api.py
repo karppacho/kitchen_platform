@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Annotated
-from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -71,18 +70,12 @@ def token_request(
     разделены намеренно: спутать их значит заставить человека перебирать
     пароли, когда лежит Supabase.
     """
-    # httpx по умолчанию требует ascii в значениях заголовков. Настоящий
-    # ключ Supabase — JWT, он всегда ascii, но кодировку задаём явно, а не
-    # полагаемся на автоопределение httpx по всему набору заголовков.
-    headers = httpx.Headers(
-        {"apikey": settings.supabase_anon_key.get_secret_value()}, encoding="utf-8"
-    )
     try:
         reply = client.post(
             f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
             params={"grant_type": grant_type},
             json=payload,
-            headers=headers,
+            headers={"apikey": settings.supabase_anon_key.get_secret_value()},
             timeout=GOTRUE_TIMEOUT,
         )
     except httpx.HTTPError as error:
@@ -113,17 +106,11 @@ def set_cookies(response: Response, tokens: Tokens, settings: Settings) -> None:
     Продление уходит на сервер только при обращении к самим ручкам входа,
     а не в каждом запросе за списком блюд. Статика кук не получает вовсе —
     она лежит вне /api.
-
-    Значения percent-encode: GoTrue отдаёт токены как непрозрачную строку,
-    а cookie-октет (RFC 6265) допускает не любой байт. Настоящий JWT и
-    настоящий refresh-токен состоят из символов, которые quote() не тронет,
-    так что для них это no-op; кодирование — просто страховка от того, чего
-    мы у поставщика не контролируем.
     """
     secure = settings.session_cookie_secure
     response.set_cookie(
         ACCESS_COOKIE,
-        quote(tokens.access, safe=""),
+        tokens.access,
         max_age=tokens.expires_in,
         path="/api",
         httponly=True,
@@ -132,7 +119,7 @@ def set_cookies(response: Response, tokens: Tokens, settings: Settings) -> None:
     )
     response.set_cookie(
         REFRESH_COOKIE,
-        quote(tokens.refresh, safe=""),
+        tokens.refresh,
         max_age=REFRESH_MAX_AGE,
         path="/api/auth",
         httponly=True,

@@ -69,7 +69,7 @@ def make_client(
     settings = Settings(  # type: ignore[call-arg]
         app_env="test",
         supabase_url="http://supabase.test",
-        supabase_anon_key="ключ-anon",
+        supabase_anon_key="anon-key-test",
         supabase_jwt_secret=SECRET,
         session_cookie_secure=True,
     )
@@ -119,7 +119,7 @@ def test_without_token_gives_401() -> None:
 # ---------------------------------------------------------------------------
 GOOD = {
     "access_token": make_token(),
-    "refresh_token": "refresh-первый",
+    "refresh_token": "refresh-token-1",
     "expires_in": 3600,
     "token_type": "bearer",
 }
@@ -176,7 +176,7 @@ def test_login_passes_anon_key_to_gotrue() -> None:
         "/api/auth/login", json={"email": "chef@example.com", "password": "пароль"}
     )
 
-    assert handler.seen.headers["apikey"] == "ключ-anon"  # type: ignore[attr-defined]
+    assert handler.seen.headers["apikey"] == "anon-key-test"  # type: ignore[attr-defined]
     assert handler.seen.url.params["grant_type"] == "password"  # type: ignore[attr-defined]
 
 
