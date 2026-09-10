@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 
-/** Переключение между таблицей и списком. То же число стоит в table.css. */
+/** Переключение между таблицей и списком. Порог только здесь: в table.css
+    никакого @media нет, дублировать и рассинхронизировать нечего. */
 export const WIDE = '(min-width: 1080px)'
 
 export function useWide(): boolean {

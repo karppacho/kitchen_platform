@@ -52,9 +52,36 @@ test('остальное раскрывается по тапу', async () => {
   setViewport(360)
   narisovat()
 
+  // До тапа второстепенного нет — иначе тест прошла бы и реализация,
+  // рисующая всё сразу.
+  expect(screen.queryByText('Соус-топпинг')).not.toBeInTheDocument()
+
   await userEvent.click(screen.getByRole('button', { name: /подробнее/i }))
 
   expect(screen.getByText('Соус-топпинг')).toBeInTheDocument()
+})
+
+test('карточку на узком экране можно открыть с клавиатуры', async () => {
+  setViewport(360)
+  const otkryto: string[] = []
+  render(
+    <DataTable
+      columns={kolonki}
+      rows={stroki}
+      rowKey={(r) => r.id}
+      empty="Ничего не найдено"
+      onOpen={(r) => otkryto.push(r.id)}
+    />,
+  )
+
+  // Карточка — первый фокусируемый элемент строки; таб на неё, Enter —
+  // и onOpen должен сработать, как и на широком экране у <tr>.
+  await userEvent.tab()
+  expect(screen.getByRole('button', { name: /Кетчуп/i })).toHaveFocus()
+
+  await userEvent.keyboard('{Enter}')
+
+  expect(otkryto).toEqual(['B003'])
 })
 
 test('пустой ответ объясняется словами, а не пустотой', () => {

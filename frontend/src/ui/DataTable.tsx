@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useId, useState, type ReactNode } from 'react'
 
 import './table.css'
 import { useWide } from './useWide'
@@ -113,23 +113,41 @@ function Kartochka<T>({
   onOpen?: (row: T) => void
 }) {
   const [raskryto, raskryt] = useState(false)
+  // Общий id между кнопкой-раскрытием и блоком подробностей — программе
+  // чтения с экрана есть на что сослаться через aria-controls.
+  const podrobnoId = useId()
+
+  const glavnoe = glavnye.map((k) => (
+    <span key={k.key} className={k.align === 'right' ? 'vpravo' : undefined}>
+      {k.render(row)}
+    </span>
+  ))
 
   return (
     <li className={klass}>
-      <div className="spisok-glavnoe" onClick={onOpen ? () => onOpen(row) : undefined}>
-        {glavnye.map((k) => (
-          <span key={k.key} className={k.align === 'right' ? 'vpravo' : undefined}>
-            {k.render(row)}
-          </span>
-        ))}
-      </div>
+      {onOpen ? (
+        // Основной экран телефона — карточка должна открываться и с
+        // клавиатуры. Нативная <button> даёт это бесплатно: Enter и
+        // Space срабатывают сами, без самодельного onKeyDown.
+        <button type="button" className="spisok-glavnoe" onClick={() => onOpen(row)}>
+          {glavnoe}
+        </button>
+      ) : (
+        <div className="spisok-glavnoe">{glavnoe}</div>
+      )}
       {ostalnye.length > 0 && (
-        <button type="button" className="raskryt" onClick={() => raskryt(!raskryto)}>
+        <button
+          type="button"
+          className="raskryt"
+          aria-expanded={raskryto}
+          aria-controls={podrobnoId}
+          onClick={() => raskryt(!raskryto)}
+        >
           {raskryto ? 'Свернуть' : 'Подробнее'}
         </button>
       )}
       {raskryto && (
-        <dl className="spisok-podrobno">
+        <dl className="spisok-podrobno" id={podrobnoId}>
           {ostalnye.map((k) => (
             <div key={k.key}>
               <dt>{k.title}</dt>

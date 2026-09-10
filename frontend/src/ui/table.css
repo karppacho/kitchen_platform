@@ -62,6 +62,21 @@
   align-items: baseline;
 }
 
+/* Когда карточку можно открыть (передан onOpen), это настоящая <button> —
+   доступность с клавиатуры даром. Снимаем с неё вид кнопки, оставляя
+   только сетку выше. */
+button.spisok-glavnoe {
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
 .spisok-glavnoe > span:first-child {
   /* Имена бывают по 53 символа — «Контейнер бумажный без крышки
      207х127х55 крафт/чёрный». Перенос обязателен, обрезка недопустима. */
