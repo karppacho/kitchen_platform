@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 
 import './table.css'
 import { useWide } from './useWide'
@@ -113,9 +113,6 @@ function Kartochka<T>({
   onOpen?: (row: T) => void
 }) {
   const [raskryto, raskryt] = useState(false)
-  // Общий id между кнопкой-раскрытием и блоком подробностей — программе
-  // чтения с экрана есть на что сослаться через aria-controls.
-  const podrobnoId = useId()
 
   const glavnoe = glavnye.map((k) => (
     <span key={k.key} className={k.align === 'right' ? 'vpravo' : undefined}>
@@ -140,14 +137,13 @@ function Kartochka<T>({
           type="button"
           className="raskryt"
           aria-expanded={raskryto}
-          aria-controls={podrobnoId}
           onClick={() => raskryt(!raskryto)}
         >
           {raskryto ? 'Свернуть' : 'Подробнее'}
         </button>
       )}
       {raskryto && (
-        <dl className="spisok-podrobno" id={podrobnoId}>
+        <dl className="spisok-podrobno">
           {ostalnye.map((k) => (
             <div key={k.key}>
               <dt>{k.title}</dt>
