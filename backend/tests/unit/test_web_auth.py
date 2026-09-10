@@ -314,10 +314,22 @@ def test_refresh_rejected_by_gotrue_gives_401() -> None:
 
 
 def test_logout_clears_both_cookies() -> None:
+    """Гашение — на тех же путях, на которых кука была поставлена.
+
+    ``cookies_of`` ключует только по имени: погашение не на том пути
+    оставило бы в браузере отдельную живую куку под тем же именем. Пути
+    проверяем через ``attrs_of``, как и в тесте входа.
+    """
     reply = make_client().post("/api/auth/logout")
 
     assert reply.status_code == 204
     assert reply.content == b"", "204 не должен нести тела"
     jar = cookies_of(reply)
-    assert "Max-Age=0" in jar[auth.ACCESS_COOKIE]
-    assert "Max-Age=0" in jar[auth.REFRESH_COOKIE]
+
+    access = attrs_of(jar[auth.ACCESS_COOKIE])
+    assert "Max-Age=0" in access
+    assert "Path=/api" in access
+
+    refresh = attrs_of(jar[auth.REFRESH_COOKIE])
+    assert "Max-Age=0" in refresh
+    assert "Path=/api/auth" in refresh
