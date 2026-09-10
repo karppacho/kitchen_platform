@@ -1,4 +1,4 @@
-﻿import './num.css'
+import './num.css'
 
 // Неразрывный пробел U+00A0 (не обычный пробел U+0020)
 const NERAZRYVNYY = ' '
