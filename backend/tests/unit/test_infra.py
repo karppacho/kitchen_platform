@@ -144,6 +144,28 @@ def test_unused_supabase_services_are_disabled() -> None:
         )
 
 
+def test_worker_bez_tochki_vhoda_ne_zapuskaetsya() -> None:
+    """Воркер без точки входа не должен подниматься выкладкой.
+
+    `python -m <пакет>` без `__main__.py` падает на старте, а с
+    `restart: unless-stopped` такой контейнер перезапускается по кругу.
+    `deploy.sh` поднимает всё через `up -d` и этого не заметит: смоук смотрит
+    только на api и nginx. Пока задач нет, воркер держится в профиле, и
+    профиль снимается вместе с первой фоновой задачей.
+    """
+    worker = _load(COMPOSE)["services"]["worker"]
+    # Команда вида ["python", "-m", "kitchen.worker"]: точка входа пакета —
+    # его __main__.py.
+    module = worker["command"][-1]
+    entry = REPO / "backend" / "src" / Path(*module.split(".")) / "__main__.py"
+    if entry.exists():
+        return
+    assert worker.get("profiles"), (
+        f"у {module} нет __main__.py: без профиля `up -d` поднимет контейнер, "
+        f"который падает на старте и перезапускается по кругу"
+    )
+
+
 def test_nginx_sobiraetsya_a_ne_tyanetsya() -> None:
     """Сборка фронтенда привязана к коммиту.
 
