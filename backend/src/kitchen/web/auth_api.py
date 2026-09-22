@@ -66,23 +66,36 @@ def token_request(
 ) -> Tokens:
     """Сходить в GoTrue за парой токенов.
 
-    Отказ по существу (400/401/403) и недоступность службы (всё остальное)
-    разделены намеренно: спутать их значит заставить человека перебирать
-    пароли, когда лежит Supabase.
+    Три исхода разделены намеренно: спутать любые два значит заставить
+    человека перебирать пароли, когда чинить нужно не пароль.
+
+    - 400 — отказ по существу. Так GoTrue отвечает и на неверную пару
+      логин/пароль, и на протухший или уже использованный refresh-токен
+      (``invalid_grant``). Только этот код даёт 401 наружу.
+    - 401 и 403 — это не GoTrue, а шлюз Supabase перед ней: так он
+      отвечает на пустой или неверный ``SUPABASE_ANON_KEY``. Поломка
+      конфигурации, 502 «Вход настроен неверно».
+    - всё остальное, обрыв и таймаут — служба недоступна, 502.
     """
+    anon_key = settings.supabase_anon_key.get_secret_value()
+    if not anon_key:
+        # Идти в сеть незачем: шлюз ответит 401, а ответ заранее известен.
+        raise _misconfigured()
     try:
         reply = client.post(
             f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
             params={"grant_type": grant_type},
             json=payload,
-            headers={"apikey": settings.supabase_anon_key.get_secret_value()},
+            headers={"apikey": anon_key},
             timeout=GOTRUE_TIMEOUT,
         )
     except httpx.HTTPError as error:
         raise _unavailable() from error
 
-    if reply.status_code in (400, 401, 403):
+    if reply.status_code == 400:
         raise AuthError(denied)
+    if reply.status_code in (401, 403):
+        raise _misconfigured()
     if reply.status_code != 200:
         raise _unavailable()
 

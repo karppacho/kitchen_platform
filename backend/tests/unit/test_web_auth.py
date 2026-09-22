@@ -66,11 +66,12 @@ def make_client(
     *,
     profile: models.Profile | object | None = _DEFAULT,
     handler: Callable[[httpx.Request], httpx.Response] | None = None,
+    anon_key: str = "anon-key-test",
 ) -> TestClient:
     settings = Settings(  # type: ignore[call-arg]
         app_env="test",
         supabase_url="http://supabase.test",
-        supabase_anon_key="anon-key-test",
+        supabase_anon_key=anon_key,
         supabase_jwt_secret=SECRET,
         session_cookie_secure=True,
     )
@@ -131,8 +132,10 @@ def gotrue(status: int = 200, body: dict[str, object] | None = None):
 
     def handler(request: httpx.Request) -> httpx.Response:
         handler.seen = request  # type: ignore[attr-defined]
+        handler.calls += 1  # type: ignore[attr-defined]
         return httpx.Response(status, json=body if body is not None else GOOD)
 
+    handler.calls = 0  # type: ignore[attr-defined]
     return handler
 
 
@@ -234,6 +237,77 @@ def test_gotrue_unreachable_gives_502_not_401() -> None:
     assert reply.status_code == 502
 
 
+LOGIN = {"email": "chef@example.com", "password": "пароль"}
+
+
+def test_gateway_401_is_misconfiguration_not_wrong_password() -> None:
+    """401 и 403 даёт шлюз Supabase при пустом или неверном SUPABASE_ANON_KEY.
+
+    Настоящий GoTrue на неверную пару отвечает 400. Назвать ответ шлюза
+    «неверным паролем» значит отправить шефа перебирать пароли в лимит
+    nginx 10 запросов в минуту, хотя чинить нужно конфиг.
+    """
+    reply = make_client(handler=gotrue(401, {"message": "Invalid API key"})).post(
+        "/api/auth/login", json=LOGIN
+    )
+
+    assert reply.status_code == 502
+    assert reply.json()["detail"].startswith("Вход настроен неверно")
+    assert reply.headers.get_list("set-cookie") == []
+
+
+def test_gateway_403_is_misconfiguration_not_wrong_password() -> None:
+    reply = make_client(handler=gotrue(403, {"message": "Forbidden"})).post(
+        "/api/auth/login", json=LOGIN
+    )
+
+    assert reply.status_code == 502
+    assert reply.json()["detail"].startswith("Вход настроен неверно")
+
+
+def test_empty_anon_key_gives_502_without_network() -> None:
+    """Ключ, который эта ветка впервые делает нужным и который легко забыть.
+
+    Идти в сеть с пустым ключом незачем: ответ заранее известен, а шлюз
+    ответил бы 401 — тем самым кодом, который легко принять за отказ.
+    """
+    handler = gotrue()
+    reply = make_client(handler=handler, anon_key="").post("/api/auth/login", json=LOGIN)
+
+    assert reply.status_code == 502
+    assert reply.json()["detail"].startswith("Вход настроен неверно")
+    assert handler.calls == 0  # type: ignore[attr-defined]
+
+
+def test_gotrue_500_gives_502() -> None:
+    reply = make_client(handler=gotrue(500, {"message": "internal"})).post(
+        "/api/auth/login", json=LOGIN
+    )
+
+    assert reply.status_code == 502
+    assert reply.json()["detail"] == "Служба входа не отвечает"
+
+
+def test_gotrue_timeout_gives_502() -> None:
+    def slow(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("GoTrue не ответила вовремя")
+
+    reply = make_client(handler=slow).post("/api/auth/login", json=LOGIN)
+
+    assert reply.status_code == 502
+    assert reply.json()["detail"] == "Служба входа не отвечает"
+
+
+def test_non_numeric_expires_in_falls_back_to_default() -> None:
+    """Мусор в expires_in не должен ни ронять вход, ни ставить куке странный срок."""
+    reply = make_client(handler=gotrue(200, {**GOOD, "expires_in": "час"})).post(
+        "/api/auth/login", json=LOGIN
+    )
+
+    assert reply.status_code == 200
+    assert "Max-Age=3600" in attrs_of(cookies_of(reply)[auth.ACCESS_COOKIE])
+
+
 def test_wrong_signing_secret_gives_502_not_401() -> None:
     """SUPABASE_JWT_SECRET у нас разошёлся с тем, чем подписывает GoTrue.
 
@@ -313,6 +387,20 @@ def test_refresh_rejected_by_gotrue_gives_401() -> None:
     client.cookies.set(auth.REFRESH_COOKIE, "refresh-expired", path="/api/auth")
 
     assert client.post("/api/auth/refresh").status_code == 401
+
+
+def test_refresh_gateway_401_is_misconfiguration_not_expired_session() -> None:
+    """На продлении 401 шлюза — тоже конфиг, а не протухшая сессия.
+
+    Протухший или отозванный refresh-токен GoTrue отдаёт как 400
+    (invalid_grant, см. test_refresh_rejected_by_gotrue_gives_401).
+    """
+    client = make_client(handler=gotrue(401, {"message": "Invalid API key"}))
+    client.cookies.set(auth.REFRESH_COOKIE, "refresh-token-1", path="/api/auth")
+
+    reply = client.post("/api/auth/refresh")
+
+    assert reply.status_code == 502
 
 
 def test_logout_clears_both_cookies() -> None:
