@@ -1,0 +1,118 @@
+.obolochka {
+  min-height: 100vh;
+}
+
+.shapka {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--shag) * 2);
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  background: var(--poverhnost);
+  border-bottom: 1px solid var(--granitsa);
+}
+
+.shapka-nazvanie {
+  font-weight: 600;
+}
+
+.shapka-kto {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.shapka-rol {
+  color: var(--priglushyonnyy);
+  font-size: 12px;
+}
+
+.shapka-vyhod,
+.shapka-menyu {
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: none;
+  padding: var(--shag) calc(var(--shag) * 2);
+  font: inherit;
+  cursor: pointer;
+  flex: none;
+}
+
+.shapka-menyu {
+  display: flex;
+  align-items: center;
+}
+
+/* На узком экране блок разбит на строки: сначала шапка, затем (если
+   открыто) меню на всю ширину, затем содержимое. Строчный flex с
+   раскрытым меню шириной 100% толкал бы контент за край экрана — колонка
+   этого не допускает в принципе, а не только при подходящих размерах. */
+.obolochka-telo {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.bok {
+  display: none;
+  padding: calc(var(--shag) * 2);
+}
+
+.bok--otkryt {
+  display: block;
+}
+
+.menyu {
+  display: grid;
+  gap: 2px;
+}
+
+.menyu-punkt {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--shag);
+  padding: calc(var(--shag) * 2);
+  border-radius: var(--radius);
+  color: inherit;
+  text-decoration: none;
+}
+
+.menyu-punkt--tekushchiy {
+  background: var(--fon);
+  font-weight: 600;
+}
+
+/* Раздел ещё не сделан — только приглушённый цвет, без текста фазы: его
+   показывает заглушка при открытии, повторять в меню незачем. */
+.menyu-punkt--budushchiy {
+  color: var(--priglushyonnyy);
+}
+
+.soderzhimoe {
+  flex: 1;
+  min-width: 0;
+  padding: calc(var(--shag) * 3);
+}
+
+.zaglushka-faza {
+  color: var(--vnimanie);
+}
+
+/* Кнопка меню нужна только там, где меню спрятано: на широком экране бок
+   показан всегда и постоянно стоит рядом с содержимым в одной строке. */
+@media (min-width: 1080px) {
+  .shapka-menyu {
+    display: none;
+  }
+  .obolochka-telo {
+    flex-direction: row;
+    align-items: flex-start;
+  }
+  .bok {
+    display: block;
+    width: 220px;
+    flex: none;
+  }
+}

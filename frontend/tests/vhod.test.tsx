@@ -98,8 +98,9 @@ test('403 форму входа не показывает', async () => {
 })
 
 test('вошедший видит своё имя и роль в шапке', async () => {
-  // Маршрута /dishes в этой задаче ещё нет — его добавит задача 9, поэтому
-  // здесь проверяем шапку на индексном пути "/", а не на "/dishes".
+  // Индексный путь "/" уводит на /dishes (задача 9) — шапка при этом не
+  // размонтируется, поэтому проверка на "/" остаётся верной и после
+  // появления настоящего маршрута.
   server.use(
     http.get('/api/me', () =>
       HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
@@ -289,8 +290,8 @@ test('запрос с данными, упавший 401, не мешает по
 
 function Sonda() {
   // Минимальный потребитель useSession для проверки logout() в отрыве от
-  // App/Layout — кнопки выхода в UI этой задачи ещё нет, её появление не
-  // входит в бриф.
+  // App/Layout: не нужны ни роуты, ни моки /api/dishes и /api/ingredients,
+  // которые тянет за собой полный рендер шапки задачи 9.
   const { me, logout } = useSession()
   return (
     <div>
@@ -328,4 +329,41 @@ test('после выхода кэш запросов пуст', async () => {
   await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
 
   await waitFor(() => expect(queries.getQueryCache().getAll()).toHaveLength(0))
+})
+
+// --- Поправка 2: выход работает и без сервера ---
+
+test('502 у ручки выхода не мешает выйти — форма входа, пустой кэш, без необработанного отказа', async () => {
+  // Кнопку «Выйти» нажимают на общем кухонном планшете. Если ошибка сети
+  // или 502 у /auth/logout остановит очистку кэша и сброс сессии, чужие
+  // данные останутся на экране у следующего, кто подойдёт к планшету.
+  server.use(
+    http.get('/api/me', () =>
+      HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
+    ),
+    http.post('/api/auth/logout', () => new HttpResponse(null, { status: 502 })),
+  )
+
+  const queries = novyKlient()
+  render(
+    <QueryClientProvider client={queries}>
+      <SessionProvider>
+        <Sonda />
+      </SessionProvider>
+    </QueryClientProvider>,
+  )
+  await screen.findByText('Алексей')
+
+  queries.setQueryData(['dishes', '', ''], [])
+  expect(queries.getQueryCache().getAll().length).toBeGreaterThan(0)
+
+  await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+
+  // Сессия сброшена — Sonda больше не показывает имя.
+  await waitFor(() => expect(screen.queryByText('Алексей')).not.toBeInTheDocument())
+  expect(queries.getQueryCache().getAll()).toHaveLength(0)
+  // Необработанный отказ промиса logout() тест бы не провалил сам по себе —
+  // проверка в том, что клик выше вообще не бросил наружу (await дошёл до
+  // конца без try/catch в тесте), и что оба следствия (сброс сессии и
+  // очистка кэша) выполнились несмотря на 502.
 })

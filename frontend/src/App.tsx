@@ -1,8 +1,14 @@
-import { Route, Routes } from 'react-router-dom'
+import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { LoginPage } from './auth/LoginPage'
 import { SessionProvider, useSession } from './auth/session'
+import { DishDetailPage } from './pages/DishDetail'
+import { Dishes } from './pages/Dishes'
+import { Ingredients } from './pages/Ingredients'
+import { Reconciliation } from './pages/Reconciliation'
+import { Stub } from './pages/Stub'
 import { Layout } from './shell/Layout'
+import { RAZDELY } from './shell/razdely'
 
 /**
  * Гейт защищённых маршрутов. Различает четыре исхода стартовой проверки
@@ -47,10 +53,17 @@ function RequireAuth() {
   return (
     <Routes>
       <Route path="/" element={<Layout />}>
-        {/* Временная заглушка: маршрут /dishes и сам экран блюд добавит
-            задача 9. Navigate увёл бы на несуществующий путь и размонтировал
-            бы Layout вместе с шапкой. */}
-        <Route index element={<p>Блюда</p>} />
+        <Route index element={<Navigate to="/dishes" replace />} />
+        <Route path="ingredients" element={<Ingredients />} />
+        <Route path="dishes" element={<Dishes />} />
+        <Route path="dishes/:legacyId" element={<DishDetailPage />} />
+        <Route path="reconciliation" element={<Reconciliation />} />
+        {RAZDELY.filter((r) => r.faza).map((r) => (
+          <Route key={r.put} path={r.put.slice(1)} element={<Stub />} />
+        ))}
+        {/* Неизвестный адрес не должен оставлять пустой экран — уводим на
+            главный раздел, шапка при этом не размонтируется. */}
+        <Route path="*" element={<Navigate to="/dishes" replace />} />
       </Route>
     </Routes>
   )
