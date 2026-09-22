@@ -24,6 +24,13 @@ REPO = Path(__file__).resolve().parents[3]
 COMPOSE = REPO / "infra" / "docker-compose.yml"
 SUPABASE_OVERRIDE = REPO / "infra" / "supabase" / "docker-compose.override.yml"
 NGINX_CONF = REPO / "infra" / "nginx" / "kitchen-platform.conf"
+CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+
+# Ниже этой версии в Node нет флага --no-experimental-webstorage, которым в
+# frontend/vite.config.ts заглушено предупреждение при загрузке msw: процесс
+# тестов падает с «bad option» ещё до первого теста. Найдено на живую при
+# подготовке задачи 15.
+MIN_NODE_VERSION = (22, 4)
 
 # Единственное, чему положено смотреть наружу. Расширение этого множества —
 # осознанное решение, которое обязано сопровождаться правкой UFW и внятным
@@ -230,3 +237,46 @@ def test_secrets_are_not_mounted_writable() -> None:
         for volume in service.get("volumes") or []:
             if "service_account" in str(volume):
                 assert str(volume).endswith(":ro"), f"«{name}»: ключ Google смонтирован на запись"
+
+
+def _load_ci() -> dict[str, Any]:
+    return yaml.safe_load(CI_WORKFLOW.read_text(encoding="utf-8"))
+
+
+def _frontend_setup_node_step() -> dict[str, Any]:
+    steps = _load_ci()["jobs"]["frontend"]["steps"]
+    step = next((s for s in steps if str(s.get("uses", "")).startswith("actions/setup-node")), None)
+    assert step is not None, "в задаче frontend нет actions/setup-node"
+    return step
+
+
+def test_frontend_ci_job_exists() -> None:
+    """Фронтенд обязан проверяться в блокирующем CI, а не только на машине разработчика."""
+    ci = _load_ci()
+    assert "frontend" in ci["jobs"], "в .github/workflows/ci.yml нет задачи frontend"
+
+
+def test_frontend_ci_uses_node_not_older_than_required() -> None:
+    """См. MIN_NODE_VERSION: старый Node роняет тесты ещё до их запуска."""
+    version = str(_frontend_setup_node_step()["with"]["node-version"])
+
+    if "." not in version:
+        # Голая мажорная версия ('22') — setup-node ставит последнюю 22.x,
+        # а она всегда новее 22.4, так что минор сверять не о чем.
+        assert int(version) >= MIN_NODE_VERSION[0], (
+            f"node-version «{version}»: мажорная версия ниже 22"
+        )
+        return
+
+    parts = tuple(int(part) for part in version.split("."))
+    assert parts >= MIN_NODE_VERSION, (
+        f"node-version «{version}» ниже {'.'.join(map(str, MIN_NODE_VERSION))} — "
+        f"на нём упадёт vitest из-за --no-experimental-webstorage в vite.config.ts"
+    )
+
+
+def test_frontend_ci_npm_cache_matches_lock_file() -> None:
+    """Кэш npm привязан к package-lock.json, иначе он не инвалидируется при правке зависимостей."""
+    with_ = _frontend_setup_node_step()["with"]
+    assert with_.get("cache") == "npm"
+    assert with_.get("cache-dependency-path") == "frontend/package-lock.json"
