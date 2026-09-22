@@ -1,0 +1,25 @@
+h1 {
+  font-size: 18px;
+  margin: 0 0 calc(var(--shag) * 3);
+}
+
+/* Архивные не прячем, но и не выдаём за живые. */
+.arhivnyy {
+  color: var(--priglushyonnyy);
+  text-decoration: line-through;
+  text-decoration-color: var(--granitsa);
+}
+
+.net-kartochki {
+  color: var(--vnimanie);
+}
+
+.zagruzka,
+.sboy {
+  color: var(--priglushyonnyy);
+  padding: calc(var(--shag) * 3) 0;
+}
+
+.sboy-prichina {
+  font-size: 12px;
+}
