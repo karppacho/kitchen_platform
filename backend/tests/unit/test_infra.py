@@ -135,6 +135,21 @@ def test_unused_supabase_services_are_disabled() -> None:
         )
 
 
+def test_nginx_sobiraetsya_a_ne_tyanetsya() -> None:
+    """Сборка фронтенда привязана к коммиту.
+
+    Готовый образ nginx с примонтированной статикой означал бы, что
+    выложенный фронтенд и выложенный бэкенд могут разъехаться по версиям:
+    образ тот же, а содержимое тома — какое осталось с прошлого раза.
+    """
+    nginx = _load(COMPOSE)["services"]["nginx"]
+
+    assert "build" in nginx, "статика собирается вместе с образом"
+    assert nginx["build"]["dockerfile"] == "infra/nginx/Dockerfile"
+    assert nginx["build"]["context"] == "..", "в контекст должны попасть и frontend, и infra"
+    assert nginx["image"].startswith("kitchen-platform-nginx")
+
+
 def test_secrets_are_not_mounted_writable() -> None:
     """Ключ сервисного аккаунта монтируется только на чтение."""
     compose = _load(COMPOSE)

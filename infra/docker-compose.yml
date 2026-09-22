@@ -52,7 +52,11 @@ services:
       disable: true
 
   nginx:
-    image: nginx:1.27-alpine
+    # Контекст — корень репозитория: в образ едет и frontend/, и infra/.
+    build:
+      context: ..
+      dockerfile: infra/nginx/Dockerfile
+    image: kitchen-platform-nginx:${APP_VERSION:-dev}
     restart: unless-stopped
     # Единственный сервис, которому положено смотреть наружу.
     ports:
