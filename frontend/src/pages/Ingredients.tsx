@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 
 import { useIngredients } from '../api/queries'
@@ -7,13 +7,8 @@ import { DataTable, type Column } from '../ui/DataTable'
 import { Filtry } from '../ui/Filtry'
 import { Num } from '../ui/Num'
 import { Sostoyanie } from '../ui/Sostoyanie'
+import { useOtlozhennyiPoisk } from '../ui/useOtlozhennyiPoisk'
 import './pages.css'
-
-// Пауза после последней буквы, прежде чем запрос уйдёт на сервер. На каждую
-// букву слать нельзя — 130 строк и печатающий шеф дадут запрос на каждый
-// символ; но и заставлять ждать секунду после того, как он замер, тоже
-// раздражает. 300 мс — между «сразу» и «через раздумье».
-const ZADERZHKA_POISKA = 300
 
 export function Ingredients() {
   // Поиск и фильтр живут в адресе: ссылку на отфильтрованный список шеф
@@ -23,27 +18,12 @@ export function Ingredients() {
   const search = params.get('search') ?? ''
   const status = params.get('status') ?? ''
 
-  // Локальный ввод — чтобы поле не залипало на каждой букве, ожидая
-  // подтверждения от адресной строки; в адрес значение уходит с задержкой.
-  const [vvod, zadatVvod] = useState(search)
-
-  // Если адрес поменялся не из этого поля (открыли присланную ссылку,
-  // нажали «назад») — подхватываем значение в поле ввода.
-  useEffect(() => {
-    zadatVvod(search)
-  }, [search])
-
-  useEffect(() => {
-    if (vvod === search) return
-    const taimer = setTimeout(() => {
-      const novye = new URLSearchParams(params)
-      if (vvod) novye.set('search', vvod)
-      else novye.delete('search')
-      setParams(novye, { replace: true })
-    }, ZADERZHKA_POISKA)
-    return () => clearTimeout(taimer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vvod])
+  const [vvod, zadatVvod] = useOtlozhennyiPoisk(search, (znachenie) => {
+    const novye = new URLSearchParams(params)
+    if (znachenie) novye.set('search', znachenie)
+    else novye.delete('search')
+    setParams(novye, { replace: true })
+  })
 
   // Поиск остаётся серверным (там ilike по имени — трогать незачем), а
   // статус фильтруем на клиенте: справочник целиком помещается в один

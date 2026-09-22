@@ -23,3 +23,10 @@ h1 {
 .sboy-prichina {
   font-size: 12px;
 }
+
+/* Замечание не значит поломку: ноль — нейтрален, больше нуля — заметен,
+   но не тревогой (не цвет ошибки). */
+.zamechaniya {
+  color: var(--vnimanie);
+  font-weight: 600;
+}
