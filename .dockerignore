@@ -9,6 +9,8 @@ backend/.pytest_cache
 **/__pycache__
 _archive_botov
 .superpowers
+.claude/
+.github/
 docs
 *.md
 .env

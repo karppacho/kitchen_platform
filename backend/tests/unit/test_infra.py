@@ -13,6 +13,7 @@ Supabase пулер и шлюз по умолчанию публикуются �
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[3]
 COMPOSE = REPO / "infra" / "docker-compose.yml"
 SUPABASE_OVERRIDE = REPO / "infra" / "supabase" / "docker-compose.override.yml"
+NGINX_CONF = REPO / "infra" / "nginx" / "kitchen-platform.conf"
 
 # Единственное, чему положено смотреть наружу. Расширение этого множества —
 # осознанное решение, которое обязано сопровождаться правкой UFW и внятным
@@ -148,6 +150,77 @@ def test_nginx_sobiraetsya_a_ne_tyanetsya() -> None:
     assert nginx["build"]["dockerfile"] == "infra/nginx/Dockerfile"
     assert nginx["build"]["context"] == "..", "в контекст должны попасть и frontend, и infra"
     assert nginx["image"].startswith("kitchen-platform-nginx")
+
+
+def _location_block_spans(text: str) -> list[tuple[int, int]]:
+    """Отдаёт (начало, конец) тела каждого `location ... { ... }` в конфиге.
+
+    Разбор по глубине фигурных скобок, а не по отступам: у nginx-конфига
+    нет формального грамматического разбора под рукой, а отступы —
+    условность форматирования, а не синтаксис. В этом файле location не
+    вложены друг в друга и фигурных скобок в строках/комментариях нет —
+    для него этого достаточно.
+    """
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        match = re.search(r"location\b[^{}]*\{", text[pos:])
+        if not match:
+            break
+        start = pos + match.end()
+        depth = 1
+        cursor = start
+        while depth > 0:
+            if text[cursor] == "{":
+                depth += 1
+            elif text[cursor] == "}":
+                depth -= 1
+            cursor += 1
+        spans.append((start, cursor - 1))
+        pos = cursor
+    return spans
+
+
+def test_location_blocks_have_no_add_header() -> None:
+    """add_header внутри location тихо отменяет заголовки безопасности server.
+
+    Живая ловушка: 22.09.2026 при добавлении Cache-Control для статики её
+    едва не наступили заново — естественным решением казалось дописать
+    `add_header Cache-Control` прямо в `location /assets/`. Живого nginx в
+    CI нет, поэтому проверка текстовая.
+    """
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    spans = _location_block_spans(text)
+    assert spans, "в конфиге не нашлось ни одного location — разбор сломан или файл пуст"
+    for start, end in spans:
+        body = text[start:end]
+        assert "add_header" not in body, (
+            f"add_header внутри location (символы {start}-{end}) отменит заголовки "
+            f"безопасности, унаследованные от server"
+        )
+
+
+def test_api_location_exists() -> None:
+    """SPA-фолбэк не должен молча проглотить /api/."""
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    assert re.search(r"location\s+/api/\s*\{", text), "location /api/ пропал из конфига"
+
+
+def test_cache_control_header_is_at_server_level() -> None:
+    """Cache-Control объявлен один раз на server, а не раскидан по location.
+
+    Если строку унесут внутрь какого-нибудь location, там тихо пропадут
+    HSTS и CSP (см. test_location_blocks_have_no_add_header), а вне этого
+    location политика кэша перестанет действовать вовсе.
+    """
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    server_level = text
+    for start, end in sorted(_location_block_spans(text), reverse=True):
+        server_level = server_level[:start] + server_level[end:]
+    assert "add_header Cache-Control" in server_level, (
+        "add_header Cache-Control не найден на уровне server (после вырезания "
+        "всех location) — либо пропал совсем, либо спрятан внутри location"
+    )
 
 
 def test_secrets_are_not_mounted_writable() -> None:
