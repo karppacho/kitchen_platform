@@ -406,3 +406,24 @@ def test_deploy_dumps_supabase_db_before_migrations() -> None:
     assert dump < migrations, "дамп обязан сниматься ДО миграций"
     assert "set -Eeuo pipefail" in text, "без pipefail упавший pg_dump прячется за gzip"
 
+def test_deploy_smoke_goes_through_nginx() -> None:
+    """/healthz на 127.0.0.1:8080 проходит мимо nginx.
+
+    Без проверки через nginx выкладка говорит «Готово» при лежащем сайте.
+    """
+    text = DEPLOY.read_text(encoding="utf-8")
+    health = text.find('curl -fsS "$HEALTH_URL"')
+    via_nginx = text.find('--resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/"')
+    api = text.find('"https://$DOMAIN/api/me"')
+    done = text.find("Готово. Версия")
+
+    assert 'DOMAIN="${DOMAIN:-art.karppacho.ru}"' in text
+    assert "--status running --services" in text, "смоук не проверяет, что nginx запущен"
+    assert 'id="root"' in text
+    assert health != -1 and via_nginx != -1 and api != -1
+    assert health < via_nginx < done and api < done, "проверка nginx — после /healthz, до «Готово»"
+
+
+def test_frontend_index_has_root_marker() -> None:
+    """Смоук выкладки узнаёт index.html по id="root" — маркер обязан быть."""
+    assert 'id="root"' in FRONTEND_INDEX.read_text(encoding="utf-8")
