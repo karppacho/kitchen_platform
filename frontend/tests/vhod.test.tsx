@@ -373,3 +373,117 @@ test('502 у ручки выхода не мешает выйти — форма
   // конца без try/catch в тесте), и что оба следствия (сброс сессии и
   // очистка кэша) выполнились несмотря на 502.
 })
+
+// --- Ревью ветки, M11: неподтверждённый выход не молчит ---
+
+const PREDUPREZHDENIE = /Выход не подтверждён сервером/
+
+function voshedshiy() {
+  return http.get('/api/me', () =>
+    HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
+  )
+}
+
+async function narisovatVoshedshego(queries = novyKlient()) {
+  render(
+    <QueryClientProvider client={queries}>
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
+  return queries
+}
+
+test('выход с 502 — форма входа, предупреждение и «Повторить выход»', async () => {
+  // Куки на сервере живы: следующий на общем планшете перезагрузит
+  // страницу, /api/me ответит 200 — и он окажется в сессии шефа.
+  server.use(voshedshiy(), http.post('/api/auth/logout', () => new HttpResponse(null, { status: 502 })))
+
+  await narisovatVoshedshego()
+  await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+
+  expect(await screen.findByLabelText('Почта')).toBeInTheDocument()
+  expect(screen.getByText(PREDUPREZHDENIE)).toHaveTextContent(
+    'Выход не подтверждён сервером — сессия может быть ещё активна',
+  )
+  expect(screen.getByRole('button', { name: 'Повторить выход' })).toBeInTheDocument()
+})
+
+test('успешный повтор выхода снимает предупреждение', async () => {
+  let popytok = 0
+  server.use(
+    voshedshiy(),
+    http.post('/api/auth/logout', () => {
+      popytok += 1
+      return new HttpResponse(null, { status: popytok === 1 ? 502 : 204 })
+    }),
+  )
+
+  await narisovatVoshedshego()
+  await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Повторить выход' }))
+
+  await waitFor(() => expect(screen.queryByText(PREDUPREZHDENIE)).not.toBeInTheDocument())
+  expect(screen.queryByRole('button', { name: 'Повторить выход' })).not.toBeInTheDocument()
+  expect(screen.getByLabelText('Почта')).toBeInTheDocument()
+  expect(popytok).toBe(2)
+})
+
+test('неудачный повтор выхода предупреждение оставляет', async () => {
+  server.use(voshedshiy(), http.post('/api/auth/logout', () => HttpResponse.error()))
+
+  await narisovatVoshedshego()
+  await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+  await userEvent.click(await screen.findByRole('button', { name: 'Повторить выход' }))
+
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Повторить выход' })).toBeEnabled(),
+  )
+  expect(screen.getByText(PREDUPREZHDENIE)).toBeInTheDocument()
+})
+
+test('обычный успешный выход — без предупреждения', async () => {
+  server.use(voshedshiy(), http.post('/api/auth/logout', () => new HttpResponse(null, { status: 204 })))
+
+  await narisovatVoshedshego()
+  await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+
+  expect(await screen.findByLabelText('Почта')).toBeInTheDocument()
+  expect(screen.queryByText(PREDUPREZHDENIE)).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Повторить выход' })).not.toBeInTheDocument()
+})
+
+test('успешный вход снимает предупреждение о неподтверждённом выходе', async () => {
+  server.use(
+    voshedshiy(),
+    http.post('/api/auth/logout', () => new HttpResponse(null, { status: 502 })),
+    http.post('/api/auth/login', () =>
+      HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
+    ),
+  )
+
+  const queries = await narisovatVoshedshego()
+  await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+  expect(await screen.findByText(PREDUPREZHDENIE)).toBeInTheDocument()
+
+  await userEvent.type(screen.getByLabelText('Почта'), 'chef@example.com')
+  await userEvent.type(screen.getByLabelText('Пароль'), 'пароль')
+  await userEvent.click(screen.getByRole('button', { name: 'Войти' }))
+  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
+
+  // Сессия сбрасывается по 401 посреди работы — снова форма входа. Старое
+  // предупреждение к этой сессии уже не относится.
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () => new HttpResponse(null, { status: 401 })),
+  )
+  await act(async () => {
+    await expect(
+      queries.fetchQuery({ queryKey: ['dishes', '', ''], queryFn: () => api('/dishes') }),
+    ).rejects.toBeInstanceOf(ApiError)
+  })
+  expect(await screen.findByLabelText('Почта')).toBeInTheDocument()
+  expect(screen.queryByText(PREDUPREZHDENIE)).not.toBeInTheDocument()
+})

@@ -42,6 +42,28 @@
   cursor: pointer;
 }
 
+/* Неподтверждённый выход: не ошибка формы, а предупреждение о сессии,
+   которая может остаться живой на сервере. */
+.vhod-preduprezhdenie {
+  display: grid;
+  gap: calc(var(--shag) * 2);
+  padding: calc(var(--shag) * 3);
+  border: 1px solid var(--vnimanie);
+  border-radius: var(--radius);
+  color: var(--vnimanie);
+}
+
+.vhod-preduprezhdenie p {
+  margin: 0;
+}
+
+.vhod-forma .vhod-preduprezhdenie button {
+  margin-top: 0;
+  background: transparent;
+  border: 1px solid var(--vnimanie);
+  color: var(--vnimanie);
+}
+
 .vhod-oshibka {
   margin: 0;
   color: var(--oshibka);

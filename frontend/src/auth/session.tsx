@@ -15,6 +15,11 @@ type Sostoyanie = {
   sboy: string | null
   /** Повторить стартовую проверку `/api/me` после sboy. */
   povtorit: () => void
+  /** Запрос выхода не удался (обрыв сети, 5xx): экран очищен, но куки на
+   *  сервере могут быть живы — следующий на общем планшете перезагрузит
+   *  страницу и окажется в чужой сессии. Снимается успешным повтором
+   *  выхода или успешным входом. Живёт в памяти, не в localStorage. */
+  vyhodNePodtverzhden: boolean
   login: (email: string, password: string) => Promise<void>
   logout: () => Promise<void>
 }
@@ -27,6 +32,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [otkaz, setOtkaz] = useState<string | null>(null)
   const [sboy, setSboy] = useState<string | null>(null)
   const [popytka, setPopytka] = useState(0)
+  const [vyhodNePodtverzhden, setVyhodNePodtverzhden] = useState(false)
   const queryClient = useQueryClient()
 
   useEffect(() => {
@@ -100,18 +106,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     })
     setOtkaz(null)
     setSboy(null)
+    // Новый вход выдал новые куки поверх старых: предупреждение о прежнем
+    // неподтверждённом выходе к этой сессии уже не относится.
+    setVyhodNePodtverzhden(false)
     setMe(profil)
   }, [])
 
   const logout = useCallback(async () => {
     try {
       await api<void>('/auth/logout', { method: 'POST' })
+      setVyhodNePodtverzhden(false)
     } catch {
       // Кнопку «Выйти» нажимают на общем кухонном планшете. Сервер может
       // быть недоступен (обрыв сети, 502) — но человек всё равно ждёт, что
       // после клика его данные исчезнут с экрана. Ошибку запроса выхода
       // глушим здесь и только здесь: наружу (в void logout() в шапке) она
       // уйти не должна, иначе это необработанный отказ промиса.
+      //
+      // Но молчать о ней нельзя: куки на сервере не погашены, и после
+      // перезагрузки /api/me ответит 200 следующему человеку. Форма входа
+      // покажет предупреждение и кнопку «Повторить выход».
+      setVyhodNePodtverzhden(true)
     } finally {
       setMe(null)
       // Тот же повод, что у сброса по 401: следующий, кто войдёт с этого же
@@ -124,7 +139,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [queryClient])
 
   return (
-    <Kontekst.Provider value={{ me, loading, otkaz, sboy, povtorit, login, logout }}>
+    <Kontekst.Provider
+      value={{ me, loading, otkaz, sboy, povtorit, vyhodNePodtverzhden, login, logout }}
+    >
       {children}
     </Kontekst.Provider>
   )

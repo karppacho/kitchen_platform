@@ -11,11 +11,22 @@ import { useSession } from './session'
  * администратор скриптом grant_access.py, пароль сбрасывает он же.
  */
 export function LoginPage() {
-  const { login } = useSession()
+  const { login, logout, vyhodNePodtverzhden } = useSession()
   const [email, setEmail] = useState('')
   const [parol, setParol] = useState('')
   const [oshibka, setOshibka] = useState<string | null>(null)
   const [idyot, setIdyot] = useState(false)
+  const [vyhodit, setVyhodit] = useState(false)
+
+  async function povtoritVyhod() {
+    setVyhodit(true)
+    try {
+      // logout сам не бросает: исход — в vyhodNePodtverzhden.
+      await logout()
+    } finally {
+      setVyhodit(false)
+    }
+  }
 
   async function otpravit(event: FormEvent) {
     event.preventDefault()
@@ -34,6 +45,18 @@ export function LoginPage() {
     <main className="vhod">
       <form className="vhod-forma" onSubmit={otpravit}>
         <h1>Кухня</h1>
+        {/* Экран очищен, но сервер выход не подтвердил: куки могут быть
+            живы, и после перезагрузки планшета следующий человек окажется
+            в чужой сессии. role="status", а не "alert": ошибка входа ниже
+            остаётся единственным alert формы. */}
+        {vyhodNePodtverzhden && (
+          <div className="vhod-preduprezhdenie" role="status">
+            <p>Выход не подтверждён сервером — сессия может быть ещё активна</p>
+            <button type="button" onClick={() => void povtoritVyhod()} disabled={vyhodit}>
+              Повторить выход
+            </button>
+          </div>
+        )}
         <label htmlFor="pochta">Почта</label>
         <input
           id="pochta"
