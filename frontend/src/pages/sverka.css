@@ -1,0 +1,91 @@
+/* Экран сверки справочника. Свой файл, а не хвост pages.css: стили
+   одного экрана не должны расти в общем для всех. */
+
+.poyasnenie {
+  color: var(--priglushyonnyy);
+  max-width: 62ch;
+}
+
+/* «Требуют решения» — цвет внимания, а не ошибки: это работа, а не поломка. */
+.pokazatel-znachenie--vnimanie {
+  color: var(--vnimanie);
+}
+
+.sverka-kartochka {
+  background: var(--poverhnost);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  padding: calc(var(--shag) * 3);
+  margin-bottom: calc(var(--shag) * 2);
+}
+
+.sverka-kartochka header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--shag);
+}
+
+/* Имена карточек бывают длинными и без пробелов в нужных местах: на 360 px
+   они переносятся, а не выталкивают страницу в горизонтальную прокрутку. */
+.sverka-kartochka header b {
+  overflow-wrap: anywhere;
+}
+
+.postavshchik {
+  color: var(--priglushyonnyy);
+}
+
+.varianty {
+  list-style: none;
+  margin: calc(var(--shag) * 2) 0 0;
+  padding: 0;
+}
+
+.varianty label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--shag);
+  padding: var(--shag) 0;
+}
+
+.variant-otlichie {
+  margin-left: auto;
+  display: flex;
+  gap: calc(var(--shag) * 3);
+}
+
+.variant-id {
+  color: var(--priglushyonnyy);
+}
+
+.razlichie {
+  background: var(--vnimanie-fon);
+  color: var(--vnimanie);
+}
+
+.net-kandidatov {
+  color: var(--priglushyonnyy);
+  font-size: 12px;
+}
+
+.deystviya {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--shag) * 2);
+  margin-top: calc(var(--shag) * 2);
+}
+
+.deystviya button {
+  padding: var(--shag) calc(var(--shag) * 2);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: none;
+}
+
+.deystviya-poyasnenie {
+  color: var(--priglushyonnyy);
+  font-size: 12px;
+}
