@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { useDish } from '../api/queries'
 import type { Component } from '../api/types'
+import { dorozhe } from '../domain/tseny'
 import { Num } from '../ui/Num'
 import { Sostoyanie } from '../ui/Sostoyanie'
 // Ruling 3: классы `.tablitsa` из table.css нужны здесь напрямую — этот
@@ -14,32 +15,6 @@ import '../ui/table.css'
 import './pages.css'
 
 const PORT_KBJU = 0.5
-
-/**
- * Себестоимость выше цены меню.
- *
- * Та же логика, что и в списке блюд (Dishes.tsx, задача 10): сравниваем
- * строки как десятичные числа, не переводя их в float, — цена и
- * себестоимость приходят строками именно затем, чтобы не терять копейки.
- * Функция продублирована, а не вынесена в общий модуль: список блюд уже
- * сдан и одобрен, трогать его файл здесь незачем.
- */
-function dorozhe(uc: string, tsena: string | null): boolean {
-  if (tsena === null) return false
-  return sravnit(uc, tsena) > 0
-}
-
-function sravnit(a: string, b: string): number {
-  const [ac = '0', ad = ''] = a.split('.')
-  const [bc = '0', bd = ''] = b.split('.')
-  if (ac.length !== bc.length) return ac.length - bc.length
-  if (ac !== bc) return ac < bc ? -1 : 1
-  const dlina = Math.max(ad.length, bd.length)
-  const ap = ad.padEnd(dlina, '0')
-  const bp = bd.padEnd(dlina, '0')
-  if (ap === bp) return 0
-  return ap < bp ? -1 : 1
-}
 
 export function DishDetailPage() {
   const { legacyId = '' } = useParams()

@@ -3,37 +3,13 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import { useDishes } from '../api/queries'
 import type { Dish } from '../api/types'
+import { dorozhe } from '../domain/tseny'
 import { DataTable, type Column } from '../ui/DataTable'
 import { Filtry } from '../ui/Filtry'
 import { Num } from '../ui/Num'
 import { Sostoyanie } from '../ui/Sostoyanie'
 import { useOtlozhennyiPoisk } from '../ui/useOtlozhennyiPoisk'
 import './pages.css'
-
-/**
- * Себестоимость выше цены меню.
- *
- * Сравниваем строки как десятичные числа, не переводя их в float: цена и
- * себестоимость приходят строками именно затем, чтобы не терять копейки.
- * Когда цены меню нет вовсе (price_menu === null), сравнивать не с чем —
- * это не «убыток», а «маржу посчитать не из чего».
- */
-function dorozhe(uc: string, tsena: string | null): boolean {
-  if (tsena === null) return false
-  return sravnit(uc, tsena) > 0
-}
-
-function sravnit(a: string, b: string): number {
-  const [ac = '0', ad = ''] = a.split('.')
-  const [bc = '0', bd = ''] = b.split('.')
-  if (ac.length !== bc.length) return ac.length - bc.length
-  if (ac !== bc) return ac < bc ? -1 : 1
-  const dlina = Math.max(ad.length, bd.length)
-  const ap = ad.padEnd(dlina, '0')
-  const bp = bd.padEnd(dlina, '0')
-  if (ap === bp) return 0
-  return ap < bp ? -1 : 1
-}
 
 export function Dishes() {
   // Поиск и фильтр живут в адресе — как и в справочнике ингредиентов:
