@@ -176,9 +176,11 @@ def test_login_sets_both_cookies_httponly() -> None:
 
 def test_login_answers_with_profile() -> None:
     """Тело — то же, что у /api/me: иначе фронтенд делает лишний круг."""
-    body = make_client(handler=gotrue()).post(
-        "/api/auth/login", json={"email": "chef@example.com", "password": "пароль"}
-    ).json()
+    body = (
+        make_client(handler=gotrue())
+        .post("/api/auth/login", json={"email": "chef@example.com", "password": "пароль"})
+        .json()
+    )
 
     assert body == {"email": "chef@example.com", "display_name": "Алексей", "roles": ["chef"]}
 
@@ -209,9 +211,9 @@ def test_login_does_not_say_which_half_was_wrong() -> None:
     Настоящий GoTrue отвечает на эти два случая разными телами — дублёры
     здесь тоже разные, иначе тест проверяет не наш код, а то, что дублёр
     сказал одно и то же дважды."""
-    unknown = make_client(
-        handler=gotrue(400, {"error_description": "User not found"})
-    ).post("/api/auth/login", json={"email": "нет@example.com", "password": "пароль"})
+    unknown = make_client(handler=gotrue(400, {"error_description": "User not found"})).post(
+        "/api/auth/login", json={"email": "нет@example.com", "password": "пароль"}
+    )
     wrong = make_client(
         handler=gotrue(400, {"error_description": "Invalid login credentials"})
     ).post("/api/auth/login", json={"email": "chef@example.com", "password": "не тот"})

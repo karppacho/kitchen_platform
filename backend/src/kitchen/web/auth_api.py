@@ -105,9 +105,7 @@ def token_request(
 
 
 def _unavailable() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_502_BAD_GATEWAY, detail="Служба входа не отвечает"
-    )
+    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Служба входа не отвечает")
 
 
 def _misconfigured() -> HTTPException:
