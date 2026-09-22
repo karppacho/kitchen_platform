@@ -280,3 +280,64 @@ def test_frontend_ci_npm_cache_matches_lock_file() -> None:
     with_ = _frontend_setup_node_step()["with"]
     assert with_.get("cache") == "npm"
     assert with_.get("cache-dependency-path") == "frontend/package-lock.json"
+
+
+# ---------------------------------------------------------------------------
+# Сертификат: где лежит и кто его читает
+# ---------------------------------------------------------------------------
+SETUP_TLS = REPO / "scripts" / "setup_tls.sh"
+
+
+def test_nginx_reads_certificates_from_host_letsencrypt() -> None:
+    """certbot в setup_tls.sh и в cron продления пишет в хостовый /etc/letsencrypt.
+
+    Именованный том `letsencrypt` — другое место на диске: nginx не увидел
+    бы там ни одного файла и не стартовал бы, а без него недоступен и
+    путь acme-challenge, нужный для выпуска. Монтируется каталог целиком,
+    а не live/<домен>: в live лежат симлинки на ../../archive.
+    """
+    compose = _load(COMPOSE)
+    volumes = [str(v) for v in compose["services"]["nginx"].get("volumes") or []]
+
+    assert "/etc/letsencrypt:/etc/letsencrypt:ro" in volumes, (
+        f"nginx обязан читать хостовый /etc/letsencrypt только на чтение, сейчас: {volumes}"
+    )
+    assert "letsencrypt" not in (compose.get("volumes") or {}), (
+        "именованный том letsencrypt расходится с тем, куда пишет certbot"
+    )
+
+
+def test_setup_tls_removes_stub_before_certbot() -> None:
+    """certbot отказывается выпускать в live/<домен>, созданный не им.
+
+    storage.new_lineage: «live directory exists for <домен>». Заглушку
+    убираем после того, как nginx на ней поднялся, и до запуска certbot.
+    """
+    text = SETUP_TLS.read_text(encoding="utf-8")
+    proverka = text.find("/.well-known/acme-challenge/$PROBA")
+    ubrat = text.find('rm -rf "$LIVE" "/etc/letsencrypt/archive/$DOMAIN" "$RENEWAL"')
+    certbot = text.find("certbot/certbot:latest certonly")
+
+    assert proverka != -1, "в setup_tls.sh нет проверки, что nginx отдаёт acme-challenge"
+    assert ubrat != -1, "в setup_tls.sh нет удаления заглушки (live, archive, renewal)"
+    assert certbot != -1, "в setup_tls.sh нет запуска certbot"
+    assert proverka < ubrat < certbot, (
+        "порядок: nginx поднялся на заглушке и отдаёт acme-challenge → заглушка удалена → certbot"
+    )
+    assert "sozdat_zaglushku" in text[certbot:], (
+        "при провале certbot заглушку нужно вернуть, иначе nginx останется без файлов"
+    )
+
+
+def test_setup_tls_does_not_excuse_dead_nginx() -> None:
+    """Проверка acme-challenge не должна считать немой ответ нормой.
+
+    Прежний текст «каталог проверки пуст — это нормально» печатался и при
+    лежащем nginx, и certbot шёл в заведомо проваленную проверку.
+    """
+    text = SETUP_TLS.read_text(encoding="utf-8")
+
+    assert "это нормально" not in text
+    assert "/.well-known/acme-challenge/$PROBA" in text, (
+        "nginx обязан отдать тестовый файл из acme-challenge до запуска certbot"
+    )
