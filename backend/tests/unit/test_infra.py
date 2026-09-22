@@ -341,3 +341,31 @@ def test_setup_tls_does_not_excuse_dead_nginx() -> None:
     assert "/.well-known/acme-challenge/$PROBA" in text, (
         "nginx обязан отдать тестовый файл из acme-challenge до запуска certbot"
     )
+
+
+# ---------------------------------------------------------------------------
+# Образец .env
+# ---------------------------------------------------------------------------
+ENV_EXAMPLE = REPO / ".env.example"
+
+
+def _env_example() -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def test_env_example_sends_cookies_only_over_https() -> None:
+    """.env на сервере создают копированием образца.
+
+    С false куки с access-токеном уходят без Secure: до первого визита по
+    HSTS любой http://…/api/… отдаёт их открытым текстом в кухонный Wi-Fi.
+    Разработке true не мешает: http://localhost браузеры считают
+    безопасным контекстом.
+    """
+    assert _env_example().get("SESSION_COOKIE_SECURE") == "true"
