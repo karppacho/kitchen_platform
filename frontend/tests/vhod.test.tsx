@@ -337,6 +337,11 @@ test('502 у ручки выхода не мешает выйти — форма
   // Кнопку «Выйти» нажимают на общем кухонном планшете. Если ошибка сети
   // или 502 у /auth/logout остановит очистку кэша и сброс сессии, чужие
   // данные останутся на экране у следующего, кто подойдёт к планшету.
+  //
+  // Через полный App/Layout (не через изолированный зонд Sonda), как
+  // соседние тесты выше: только так проверяется настоящая связь
+  // «me === null → RequireAuth рисует форму входа», а не косвенный
+  // признак вроде исчезновения имени в изолированном компоненте.
   server.use(
     http.get('/api/me', () =>
       HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
@@ -347,20 +352,21 @@ test('502 у ручки выхода не мешает выйти — форма
   const queries = novyKlient()
   render(
     <QueryClientProvider client={queries}>
-      <SessionProvider>
-        <Sonda />
-      </SessionProvider>
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>
     </QueryClientProvider>,
   )
-  await screen.findByText('Алексей')
+  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
 
+  // «Шеф до этого смотрел данные экрана» — как в соседнем тесте «после
+  // выхода кэш запросов пуст».
   queries.setQueryData(['dishes', '', ''], [])
   expect(queries.getQueryCache().getAll().length).toBeGreaterThan(0)
 
   await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
 
-  // Сессия сброшена — Sonda больше не показывает имя.
-  await waitFor(() => expect(screen.queryByText('Алексей')).not.toBeInTheDocument())
+  expect(await screen.findByLabelText('Почта')).toBeInTheDocument()
   expect(queries.getQueryCache().getAll()).toHaveLength(0)
   // Необработанный отказ промиса logout() тест бы не провалил сам по себе —
   // проверка в том, что клик выше вообще не бросил наружу (await дошёл до

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -54,8 +54,26 @@ test('заглушка открывается и говорит, когда ра
 
   await userEvent.click(screen.getByRole('link', { name: 'Дегустации' }))
 
-  expect(screen.getByRole('heading', { name: 'Дегустации' })).toBeInTheDocument()
-  expect(screen.getByText(/фаза 4/i)).toBeInTheDocument()
+  // Меню (Nav) не размонтируется при переходе, а у пункта «Конкуренты»
+  // тоже «фаза 4» — ищем текст фазы только внутри содержимого раздела
+  // (<main>), а не по всей странице, иначе при нескольких совпадениях
+  // текста «фаза 4» тест был бы неустойчив к содержимому меню.
+  const soderzhimoe = within(screen.getByRole('main'))
+  expect(soderzhimoe.getByRole('heading', { name: 'Дегустации' })).toBeInTheDocument()
+  expect(soderzhimoe.getByText(/фаза 4/i)).toBeInTheDocument()
+})
+
+test('у будущего пункта меню есть описание для программы чтения с экрана, у готового — нет', async () => {
+  narisovat()
+  await screen.findByText('Алексей')
+
+  const budushchiy = screen.getByRole('link', { name: 'Дегустации' })
+  const opisanieId = budushchiy.getAttribute('aria-describedby')
+  expect(opisanieId).toBeTruthy()
+  expect(document.getElementById(opisanieId ?? '')).toHaveTextContent('раздел появится позже')
+
+  const gotovyy = screen.getByRole('link', { name: 'Блюда' })
+  expect(gotovyy).not.toHaveAttribute('aria-describedby')
 })
 
 test('выход есть и он в шапке', async () => {
@@ -102,4 +120,29 @@ test('на узком экране меню открывается кнопко�
 
   expect(knopka).toHaveAttribute('aria-expanded', 'false')
   expect(container.querySelector('.bok')).not.toHaveClass('bok--otkryt')
+})
+
+test('шапка показывает обе роли по-русски, включая узкий экран', async () => {
+  // Основной случай, не редкий: у настоящего шефа по ТЗ несколько ролей
+  // (['chef', 'developer']) — во всех остальных тестах в моках только
+  // одна, этот проверяет реальный сценарий входа.
+  server.use(
+    http.get('/api/me', () =>
+      HttpResponse.json({
+        email: 'chef@example.com',
+        display_name: 'Алексей',
+        roles: ['chef', 'developer'],
+      }),
+    ),
+  )
+
+  setViewport(360)
+  narisovat()
+
+  // jsdom не считает раскладку (нет движка вёрстки) — горизонтальное
+  // переполнение шапки на 360 px тут программно не подтвердить, гарантию
+  // на этот счёт даёт CSS (overflow-wrap на .shapka-kto в shell.css), не
+  // тест. Тест подтверждает то, что можно: обе роли по-русски видны
+  // одновременно, а не срезаны логикой рендера.
+  expect(await screen.findByText('бренд-шеф, разработчик')).toBeInTheDocument()
 })
