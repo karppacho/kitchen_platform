@@ -59,6 +59,13 @@ async function poyasnenie(otvet: Response): Promise<string> {
  * Сбой самого продления (5xx, обрыв сети) — это не «сессия мертва»: наверх
  * уходит ошибка с исходным или нулевым статусом, но не 401, чтобы экран не
  * отправил человека на форму входа зря.
+ *
+ * Ручки `/auth/*` продление не запускают: они сами и есть вход/продление,
+ * а login и refresh делят одну зону ограничения частоты nginx. Если
+ * неверный пароль запускает продление, несколько подряд неверных попыток
+ * посадят refresh на 503 — шеф увидит «Не удалось получить данные» вместо
+ * «Неверная почта или пароль», а при живой refresh-куке пароль ушёл бы на
+ * сервер дважды за один клик.
  */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const zapros = (): Promise<Response> =>
@@ -71,7 +78,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(0, 'Нет связи с сервером')
   }
 
-  if (otvet.status === 401) {
+  if (otvet.status === 401 && !path.startsWith('/auth/')) {
     const ishod = await prodlit()
     if (ishod.itog === 'ok') {
       try {

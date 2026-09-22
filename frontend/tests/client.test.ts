@@ -183,6 +183,35 @@ test('502 с нечитаемым телом даёт понятную ошиб�
   expect(prodleniya).not.toHaveBeenCalled()
 })
 
+test('login 401 не запускает продление', async () => {
+  // /auth/login и /auth/refresh делят одну зону ограничения частоты nginx
+  // (10 в минуту, всплеск 5). Если неверный пароль запускает продление,
+  // несколько подряд неверных попыток посадят refresh на 503, и шеф увидит
+  // «Не удалось получить данные» вместо «Неверная почта или пароль» — то
+  // самое смешение отказа и недоступности, против которого построено всё
+  // разделение кодов.
+  const prodleniya = vi.fn()
+  server.use(
+    http.post('/api/auth/login', () =>
+      HttpResponse.json({ detail: 'Неверная почта или пароль' }, { status: 401 }),
+    ),
+    http.post('/api/auth/refresh', () => {
+      prodleniya()
+      return HttpResponse.json({})
+    }),
+  )
+
+  await expect(
+    api('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'chef@example.com', password: 'не тот' }),
+    }),
+  ).rejects.toMatchObject({ status: 401, message: 'Неверная почта или пароль' })
+
+  expect(prodleniya).toHaveBeenCalledTimes(0)
+})
+
 test('200 с нечитаемым телом даёт ApiError, а не голый SyntaxError', async () => {
   // Экраны различают ошибки по ApiError.status. Необработанный SyntaxError
   // для них вообще не ошибка API — упадёт мимо любого catch на этот тип.
