@@ -10,9 +10,12 @@ import { setViewport } from './setup'
 
 // Ответ настоящий: тот самый случай с двумя «Сахарами», из-за которого
 // сверка не может решить сама.
+// id и legacy_id намеренно различаются: тест «показывает legacy_id, а не
+// внутренний» иначе не мог бы отличить одно от другого — при совпадающих
+// значениях он прошёл бы и при ошибочном показе внутреннего id.
 const SAHAR = [
   {
-    id: 12,
+    id: 9001,
     legacy_id: '12',
     name: 'Сахар',
     category: 'Бакалея',
@@ -23,7 +26,7 @@ const SAHAR = [
     has_card: false,
   },
   {
-    id: 123,
+    id: 9002,
     legacy_id: '123',
     name: 'Сахар',
     category: 'Бакалея',
@@ -54,10 +57,14 @@ function narisovat() {
 
 test('показывает legacy_id, а не внутренний', async () => {
   // Шеф знает в лицо идентификатор из таблицы. Внутренний ему не говорит
-  // ничего и только путает.
+  // ничего и только путает. id и legacy_id в фикстуре разные специально —
+  // иначе тест не отличил бы верный показ от ошибочного.
   narisovat()
   expect(await screen.findAllByText('Сахар')).toHaveLength(2)
+  expect(screen.getByText('12')).toBeInTheDocument()
   expect(screen.getByText('123')).toBeInTheDocument()
+  expect(screen.queryByText('9001')).not.toBeInTheDocument()
+  expect(screen.queryByText('9002')).not.toBeInTheDocument()
 })
 
 test('единица определяет смысл цены', async () => {
@@ -110,4 +117,28 @@ test('на 360 px остаются имя, цена и отметка карто
 
   expect(screen.getByText('100 ₽/кг')).toBeInTheDocument()
   expect(screen.queryByText('Бакалея')).not.toBeInTheDocument()
+})
+
+test('статус живёт в адресе и фильтруется на клиенте, не сужая список статусов', async () => {
+  // Открыли присланную ссылку с уже выбранным статусом — экран сразу
+  // показывает только архивные, без повторного клика по фильтру.
+  const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={queries}>
+      <MemoryRouter initialEntries={['/?status=архивный']}>
+        <Ingredients />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+
+  await screen.findAllByText('Сахар')
+  expect(screen.getAllByText('Сахар')).toHaveLength(1)
+  expect(screen.getByText('123')).toBeInTheDocument()
+  expect(screen.queryByText('12')).not.toBeInTheDocument()
+
+  // Список статусов в выпадающем списке остаётся полным: выбор «архивный»
+  // не должен стирать «активный» из вариантов — иначе вернуться к нему
+  // можно было бы только сбросом фильтра.
+  expect(screen.getByRole('option', { name: 'активный' })).toBeInTheDocument()
+  expect(screen.getByRole('option', { name: 'архивный' })).toBeInTheDocument()
 })

@@ -45,9 +45,24 @@ export function Ingredients() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vvod])
 
-  const query = useIngredients(search, status)
-  const stroki = useMemo(() => query.data ?? [], [query.data])
-  const statusy = useMemo(() => [...new Set(stroki.map((r) => r.status))].sort(), [stroki])
+  // Поиск остаётся серверным (там ilike по имени — трогать незачем), а
+  // статус фильтруем на клиенте: справочник целиком помещается в один
+  // ответ (лимит бэкенда по умолчанию — 200 строк, у ингредиентов их 130),
+  // все строки и так уже на руках. Если бы фильтр по статусу уходил на
+  // сервер вместе с поиском, список статусов в Filtry приходилось бы
+  // считать из уже отфильтрованного ответа — тогда выбор «архивный» стирал
+  // бы «активный» из выпадающего списка, и вернуться можно было бы только
+  // сбросом. Считаем statusy по полному (лишь отфильтрованному поиском)
+  // ответу, а саму таблицу — по нему же плюс статус.
+  // Если справочник вырастет за лимит бэкенда, это решение придётся
+  // пересмотреть — грузить статус целиком тогда будет нельзя.
+  const query = useIngredients(search)
+  const vseStroki = useMemo(() => query.data ?? [], [query.data])
+  const statusy = useMemo(() => [...new Set(vseStroki.map((r) => r.status))].sort(), [vseStroki])
+  const stroki = useMemo(
+    () => (status ? vseStroki.filter((r) => r.status === status) : vseStroki),
+    [vseStroki, status],
+  )
 
   const kolonki: Column<Ingredient>[] = [
     { key: 'id', title: 'id', priority: 'wide', render: (r) => r.legacy_id },
