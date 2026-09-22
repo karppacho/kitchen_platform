@@ -19,6 +19,30 @@ const server = setupServer(
   http.get('/api/reconciliation', () =>
     HttpResponse.json({ total: 0, linked: 0, needs_human: 0, rows: [] }),
   ),
+  // Карточка блюда с задачи 12 сама ходит за данными — этому файлу нужен
+  // ответ, а не заглушка, чтобы проверить, что оболочка держит текущим
+  // пункт «Блюда» и на вложенном маршруте.
+  http.get('/api/dishes/B001', () =>
+    HttpResponse.json({
+      legacy_id: 'B001',
+      name: 'Тестовое блюдо',
+      category: 'Блюдо',
+      status: 'активное',
+      price_menu: '100.00',
+      uc_rub: '50.00',
+      uc_percent: '50.0',
+      margin_percent: '50.0',
+      output_grams: '100.000',
+      warnings: 0,
+      protein_g: '1.0',
+      fat_g: '1.0',
+      carbs_g: '1.0',
+      kcal: '10',
+      kbju_coverage: '1.0',
+      components: [],
+      warning_texts: [],
+    }),
+  ),
 )
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }))
@@ -88,7 +112,9 @@ test('пункт «Блюда» остаётся текущим и на карт
   await screen.findByText('Алексей')
 
   expect(screen.getByRole('link', { name: 'Блюда' })).toHaveAttribute('aria-current', 'page')
-  expect(screen.getByRole('heading', { name: 'Карточка блюда' })).toBeInTheDocument()
+  // Настоящая карточка (задача 12) показывает имя блюда, а не статичную
+  // заглушку — ждём его так же, как ждали бы данные любого запроса.
+  expect(await screen.findByRole('heading', { name: 'Тестовое блюдо' })).toBeInTheDocument()
 })
 
 test('неизвестный адрес не даёт пустой экран', async () => {

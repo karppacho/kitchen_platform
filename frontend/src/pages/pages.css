@@ -30,3 +30,74 @@ h1 {
   color: var(--vnimanie);
   font-weight: 600;
 }
+
+.krupno {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 6);
+  padding: calc(var(--shag) * 3) 0;
+  border-block: 1px solid var(--granitsa);
+}
+
+.pokazatel {
+  display: grid;
+  gap: calc(var(--shag) / 2);
+}
+
+.pokazatel-podpis {
+  color: var(--priglushyonnyy);
+  font-size: 12px;
+}
+
+.pokazatel-znachenie {
+  font-size: 22px;
+}
+
+/* Себестоимость выше цены меню — почти всегда перепутанная единица
+   измерения, а не настоящий убыток. Подпись (title) направляет к причине,
+   слова «убыток» здесь нет — как и на экране списка блюд. */
+.pokazatel-znachenie--ubytok {
+  color: var(--oshibka);
+}
+
+.kbju {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 4);
+  padding: calc(var(--shag) * 2) 0;
+  color: var(--priglushyonnyy);
+}
+
+.kbju-slabo {
+  color: var(--vnimanie);
+}
+
+.polnoe-imya {
+  display: block;
+  color: var(--priglushyonnyy);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* Имена бывают по 53 символа — «Контейнер бумажный без крышки
+   207х127х55 крафт/чёрный». Колонка обязана переносить их, не выталкивая
+   таблицу (а с ней и страницу) в горизонтальную прокрутку на 360 px. */
+.imya-ingredienta {
+  overflow-wrap: anywhere;
+}
+
+.zamechaniya-spisok {
+  margin: 0;
+  padding-left: calc(var(--shag) * 5);
+  color: var(--vnimanie);
+}
+
+.nazad {
+  color: var(--aktsent);
+  text-decoration: none;
+}
+
+h2 {
+  font-size: 15px;
+  margin: calc(var(--shag) * 5) 0 calc(var(--shag) * 2);
+}
