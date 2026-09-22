@@ -1,0 +1,75 @@
+.vhod {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: calc(var(--shag) * 4);
+}
+
+.vhod-forma {
+  display: grid;
+  gap: var(--shag);
+  width: min(320px, 100%);
+  background: var(--poverhnost);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  padding: calc(var(--shag) * 6);
+}
+
+.vhod-forma h1 {
+  margin: 0 0 calc(var(--shag) * 2);
+  font-size: 20px;
+}
+
+.vhod-forma label {
+  color: var(--priglushyonnyy);
+}
+
+.vhod-forma input {
+  padding: calc(var(--shag) * 2);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.vhod-forma button {
+  margin-top: calc(var(--shag) * 2);
+  padding: calc(var(--shag) * 2);
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--aktsent);
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.vhod-oshibka {
+  margin: 0;
+  color: var(--oshibka);
+}
+
+/* Отказ по правам (403) и сбой стартовой проверки (0/5xx): та же карточка,
+   что у формы входа, но без полей — это не «представьтесь», а сообщение. */
+.otkaz,
+.sboy {
+  display: grid;
+  place-items: center;
+  gap: var(--shag);
+  min-height: 100vh;
+  padding: calc(var(--shag) * 4);
+  text-align: center;
+}
+
+.otkaz h1,
+.sboy h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.sboy button {
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 4);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font: inherit;
+  cursor: pointer;
+}

@@ -1,12 +1,36 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
-import { expect, test } from 'vitest'
+import { http, HttpResponse } from 'msw'
+import { setupServer } from 'msw/node'
+import { MemoryRouter } from 'react-router-dom'
+import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
 
 import { App } from '../src/App'
 import { setViewport } from './setup'
 
-test('приложение рисуется', () => {
-  render(<App />)
-  expect(screen.getByRole('heading')).toBeInTheDocument()
+// С задачи 8 App проверяет сессию через /api/me, поэтому каркасному тесту
+// нужны QueryClientProvider (его требует SessionProvider) и Router (его
+// требуют защищённые маршруты). Сама проверка не про вход — просто про то,
+// что страница рисуется и на ней есть заголовок.
+const server = setupServer()
+
+beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }))
+afterEach(() => server.resetHandlers())
+afterAll(() => server.close())
+
+test('приложение рисуется', async () => {
+  server.use(http.get('/api/me', () => new HttpResponse(null, { status: 401 })))
+
+  const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={queries}>
+      <MemoryRouter>
+        <App />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+
+  expect(await screen.findByRole('heading')).toBeInTheDocument()
 })
 
 test('подмена ширины работает', () => {
