@@ -68,12 +68,23 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // ApiError(401) не через эту стартовую проверку, а через свой useQuery.
   // Единственное общее место заметить это — кэш запросов TanStack Query,
   // через который идут все данные экранов.
+  //
+  // Смотрим именно на sobytie.action (что произошло только что), а не на
+  // sobytie.query.state.error (что лежит в состоянии запроса сейчас): при
+  // действии 'fetch' TanStack Query обнуляет error, только если данных ещё
+  // не было. У запроса с уже загруженными данными старая ошибка остаётся в
+  // state и после успешного повторного запроса — чтение state.error поймало
+  // бы её задним числом и сбросило бы свежий, только что открытый вход.
   useEffect(() => {
     const otpiska = queryClient.getQueryCache().subscribe((sobytie) => {
-      if (sobytie.type !== 'updated') return
-      const oshibka = sobytie.query.state.error
+      if (sobytie.type !== 'updated' || sobytie.action.type !== 'error') return
+      const oshibka = sobytie.action.error
       if (oshibka instanceof ApiError && oshibka.status === 401) {
         setMe(null)
+        // Чужие данные не должны пережить сброс сессии: без очистки кэша
+        // они ещё staleTime (60 с) показывались бы без перезапроса — в том
+        // числе следующему, кто войдёт с этого же устройства.
+        queryClient.clear()
       }
     })
     return otpiska
@@ -95,7 +106,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     await api<void>('/auth/logout', { method: 'POST' })
     setMe(null)
-  }, [])
+    // Тот же повод, что у сброса по 401: следующий, кто войдёт с этого же
+    // устройства (общий кухонный планшет), не должен минуту видеть данные
+    // предыдущей смены из staleTime.
+    queryClient.clear()
+  }, [queryClient])
 
   return (
     <Kontekst.Provider value={{ me, loading, otkaz, sboy, povtorit, login, logout }}>

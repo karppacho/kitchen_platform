@@ -19,7 +19,15 @@ afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
 test('приложение рисуется', async () => {
-  server.use(http.get('/api/me', () => new HttpResponse(null, { status: 401 })))
+  // Без мока /api/auth/refresh 401 от /api/me запускает реальный сетевой
+  // запрос (onUnhandledRequest: 'bypass' его не перехватывает): продление
+  // падает по сети, экран уходит в sboy («Не удалось проверить сессию»), и
+  // findByRole('heading') без имени проходит на любом экране — тест
+  // перестаёт что-либо проверять по существу.
+  server.use(
+    http.get('/api/me', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () => new HttpResponse(null, { status: 401 })),
+  )
 
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -30,7 +38,7 @@ test('приложение рисуется', async () => {
     </QueryClientProvider>,
   )
 
-  expect(await screen.findByRole('heading')).toBeInTheDocument()
+  expect(await screen.findByRole('heading', { name: 'Кухня' })).toBeInTheDocument()
 })
 
 test('подмена ширины работает', () => {

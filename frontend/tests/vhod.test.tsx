@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -8,6 +8,8 @@ import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
 
 import { App } from '../src/App'
 import { useDishes } from '../src/api/queries'
+import { ApiError, api } from '../src/api/client'
+import { SessionProvider, useSession } from '../src/auth/session'
 
 const server = setupServer()
 
@@ -154,7 +156,22 @@ test('401 у запроса посреди работы сбрасывает с�
   )
 
   const queries = novyKlient()
-  render(
+  const derevo = (
+    <QueryClientProvider client={queries}>
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>
+    </QueryClientProvider>
+  )
+  const { rerender } = render(derevo)
+
+  // Сначала убеждаемся, что сессия действительно жива: если «фоновый»
+  // запрос смонтировать сразу, его 401 может прийти раньше профиля, и
+  // setMe(profil) затрёт сброс сессии гонкой. Монтируем его только теперь,
+  // когда шапка уже показала имя.
+  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
+
+  rerender(
     <QueryClientProvider client={queries}>
       <MemoryRouter initialEntries={['/']}>
         <App />
@@ -163,7 +180,6 @@ test('401 у запроса посреди работы сбрасывает с�
     </QueryClientProvider>,
   )
 
-  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
   expect(await screen.findByLabelText('Почта')).toBeInTheDocument()
 })
 
@@ -176,7 +192,17 @@ test('502 у запроса посреди работы сессию не сбр
   )
 
   const queries = novyKlient()
-  render(
+  const { rerender } = render(
+    <QueryClientProvider client={queries}>
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+
+  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
+
+  rerender(
     <QueryClientProvider client={queries}>
       <MemoryRouter initialEntries={['/']}>
         <App />
@@ -184,10 +210,122 @@ test('502 у запроса посреди работы сессию не сбр
       </MemoryRouter>
     </QueryClientProvider>,
   )
-
-  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
   await waitFor(() => expect(queries.getQueryState(['dishes', '', ''])?.status).toBe('error'))
 
   expect(screen.queryByLabelText('Почта')).not.toBeInTheDocument()
   expect(screen.getByText('Алексей')).toBeInTheDocument()
+})
+
+// --- Ревью Ruling 38: находки 1 и 2 ---
+
+test('запрос с данными, упавший 401, не мешает повторному входу', async () => {
+  // Воспроизводит сценарий из ревью: «шеф смотрит блюда, данные загружены»
+  // → «ночью истекает refresh, фоновое обновление получает 401» → «шеф
+  // входит снова». Раньше подписчик читал query.state.error (текущее
+  // состояние), а не sobytie.action — у запроса с уже загруженными данными
+  // старая 401-ошибка не обнулялась действием 'fetch' и могла сорвать
+  // самый первый повторный вход.
+  server.use(
+    http.get('/api/me', () =>
+      HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
+    ),
+  )
+
+  const queries = novyKlient()
+  render(
+    <QueryClientProvider client={queries}>
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
+
+  const kluch = ['dishes', '', '']
+  // «Шеф смотрит блюда, данные загружены.»
+  queries.setQueryData(kluch, [])
+  expect(queries.getQueryState(kluch)?.data).toBeDefined()
+
+  // «Ночью истекает refresh. Фоновое обновление получает 401, сессия
+  // сбрасывается.»
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () => new HttpResponse(null, { status: 401 })),
+  )
+  // queryClient.fetchQuery вызван напрямую, в обход пользовательских
+  // событий — реакт не подхватит вызванное им обновление SessionProvider
+  // (setMe(null) внутри подписки) автоматически, оборачиваем сами.
+  await act(async () => {
+    await expect(
+      queries.fetchQuery({ queryKey: kluch, queryFn: () => api('/dishes') }),
+    ).rejects.toBeInstanceOf(ApiError)
+  })
+  expect(await screen.findByLabelText('Почта')).toBeInTheDocument()
+
+  // «Шеф входит.» Первый повторный вход не должен молча сорваться.
+  server.use(
+    http.post('/api/auth/login', () =>
+      HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
+    ),
+  )
+  await userEvent.type(screen.getByLabelText('Почта'), 'chef@example.com')
+  await userEvent.type(screen.getByLabelText('Пароль'), 'пароль')
+  await userEvent.click(screen.getByRole('button', { name: 'Войти' }))
+
+  await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
+  expect(screen.queryByLabelText('Почта')).not.toBeInTheDocument()
+
+  // «Экран монтируется заново» — тот же запрос запускается ещё раз (если
+  // queryClient.clear() не подчистил его при сбросе, в его состоянии
+  // всё ещё лежит старая 401-ошибка). Действие 'fetch', а затем 'success'
+  // не должны снова сбросить только что открытый вход.
+  server.use(http.get('/api/dishes', () => HttpResponse.json([])))
+  await act(async () => {
+    await queries.refetchQueries({ queryKey: kluch })
+  })
+  expect(screen.queryByLabelText('Почта')).not.toBeInTheDocument()
+  expect(screen.getByText('Алексей')).toBeInTheDocument()
+})
+
+function Sonda() {
+  // Минимальный потребитель useSession для проверки logout() в отрыве от
+  // App/Layout — кнопки выхода в UI этой задачи ещё нет, её появление не
+  // входит в бриф.
+  const { me, logout } = useSession()
+  return (
+    <div>
+      <span>{me?.display_name}</span>
+      <button onClick={() => void logout()}>Выйти</button>
+    </div>
+  )
+}
+
+test('после выхода кэш запросов пуст', async () => {
+  // Без очистки кэша данные экранов ещё staleTime (60 с) показывались бы
+  // без перезапроса — в том числе следующему, кто войдёт с этого же
+  // устройства (общий кухонный планшет).
+  server.use(
+    http.get('/api/me', () =>
+      HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
+    ),
+    http.post('/api/auth/logout', () => new HttpResponse(null, { status: 204 })),
+  )
+
+  const queries = novyKlient()
+  render(
+    <QueryClientProvider client={queries}>
+      <SessionProvider>
+        <Sonda />
+      </SessionProvider>
+    </QueryClientProvider>,
+  )
+  await screen.findByText('Алексей')
+
+  queries.setQueryData(['dishes', '', ''], [])
+  queries.setQueryData(['ingredients', '', ''], [])
+  expect(queries.getQueryCache().getAll().length).toBeGreaterThan(0)
+
+  await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
+
+  await waitFor(() => expect(queries.getQueryCache().getAll()).toHaveLength(0))
 })
