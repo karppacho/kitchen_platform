@@ -369,3 +369,40 @@ def test_env_example_sends_cookies_only_over_https() -> None:
     безопасным контекстом.
     """
     assert _env_example().get("SESSION_COOKIE_SECURE") == "true"
+
+
+# ---------------------------------------------------------------------------
+# Выкладка
+# ---------------------------------------------------------------------------
+DEPLOY = REPO / "scripts" / "deploy.sh"
+FRONTEND_INDEX = REPO / "frontend" / "index.html"
+
+
+def test_deploy_uses_only_services_that_exist() -> None:
+    """`$COMPOSE exec/run <сервис>` для сервиса, которого нет в compose.
+
+    Так было с `exec -T postgres`: база живёт в стеке Supabase, в нашем
+    compose её нет, и выкладка останавливалась на шаге дампа — то есть не
+    случалась вовсе.
+    """
+    text = DEPLOY.read_text(encoding="utf-8")
+    services = set(_load(COMPOSE)["services"])
+    used = re.findall(r"\$COMPOSE\s+(?:exec|run)\s+(?:-\S+\s+)*([a-z][\w-]*)", text)
+
+    assert used, "разбор вызовов $COMPOSE exec/run сломан"
+    for name in used:
+        assert name in services, f"deploy.sh обращается к сервису «{name}», которого нет в compose"
+
+
+def test_deploy_dumps_supabase_db_before_migrations() -> None:
+    """Дамп всегда до миграций и через контейнер базы Supabase."""
+    text = DEPLOY.read_text(encoding="utf-8")
+
+    assert 'DB_CONTAINER="${DB_CONTAINER:-supabase-db}"' in text
+    assert "проверьте DB_CONTAINER" in text, "нет внятной ошибки при ненайденном контейнере"
+    dump = text.find('docker exec "$DB_CONTAINER" pg_dump')
+    migrations = text.find("alembic upgrade head")
+    assert dump != -1, "дамп не снимается из контейнера базы"
+    assert dump < migrations, "дамп обязан сниматься ДО миграций"
+    assert "set -Eeuo pipefail" in text, "без pipefail упавший pg_dump прячется за gzip"
+
