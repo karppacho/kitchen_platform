@@ -406,6 +406,7 @@ def test_deploy_dumps_supabase_db_before_migrations() -> None:
     assert dump < migrations, "дамп обязан сниматься ДО миграций"
     assert "set -Eeuo pipefail" in text, "без pipefail упавший pg_dump прячется за gzip"
 
+
 def test_deploy_smoke_goes_through_nginx() -> None:
     """/healthz на 127.0.0.1:8080 проходит мимо nginx.
 
@@ -427,3 +428,45 @@ def test_deploy_smoke_goes_through_nginx() -> None:
 def test_frontend_index_has_root_marker() -> None:
     """Смоук выкладки узнаёт index.html по id="root" — маркер обязан быть."""
     assert 'id="root"' in FRONTEND_INDEX.read_text(encoding="utf-8")
+
+
+def _add_header_lines(name: str) -> list[str]:
+    """Директивы add_header с данным заголовком, собранные в одну строку.
+
+    Значение — либо слово, либо строка в кавычках: внутри кавычек бывают
+    и точки с запятой (HSTS, CSP), и перевод строки (CSP записан в две).
+    """
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    pattern = rf'^\s*add_header\s+{re.escape(name)}\s+(?:"[^"]*"|[^\s;"]+)(?:\s+always)?\s*;'
+    return [" ".join(m.group(0).split()) for m in re.finditer(pattern, text, re.MULTILINE)]
+
+
+def test_cache_control_is_not_sent_on_errors() -> None:
+    """Без `always`: nginx выдаёт такой заголовок только на 2xx и 3xx.
+
+    С `always` «immutable на год» уходил бы и на 404 отсутствующего
+    ассета. После отката на сборку с прежними хешами закэшированный на
+    год 404 ломает страницу у шефа, и со стороны сервера это не починить.
+    """
+    lines = _add_header_lines("Cache-Control")
+    assert lines, "add_header Cache-Control пропал из конфига"
+    for line in lines:
+        assert not line.rstrip(";").endswith(" always"), f"«{line}»: always у Cache-Control"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Strict-Transport-Security",
+        "X-Content-Type-Options",
+        "Referrer-Policy",
+        "X-Frame-Options",
+        "Content-Security-Policy",
+    ],
+)
+def test_security_headers_are_sent_always(name: str) -> None:
+    """Заголовкам безопасности `always` нужен: ответ с ошибкой — тоже страница."""
+    lines = _add_header_lines(name)
+    assert lines, f"add_header {name} пропал из конфига"
+    for line in lines:
+        assert line.rstrip(";").endswith(" always"), f"«{line}»: без always"
