@@ -17,5 +17,12 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./tests/setup.ts'],
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
+    // msw при загрузке трогает глобальный localStorage — в Node 22+ это
+    // экспериментальная веб-фича, и Node печатает ExperimentalWarning на
+    // каждый прогон. Функция не используется: msw читает её ради очистки
+    // кук в jsdom, не в node. Гасим точечно только эту фичу флагом Node, а
+    // не предупреждения вообще — остальные ExperimentalWarning остаются
+    // видимыми.
+    poolOptions: { forks: { execArgv: ['--no-experimental-webstorage'] } },
   },
 })

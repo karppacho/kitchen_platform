@@ -48,6 +48,31 @@ test('второй 401 подряд не крутит цикл, а призна�
   expect(prodleniya).toHaveBeenCalledTimes(1)
 })
 
+test('успешный refresh, но исходный запрос снова 401 — ровно один повтор, не цикл', async () => {
+  // Кука могла не лечь (путь, secure) или пользователя удалили в GoTrue —
+  // refresh отвечает 200, но /dishes всё равно 401. Здесь тоже не должно
+  // начаться зацикливание: один повтор, и дальше — отказ. Прежде это
+  // ловилось только тестом с refresh=401, который не отличил бы регрессию
+  // на «while» от одиночного «if».
+  let zaprosov = 0
+  const prodleniya = vi.fn()
+  server.use(
+    http.get('/api/dishes', () => {
+      zaprosov += 1
+      return new HttpResponse(null, { status: 401 })
+    }),
+    http.post('/api/auth/refresh', () => {
+      prodleniya()
+      return HttpResponse.json({})
+    }),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 401 })
+
+  expect(prodleniya).toHaveBeenCalledTimes(1)
+  expect(zaprosov).toBe(2)
+})
+
 test('параллельные 401 дают одно продление, а не три', async () => {
   // Три запроса при открытии экрана не должны давать три продления, из
   // которых два отвергнутся вращением refresh-токена.
@@ -97,8 +122,75 @@ test('403 продлением не лечится и наверх идёт ка
   expect(prodleniya).not.toHaveBeenCalled()
 })
 
+test('сбой самого продления не выдаётся за смерть сессии', async () => {
+  // Refresh, упавший по сети, — не то же самое, что явный отказ 401: сессия
+  // жива, сервис входа просто сейчас недоступен. Раньше .catch(() => false)
+  // сворачивал оба случая в одно и то же — исходный 401 уходил наверх, и
+  // экран отправил бы живого пользователя на форму входа.
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () => HttpResponse.error()),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 0 })
+})
+
+test('после сбоя продления следующий запрос продлевается заново', async () => {
+  // Общий промис продления не должен залипать в состоянии сбоя: finally
+  // обязан сбросить его при любом исходе, иначе все последующие запросы
+  // наследовали бы чужую сетевую ошибку навсегда.
+  let popytka = 0
+  const prodleniya = vi.fn()
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () => {
+      prodleniya()
+      popytka += 1
+      if (popytka === 1) return HttpResponse.error()
+      return HttpResponse.json({})
+    }),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 0 })
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 401 })
+
+  expect(prodleniya).toHaveBeenCalledTimes(2)
+})
+
 test('обрыв сети даёт понятную ошибку, а не пустой экран', async () => {
   server.use(http.get('/api/dishes', () => HttpResponse.error()))
 
   await expect(api('/dishes')).rejects.toMatchObject({ status: 0 })
+})
+
+test('502 с нечитаемым телом даёт понятную ошибку и не трогает продление', async () => {
+  // if (otvet.status >= 500) return [] as T — молчаливо пустой экран,
+  // который спека запрещает поимённо. 502 обязан дойти до экрана как
+  // ошибка, а не как «справочник пуст».
+  const prodleniya = vi.fn()
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse('<html>Bad Gateway</html>', { status: 502 })),
+    http.post('/api/auth/refresh', () => {
+      prodleniya()
+      return HttpResponse.json({})
+    }),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({
+    status: 502,
+    message: 'Не удалось получить данные',
+  })
+  expect(prodleniya).not.toHaveBeenCalled()
+})
+
+test('200 с нечитаемым телом даёт ApiError, а не голый SyntaxError', async () => {
+  // Экраны различают ошибки по ApiError.status. Необработанный SyntaxError
+  // для них вообще не ошибка API — упадёт мимо любого catch на этот тип.
+  server.use(http.get('/api/dishes', () => new HttpResponse('не json', { status: 200 })))
+
+  await expect(api('/dishes')).rejects.toBeInstanceOf(ApiError)
+  await expect(api('/dishes')).rejects.toMatchObject({
+    status: 200,
+    message: 'Не удалось получить данные',
+  })
 })
