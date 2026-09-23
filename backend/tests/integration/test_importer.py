@@ -173,7 +173,7 @@ def test_row_removed_from_sheet_is_hidden_not_deleted(sessions) -> None:
     assert sugar.removed_at is not None, "а скрыта"
     assert tomato.removed_at is None
     assert result.counts["ингредиенты"] == 2, "считаем строки листа, а не базы"
-    assert any(w.startswith("ING: скрыто") for w in result.warnings)
+    assert any(w.startswith("ING: скрыто") for w in result.presence)
 
 
 def test_row_returned_to_sheet_is_restored(sessions) -> None:
@@ -188,7 +188,7 @@ def test_row_returned_to_sheet_is_restored(sessions) -> None:
     with sessions() as session:
         sugar = session.scalar(select(models.Ingredient).where(models.Ingredient.legacy_id == "2"))
     assert sugar.removed_at is None
-    assert any(w.startswith("ING: вернулись") for w in result.warnings)
+    assert any(w.startswith("ING: вернулись") for w in result.presence)
 
 
 def test_removal_note_is_not_lost_among_other_warnings(sessions) -> None:

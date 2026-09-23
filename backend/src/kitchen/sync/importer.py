@@ -60,6 +60,10 @@ class ImportResult:
     run_id: int | None = None
     counts: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # Отдельно от warnings: строк «пустой id, пропущена» в живом ING десятки, и
+    # они забивают note прогона раньше, чем до него доедет «скрыто» — а это
+    # единственный след массового удаления в журнале (см. _mark_presence).
+    presence: list[str] = field(default_factory=list)
     unreadable: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -141,7 +145,10 @@ class Importer:
 
         run.finished_at = datetime.now(UTC)
         run.ok = result.ok
-        run.note = "; ".join(result.warnings[:20])
+        # presence — первым: это самое важное замечание прогона, и обрезка не
+        # имеет права его выбросить, пока в warnings болтаются десятки строк
+        # «пустой id».
+        run.note = "; ".join([*result.presence, *result.warnings][:20])
         session.flush()
         result.run_id = run.id
         return result
@@ -509,7 +516,9 @@ def _mark_presence(
 
     Не стираем (решение Александра 23.09): шеф вернёт строку — вернутся и её
     связи, включая подтверждённые на экране сверки. Сколько скрыто и вернулось —
-    в замечания прогона: массовое исчезновение должно быть видно в журнале.
+    в `result.presence`, а не в `warnings`: массовое исчезновение обязано быть
+    видно в note прогона, а warnings на живых листах — это ещё и десятки строк
+    «пустой id», которые вытеснили бы его при обрезке до двадцати записей.
     """
     hidden = restored = 0
     for key, item in rows.items():
@@ -521,9 +530,9 @@ def _mark_presence(
             item.removed_at = now
             hidden += 1
     if hidden:
-        result.warnings.append(f"{sheet}: скрыто строк, которых больше нет в листе, — {hidden}")
+        result.presence.append(f"{sheet}: скрыто строк, которых больше нет в листе, — {hidden}")
     if restored:
-        result.warnings.append(f"{sheet}: вернулись в лист строки — {restored}")
+        result.presence.append(f"{sheet}: вернулись в лист строки — {restored}")
 
 
 def _stamp(item: object, row: Row) -> None:

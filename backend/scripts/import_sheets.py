@@ -64,6 +64,13 @@ def main() -> int:
         for label, reason in result.unreadable.items():
             print(f"  {label}: {reason}")
 
+    if result.presence:
+        print()
+        print(f"СКРЫТО И ВОЗВРАЩЕНО ({len(result.presence)})")
+        print(RULE)
+        for line in result.presence:
+            print(f"  · {line}")
+
     if result.warnings:
         print()
         print(f"ЗАМЕЧАНИЯ ({len(result.warnings)})")
