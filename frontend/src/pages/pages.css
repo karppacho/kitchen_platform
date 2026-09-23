@@ -29,8 +29,12 @@ h1 {
   border-block: 1px solid var(--granitsa);
 }
 
+/* align-content: start — в ряду показатели растягиваются по высоте самого
+   высокого (у себестоимости выше цены под числом подпись), и без этого
+   строки сетки делили бы лишнее место: число соседа сползало бы вниз. */
 .pokazatel {
   display: grid;
+  align-content: start;
   gap: calc(var(--shag) / 2);
 }
 
