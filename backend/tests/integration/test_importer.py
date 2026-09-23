@@ -9,14 +9,16 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 
 from kitchen.db import models
 from kitchen.sync import specs
 from kitchen.sync.importer import Importer
 from kitchen.sync.reader import SheetsReader
-from tests.fake_sheets import IDS, header, row, sheets_client
+from tests.fake_sheets import IDS, cards_sheet, header, kitchen_sheets, row, sheets_client
 
 pytestmark = pytest.mark.integration
 
@@ -152,3 +154,136 @@ def test_duplicate_card_names_are_reported(sessions) -> None:
 
     assert result.counts["карточки"] == 1, "по имени они одно и то же"
     assert any("уже была выше" in w for w in result.warnings)
+
+
+def test_row_removed_from_sheet_is_hidden_not_deleted(sessions) -> None:
+    """Решение 23.09: удалённое скрываем, но помним — не стираем."""
+    Importer(SheetsReader(sheets_client(), IDS), sessions).run()
+    ing = kitchen_sheets()["ING"]
+    without_sugar = [ing[0], ing[1], ing[3]]  # нет id=2
+
+    result = Importer(
+        SheetsReader(sheets_client(kitchen={"ING": without_sugar}), IDS), sessions
+    ).run()
+
+    with sessions() as session:
+        sugar = session.scalar(select(models.Ingredient).where(models.Ingredient.legacy_id == "2"))
+        tomato = session.scalar(select(models.Ingredient).where(models.Ingredient.legacy_id == "1"))
+    assert sugar is not None, "строка не стёрта"
+    assert sugar.removed_at is not None, "а скрыта"
+    assert tomato.removed_at is None
+    assert result.counts["ингредиенты"] == 2, "считаем строки листа, а не базы"
+    assert any(w.startswith("ING: скрыто") for w in result.warnings)
+
+
+def test_row_returned_to_sheet_is_restored(sessions) -> None:
+    ing = kitchen_sheets()["ING"]
+    Importer(SheetsReader(sheets_client(), IDS), sessions).run()
+    Importer(
+        SheetsReader(sheets_client(kitchen={"ING": [ing[0], ing[1], ing[3]]}), IDS), sessions
+    ).run()
+
+    result = Importer(SheetsReader(sheets_client(), IDS), sessions).run()
+
+    with sessions() as session:
+        sugar = session.scalar(select(models.Ingredient).where(models.Ingredient.legacy_id == "2"))
+    assert sugar.removed_at is None
+    assert any(w.startswith("ING: вернулись") for w in result.warnings)
+
+
+def test_removed_card_keeps_confirmed_link(sessions) -> None:
+    """Связь, подтверждённую на сверке, удаление и возврат карточки не стирают."""
+    importer = Importer(SheetsReader(sheets_client(), IDS), sessions)
+    importer.run()
+    with sessions() as session, session.begin():
+        sugar_id = session.scalar(
+            select(models.Ingredient.id).where(models.Ingredient.legacy_id == "2")
+        )
+        card = session.scalar(
+            select(models.IngredientCard).where(models.IngredientCard.name == "Сахар")
+        )
+        card.ingredient_id = sugar_id
+        card.link_status = "linked"
+        card.link_confirmed_at = text("now()")
+    without_sugar = [line for line in cards_sheet() if "Сахар" not in line]
+
+    Importer(SheetsReader(sheets_client(cards=without_sugar), IDS), sessions).run()
+    with sessions() as session:
+        card = session.scalar(
+            select(models.IngredientCard).where(models.IngredientCard.name == "Сахар")
+        )
+        assert card.removed_at is not None
+        assert card.ingredient_id == sugar_id, "связь не тронута"
+
+    importer.run()
+    with sessions() as session:
+        card = session.scalar(
+            select(models.IngredientCard).where(models.IngredientCard.name == "Сахар")
+        )
+        assert card.removed_at is None
+        assert (card.link_status, card.ingredient_id) == ("linked", sugar_id)
+
+
+def test_unread_sheet_hides_nothing(sessions) -> None:
+    """Лист не прочитался — это не «все строки удалены»."""
+    Importer(SheetsReader(sheets_client(), IDS), sessions).run()
+
+    Importer(SheetsReader(sheets_client(missing=("ING",)), IDS), sessions).run()
+
+    with sessions() as session:
+        hidden = session.scalar(
+            select(func.count())
+            .select_from(models.Ingredient)
+            .where(models.Ingredient.removed_at.is_not(None))
+        )
+    assert hidden == 0
+
+
+def test_card_is_not_linked_to_removed_ingredient(sessions) -> None:
+    """Удалённое из справочника не предлагаем в пару карточке."""
+    Importer(SheetsReader(sheets_client(), IDS), sessions).run()
+    ing = kitchen_sheets()["ING"]
+
+    Importer(
+        SheetsReader(sheets_client(kitchen={"ING": [ing[0], ing[2], ing[3]]}), IDS), sessions
+    ).run()
+
+    with sessions() as session:
+        card = session.scalar(
+            select(models.IngredientCard).where(models.IngredientCard.name == "Томаты")
+        )
+    assert card.link_status != "linked"
+    assert card.ingredient_id is None
+
+
+def test_parallel_imports_do_not_duplicate_ttk(sessions) -> None:
+    """Два импорта разом задвоили бы состав: оба стирают строки ТТК и вставляют свои.
+
+    Первый держит транзакцию открытой; второй обязан дождаться его и увидеть
+    уже новые строки — иначе в базе окажутся обе пачки.
+    """
+    importer = Importer(SheetsReader(sheets_client(), IDS), sessions)
+    importer.run()
+    sheets = SheetsReader(sheets_client(), IDS).read_many(Importer.SPECS)
+    errors: list[Exception] = []
+
+    def second() -> None:
+        try:
+            with sessions() as session, session.begin():
+                importer.apply(session, sheets)
+        except Exception as error:  # ошибку потока показываем в утверждении
+            errors.append(error)
+
+    first = sessions()
+    first.begin()
+    importer.apply(first, sheets)
+    thread = threading.Thread(target=second)
+    thread.start()
+    thread.join(timeout=1.0)  # второй успевает дойти до места, где ждёт
+    first.commit()
+    first.close()
+    thread.join(timeout=30)
+
+    assert not errors, errors
+    with sessions() as session:
+        assert session.scalar(select(func.count()).select_from(models.DishComponent)) == 2
