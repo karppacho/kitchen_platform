@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 pytestmark = pytest.mark.integration
 
@@ -70,3 +70,17 @@ def test_alembic_has_single_head(alembic_config: Config) -> None:
 
     heads = ScriptDirectory.from_config(alembic_config).get_heads()
     assert len(heads) <= 1, f"голов в графе миграций: {len(heads)} — {heads}"
+
+
+def test_sync_schema_after_upgrade(alembic_config: Config) -> None:
+    """После upgrade head есть отметка удаления и состояние книг.
+
+    Отдельно от обратимости: тот тест прошёл бы и с пустой ревизией.
+    """
+    command.upgrade(alembic_config, "head")
+    inspector = inspect(create_engine(_url()))
+    for table in ("ingredients", "ingredient_cards", "packaging", "cooking_methods", "dishes"):
+        removed = {c["name"]: c for c in inspector.get_columns(table)}.get("removed_at")
+        assert removed is not None, f"у {table} нет removed_at"
+        assert removed["nullable"], "пусто — строка есть в листе"
+    assert inspector.get_pk_constraint("sync_state")["constrained_columns"] == ["book"]
