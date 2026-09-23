@@ -191,6 +191,28 @@ def test_row_returned_to_sheet_is_restored(sessions) -> None:
     assert any(w.startswith("ING: вернулись") for w in result.warnings)
 
 
+def test_removal_note_is_not_lost_among_other_warnings(sessions) -> None:
+    """Замечание об удалении обязано попасть в sync_runs.note даже среди другого шума.
+
+    В живом ING около 40 строк без id — заготовки, недописанные позиции.
+    `_identified` пишет по замечанию на каждую такую строку; если «скрыто» лежит
+    в том же списке, что и они, обрезка note до двадцати записей выбрасывает
+    единственный след массового удаления из журнала.
+    """
+    Importer(SheetsReader(sheets_client(), IDS), sessions).run()
+    ing = kitchen_sheets()["ING"]
+    blanks = [row(specs.INGREDIENTS, name="Заготовка") for _ in range(25)]
+    without_sugar = [ing[0], *blanks, ing[1], ing[3]]  # шапка, шум, id=1, id=3 — нет id=2
+
+    result = Importer(
+        SheetsReader(sheets_client(kitchen={"ING": without_sugar}), IDS), sessions
+    ).run()
+
+    with sessions() as session:
+        run = session.get(models.SyncRun, result.run_id)
+    assert "ING: скрыто" in run.note
+
+
 def test_removed_card_keeps_confirmed_link(sessions) -> None:
     """Связь, подтверждённую на сверке, удаление и возврат карточки не стирают."""
     importer = Importer(SheetsReader(sheets_client(), IDS), sessions)
@@ -244,10 +266,13 @@ def test_card_is_not_linked_to_removed_ingredient(sessions) -> None:
     Importer(SheetsReader(sheets_client(), IDS), sessions).run()
     ing = kitchen_sheets()["ING"]
 
-    Importer(
+    result = Importer(
         SheetsReader(sheets_client(kitchen={"ING": [ing[0], ing[2], ing[3]]}), IDS), sessions
     ).run()
 
+    assert result.counts["строки ТТК"] == 2, (
+        "строка ТТК на удалённый ингредиент переносится, иначе себестоимость тихо занизится"
+    )
     with sessions() as session:
         card = session.scalar(
             select(models.IngredientCard).where(models.IngredientCard.name == "Томаты")
@@ -275,14 +300,19 @@ def test_parallel_imports_do_not_duplicate_ttk(sessions) -> None:
             errors.append(error)
 
     first = sessions()
-    first.begin()
-    importer.apply(first, sheets)
-    thread = threading.Thread(target=second)
-    thread.start()
-    thread.join(timeout=1.0)  # второй успевает дойти до места, где ждёт
-    first.commit()
-    first.close()
+    thread = threading.Thread(target=second, daemon=True)
+    try:
+        first.begin()
+        importer.apply(first, sheets)
+        thread.start()
+        thread.join(timeout=1.0)  # второй успевает дойти до места, где ждёт
+        first.commit()
+    finally:
+        # Даже если apply(first, ...) упадёт, транзакция обязана закрыться —
+        # иначе она держит блокировки, и downgrade в фикстуре повиснет.
+        first.close()
     thread.join(timeout=30)
+    assert not thread.is_alive(), "второй импорт не дождался блокировки за 30 с"
 
     assert not errors, errors
     with sessions() as session:
