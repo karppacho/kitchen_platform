@@ -123,6 +123,7 @@ class Importer:
         Листа нет в `sheets` — его сущности не трогаются: ни обновлений, ни
         отметок удаления. Так воркер переносит одну книгу, не задевая другую.
         """
+        take_import_lock(session)
         result = ImportResult()
         now = datetime.now(UTC)
 
