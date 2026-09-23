@@ -285,8 +285,14 @@ def test_card_is_not_linked_to_removed_ingredient(sessions) -> None:
 
 
 def test_removed_ingredient_still_counted_in_dish(sessions) -> None:
-    """Сквозь базу: ТТК ссылается на удалённый ингредиент — строка состава на
-    месте, счёт по последним данным, замечание есть."""
+    """Сквозь базу: ТТК ссылается на удалённые ингредиент и упаковку — строки
+    состава на месте, счёт по последним данным, замечание к каждой.
+
+    Упаковка здесь не за компанию: признак удаления в расчёт переносит
+    `load_recipes`, у ингредиента и упаковки это разные строки кода, а
+    офлайн-тесты расчёта ни одну из них не видят. Коробка стоит в ТТК с
+    нетто 0, поэтому UC прежний.
+    """
     ing = [
         header(specs.INGREDIENTS),
         row(
@@ -307,7 +313,8 @@ def test_removed_ingredient_still_counted_in_dish(sessions) -> None:
         ),
     ]
     Importer(SheetsReader(sheets_client(kitchen={"ING": ing}), IDS), sessions).run()
-    Importer(SheetsReader(sheets_client(kitchen={"ING": [ing[0], ing[2]]}), IDS), sessions).run()
+    without_tomato_and_box = {"ING": [ing[0], ing[2]], "Упаковка": [header(specs.PACKAGING)]}
+    Importer(SheetsReader(sheets_client(kitchen=without_tomato_and_box), IDS), sessions).run()
 
     with sessions() as session:
         [recipe] = load_recipes(session)
@@ -315,6 +322,7 @@ def test_removed_ingredient_still_counted_in_dish(sessions) -> None:
 
     assert cost.uc_rub == Decimal("17.70")
     assert any("«Томаты» удалён из справочника" in w for w in cost.warnings)
+    assert any("«Коробка» удалена из справочника" in w for w in cost.warnings)
 
 
 def test_parallel_imports_do_not_duplicate_ttk(sessions) -> None:
