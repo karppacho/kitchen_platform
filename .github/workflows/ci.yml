@@ -144,3 +144,195 @@ jobs:
       - name: Известные уязвимости
         run: uv run pip-audit
         working-directory: backend
+
+  frontend:
+    name: фронтенд
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22, не ниже 22.4: в vite.config.ts тестовый пул запускается
+          # с флагом --no-experimental-webstorage, который появился только
+          # в 22.4, а на более старом 22.x процесс тестов падает с "bad
+          # option" ещё до первого теста. setup-node с '22' ставит последнюю
+          # 22.x — версия совпадает с node:22-alpine в infra/nginx/Dockerfile.
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run types
+        working-directory: frontend
+      - run: npm run lint
+        working-directory: frontend
+      - run: npm run test
+        working-directory: frontend
+      # Сборка входит в блокирующий CI намеренно: тесты проходят и при
+      # сломанной сборке, а выкладка на сервере — нет.
+      - run: npm run build
+        working-directory: frontend
+
+  nginx:
+    name: образ nginx (живая проверка)
+    runs-on: ubuntu-latest
+    # В задаче 14 образ ни разу не собирался: Docker есть только здесь и на
+    # сервере, а сервер сейчас недоступен. «Образ собирается» без прогона —
+    # не доказательство, поэтому CI поднимает его по-настоящему и бьёт curl'ом.
+    # Отдельный лимит на джобу: если что-то зависнет в ожидании контейнера,
+    # это должно упасть быстро, а не съесть общий пятиминутный бюджет CI.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Контекст — корень репозитория, как в infra/docker-compose.yml: в
+      # образ должны попасть и frontend/, и infra/. Кэш слоёв между
+      # прогонами через GitHub Actions — без него npm ci внутри Dockerfile
+      # выполнялся бы заново на каждый PR.
+      - name: Собрать образ nginx
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/nginx/Dockerfile
+          tags: kitchen-platform-nginx:ci
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # nginx резолвит имя api из proxy_pass ПРИ СТАРТЕ и падает с "host not
+      # found in upstream", если хоста с таким именем нет вовсе. Поднимаем
+      # его в одной сети с nginx, как это делает infra/docker-compose.yml
+      # (там это настоящий бэкенд, здесь — минимальная заглушка).
+      - name: Сеть и заглушка API
+        run: |
+          docker network create kitchen-ci
+
+          cat > /tmp/stub_api.py <<'PY'
+          import json
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+          class Handler(BaseHTTPRequestHandler):
+              def _reply(self) -> None:
+                  self.send_response(404)
+                  self.send_header("Content-Type", "application/json")
+                  self.end_headers()
+                  self.wfile.write(json.dumps({"detail": "not found"}).encode())
+
+              def do_GET(self) -> None:
+                  self._reply()
+
+              def do_POST(self) -> None:
+                  self._reply()
+
+              def log_message(self, *args: object) -> None:
+                  pass  # не засорять лог CI обращениями заглушки
+
+
+          HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+          PY
+
+          docker run -d --name api --network kitchen-ci --network-alias api \
+            -v /tmp/stub_api.py:/stub.py:ro \
+            python:3.12-alpine python3 /stub.py
+
+      # ssl_certificate и ssl_certificate_key в конфиге — обязательные пути;
+      # без файлов по ним nginx не стартует вовсе, ещё до первого запроса.
+      - name: Самоподписанный сертификат
+        run: |
+          mkdir -p /tmp/certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout /tmp/certs/privkey.pem -out /tmp/certs/fullchain.pem \
+            -subj "/CN=art.karppacho.ru"
+
+      # Порты публикуются только на 127.0.0.1 раннера: curl бьёт изнутри
+      # той же машины, шире не нужно. Конфиг — тот же файл, что compose
+      # монтирует на сервере, не копия и не урезанная версия.
+      - name: Запустить nginx
+        run: |
+          docker run -d --name nginx --network kitchen-ci \
+            -p 127.0.0.1:8080:80 -p 127.0.0.1:8443:443 \
+            -v /tmp/certs:/etc/letsencrypt/live/art.karppacho.ru:ro \
+            -v ${{ github.workspace }}/infra/nginx/kitchen-platform.conf:/etc/nginx/conf.d/default.conf:ro \
+            kitchen-platform-nginx:ci
+
+      - name: nginx -t
+        run: docker exec nginx nginx -t
+
+      - name: Ждём готовности контейнера
+        run: |
+          timeout 15 bash -c \
+            'until curl -sk -o /dev/null --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/; do sleep 0.5; done'
+
+      - name: "GET / — HTML, no-cache, CSP и HSTS"
+        run: |
+          curl -sk -D /tmp/h_root.txt -o /tmp/b_root.txt -w '%{http_code}' \
+            --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/ > /tmp/code_root.txt
+          test "$(cat /tmp/code_root.txt)" = "200" || { echo "::error::GET / вернул $(cat /tmp/code_root.txt), а не 200"; exit 1; }
+          grep -qi '^content-type: text/html' /tmp/h_root.txt || { echo "::error::GET /: нет Content-Type: text/html"; exit 1; }
+          grep -qi '^cache-control: no-cache' /tmp/h_root.txt || { echo "::error::GET /: Cache-Control не no-cache"; exit 1; }
+          grep -qi '^content-security-policy:' /tmp/h_root.txt || { echo "::error::GET /: нет Content-Security-Policy"; exit 1; }
+          grep -qi '^strict-transport-security:' /tmp/h_root.txt || { echo "::error::GET /: нет Strict-Transport-Security"; exit 1; }
+
+      - name: "GET /dishes — тот же SPA-фолбэк, что и /"
+        run: |
+          curl -sk -D /tmp/h_dishes.txt -o /tmp/b_dishes.txt -w '%{http_code}' \
+            --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/dishes > /tmp/code_dishes.txt
+          test "$(cat /tmp/code_dishes.txt)" = "200" || { echo "::error::GET /dishes вернул $(cat /tmp/code_dishes.txt), а не 200"; exit 1; }
+          grep -qi '^content-type: text/html' /tmp/h_dishes.txt || { echo "::error::GET /dishes: нет Content-Type: text/html"; exit 1; }
+          grep -qi '^cache-control: no-cache' /tmp/h_dishes.txt || { echo "::error::GET /dishes: Cache-Control не no-cache"; exit 1; }
+          grep -qi '^content-security-policy:' /tmp/h_dishes.txt || { echo "::error::GET /dishes: нет Content-Security-Policy"; exit 1; }
+          grep -qi '^strict-transport-security:' /tmp/h_dishes.txt || { echo "::error::GET /dishes: нет Strict-Transport-Security"; exit 1; }
+
+      - name: Найти путь до собранного ассета
+        run: |
+          curl -sk --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/ \
+            | grep -oE '/assets/[^"]+\.(js|css)' | head -1 > /tmp/asset_path.txt
+          test -s /tmp/asset_path.txt || { echo "::error::в отданном index.html не нашлось ни одного файла в /assets/"; exit 1; }
+          echo "ASSET_PATH=$(cat /tmp/asset_path.txt)" >> "$GITHUB_ENV"
+
+      # Главная проверка: она ловит ловушку add_header внутри location —
+      # если Cache-Control для ассетов дописан прямо в location /assets/,
+      # он тихо отменит унаследованные CSP и HSTS (см. комментарий в
+      # infra/nginx/kitchen-platform.conf у map $kesh).
+      - name: "GET /assets/* — immutable, и CSP/HSTS не потерялись"
+        run: |
+          curl -sk -D /tmp/h_asset.txt -o /dev/null -w '%{http_code}' \
+            --resolve art.karppacho.ru:8443:127.0.0.1 "https://art.karppacho.ru:8443${ASSET_PATH}" > /tmp/code_asset.txt
+          test "$(cat /tmp/code_asset.txt)" = "200" || { echo "::error::GET ${ASSET_PATH} вернул $(cat /tmp/code_asset.txt), а не 200"; exit 1; }
+          grep -qi '^cache-control: public, max-age=31536000, immutable' /tmp/h_asset.txt || { echo "::error::GET ${ASSET_PATH}: Cache-Control не 'public, max-age=31536000, immutable'"; exit 1; }
+          grep -qi '^content-security-policy:' /tmp/h_asset.txt || { echo "::error::GET ${ASSET_PATH}: CSP пропал — похоже, add_header внутри location отменил заголовки server"; exit 1; }
+          grep -qi '^strict-transport-security:' /tmp/h_asset.txt || { echo "::error::GET ${ASSET_PATH}: HSTS пропал — похоже, add_header внутри location отменил заголовки server"; exit 1; }
+
+      - name: "GET /api/nope — ответ заглушки API, а не index.html"
+        run: |
+          curl -sk -D /tmp/h_api.txt -o /tmp/b_api.txt -w '%{http_code}' \
+            --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/nope > /tmp/code_api.txt
+          test "$(cat /tmp/code_api.txt)" = "404" || { echo "::error::GET /api/nope вернул $(cat /tmp/code_api.txt), а не 404"; exit 1; }
+          grep -qi '^content-type: application/json' /tmp/h_api.txt || { echo "::error::GET /api/nope: Content-Type не application/json — похоже, отдался index.html вместо заглушки API"; exit 1; }
+          grep -q '"detail"' /tmp/b_api.txt || { echo "::error::GET /api/nope: тело не похоже на ответ заглушки API"; exit 1; }
+
+      - name: "GET /api без слэша — 404"
+        run: |
+          code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api)
+          test "$code" = "404" || { echo "::error::GET /api вернул $code, а не 404 — провалился в SPA-фолбэк"; exit 1; }
+
+      - name: "GET /healthz снаружи — 404"
+        run: |
+          code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/healthz)
+          test "$code" = "404" || { echo "::error::GET /healthz вернул $code, а не 404"; exit 1; }
+
+      - name: "Порт 80 — редирект на https"
+        run: |
+          curl -s -D /tmp/h80.txt -o /dev/null -w '%{http_code}' \
+            --resolve art.karppacho.ru:8080:127.0.0.1 http://art.karppacho.ru:8080/ > /tmp/code80.txt
+          test "$(cat /tmp/code80.txt)" = "301" || { echo "::error::порт 80 ответил $(cat /tmp/code80.txt), а не 301"; exit 1; }
+          grep -qi '^location: https://' /tmp/h80.txt || { echo "::error::редирект с порта 80 не ведёт на https"; exit 1; }
+
+      - name: Логи контейнеров (для отладки при падении)
+        if: failure()
+        run: |
+          echo "--- nginx ---"; docker logs nginx || true
+          echo "--- api ---"; docker logs api || true

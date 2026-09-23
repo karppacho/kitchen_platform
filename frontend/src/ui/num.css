@@ -1,0 +1,10 @@
+.num {
+  font-family: var(--shrift-tsifry);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.num--pusto {
+  color: var(--priglushyonnyy);
+  font-family: var(--shrift);
+}

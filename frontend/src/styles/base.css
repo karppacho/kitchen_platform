@@ -1,0 +1,31 @@
+@import '@fontsource/ibm-plex-sans/400.css';
+@import '@fontsource/ibm-plex-sans/500.css';
+@import '@fontsource/ibm-plex-sans/600.css';
+@import '@fontsource/ibm-plex-mono/400.css';
+@import './tokens.css';
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--fon);
+  color: var(--tekst);
+  font: 14px/1.4 var(--shrift);
+  /* Табличные цифры глобально: шеф весь день сравнивает столбцы, и цифры
+     разной ширины делают это невозможным. */
+  font-variant-numeric: tabular-nums;
+}
+
+/* Элементы форм не наследуют шрифт страницы по умолчанию: без этого поля
+   поиска съезжают на браузерный дефолт и теряют табличные цифры. */
+input, button, select, textarea {
+  font: inherit;
+  font-variant-numeric: inherit;
+}
+
+/* Общий стиль фокуса для клавиатурной навигации: без него каждая
+   следующая задача придумывала бы свой. */
+:focus-visible {
+  outline: 2px solid var(--aktsent);
+  outline-offset: 2px;
+}

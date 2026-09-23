@@ -23,7 +23,13 @@ cd "$REPO_DIR"
 
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/kitchen-platform}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8080/healthz}"
+# Домен, под которым nginx отдаёт сайт: смоук ходит через него, а не мимо.
+DOMAIN="${DOMAIN:-art.karppacho.ru}"
 COMPOSE="docker compose -f infra/docker-compose.yml"
+# База живёт не в нашем compose, а в стеке Supabase (infra/supabase/README.md):
+# сервис `db`, контейнер `supabase-db` — так он назван в официальном
+# compose Supabase. Переменная — на случай, если upstream его переименует.
+DB_CONTAINER="${DB_CONTAINER:-supabase-db}"
 
 log()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 fail() { printf '\n\033[31mОШИБКА: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -56,8 +62,13 @@ log "2/6  Дамп базы"
 # Всегда и до миграций. Бэкап, снятый после — бесполезен.
 mkdir -p "$BACKUP_DIR"
 DUMP="$BACKUP_DIR/pre-deploy-$(date +%Y%m%d-%H%M%S)-${TARGET_REF:0:8}.sql.gz"
-$COMPOSE exec -T postgres pg_dump -U postgres postgres | gzip > "$DUMP" \
-  || fail "не снялся дамп — деплой остановлен"
+docker ps --format '{{.Names}}' | grep -x "$DB_CONTAINER" > /dev/null \
+  || fail "контейнер базы «$DB_CONTAINER» не найден — проверьте DB_CONTAINER"
+# pipefail (set выше) обязателен: без него статус конвейера — статус gzip,
+# и упавший pg_dump дал бы «успешный» полупустой архив. Недоделанный файл
+# удаляем, чтобы его не приняли за бэкап.
+docker exec "$DB_CONTAINER" pg_dump -U postgres postgres | gzip > "$DUMP" \
+  || { rm -f "$DUMP"; fail "не снялся дамп — деплой остановлен"; }
 printf 'Дамп: %s (%s)\n' "$DUMP" "$(du -h "$DUMP" | cut -f1)"
 
 # ---------------------------------------------------------------------------
@@ -89,5 +100,49 @@ if [[ "$RUNNING_VERSION" != "$TARGET_REF" ]]; then
   rollback
   fail "на сервере версия $RUNNING_VERSION, ожидалась $TARGET_REF — код не перезапустился"
 fi
+
+# /healthz выше ходит на 127.0.0.1:8080 — мимо nginx и пройдёт при мёртвом
+# nginx. Сайт для шефа — это nginx: статика, TLS и проксирование /api/.
+# Проверяем все три тем же путём, что и браузер, только без внешней сети:
+# --resolve направляет имя домена на 127.0.0.1, SNI и Host остаются
+# настоящими.
+#
+# -k — только пока сертификат может быть самоподписанным (заглушка из
+# scripts/setup_tls.sh до выпуска настоящего). Здесь проверяется, что
+# nginx отвечает, а не что Let's Encrypt выдал сертификат.
+proverit_nginx() {
+  local stranica code
+  # grep без -q: с -q он выходит на первом совпадении, compose может
+  # получить SIGPIPE, и pipefail засчитал бы провал при запущенном nginx.
+  if ! $COMPOSE ps --status running --services | grep -x nginx > /dev/null; then
+    PRICHINA="nginx не запущен"
+    return 1
+  fi
+  # Страницу — в переменную, а не curl | grep -q: по той же причине
+  # SIGPIPE ранний выход grep уронил бы конвейер.
+  stranica="$(curl -fsSk --max-time 5 --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/" 2>/dev/null || true)"
+  if ! grep -q 'id="root"' <<< "$stranica"; then
+    PRICHINA="nginx не отдаёт index.html"
+    return 1
+  fi
+  # Без куки API обязан ответить 401. Любой другой код (502 от nginx,
+  # 200 от SPA-фолбэка, 000 — нет соединения) значит, что /api/ до API
+  # не доходит.
+  code="$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' \
+    --resolve "$DOMAIN:443:127.0.0.1" "https://$DOMAIN/api/me" || true)"
+  if [[ "$code" != 401 ]]; then
+    PRICHINA="/api/ не доходит до API ($code)"
+    return 1
+  fi
+}
+
+PRICHINA=""
+for attempt in $(seq 1 30); do
+  if proverit_nginx; then
+    break
+  fi
+  [[ $attempt -eq 30 ]] && { rollback; fail "$PRICHINA — проверка через nginx не прошла за 30 секунд"; }
+  sleep 1
+done
 
 printf '\n\033[32mГотово. Версия %s\033[0m\n' "${TARGET_REF:0:8}"

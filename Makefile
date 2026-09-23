@@ -8,7 +8,7 @@
 BACKEND := backend
 PY := $(BACKEND)/.venv/bin/python
 
-.PHONY: help install lint format types arch test test-live test-int cov eval e2e check deploy
+.PHONY: help install lint format types arch test test-live test-int cov eval e2e front-install front-types front-lint front-test front-build check deploy
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -51,7 +51,22 @@ eval:  ## LLM-евалы. Стоят денег, в CI не входят
 e2e:  ## Браузерные сценарии
 	cd $(BACKEND) && uv run pytest -m e2e
 
-check: lint types arch test  ## Всё, что блокирует PR. Цель — уложиться в 5 минут
+front-install:  ## Поставить зависимости фронтенда
+	cd frontend && npm ci
+
+front-types:  ## tsc: типы фронтенда
+	cd frontend && npm run types
+
+front-lint:  ## eslint
+	cd frontend && npm run lint
+
+front-test:  ## Тесты фронтенда (Vitest)
+	cd frontend && npm run test
+
+front-build:  ## Сборка фронтенда
+	cd frontend && npm run build
+
+check: lint types arch test front-types front-lint front-test  ## Всё, что блокирует PR. Цель — уложиться в 5 минут
 
 deploy:  ## Выкладка на сервер. Запускается НА сервере, одной командой
 	./scripts/deploy.sh

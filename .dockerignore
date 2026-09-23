@@ -1,0 +1,18 @@
+# Контекст сборки — весь репозиторий, а в нём есть каталоги, которых в
+# образе быть не должно и которые сильно замедляют отправку контекста.
+.git
+**/node_modules
+**/dist
+backend/.venv
+backend/.ruff_cache
+backend/.pytest_cache
+**/__pycache__
+_archive_botov
+.superpowers
+.claude/
+.github/
+docs
+*.md
+.env
+.env.*
+!.env.example
