@@ -47,6 +47,7 @@ def _ingredient(row: models.Ingredient) -> IngredientSpec:
         fat_100g=row.fat,
         carbs_100g=row.carbs,
         kcal_100g=row.kcal,
+        removed=row.removed_at is not None,
     )
 
 
@@ -55,6 +56,7 @@ def _packaging(row: models.Packaging) -> PackagingSpec:
         key=row.legacy_id,
         name=row.name,
         price_per_piece=row.price_per_piece,
+        removed=row.removed_at is not None,
     )
 
 

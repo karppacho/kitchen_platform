@@ -53,6 +53,10 @@ class IngredientSpec:
     carbs_100g: Decimal | None = None
     kcal_100g: Decimal | None = None
 
+    removed: bool = False
+    """Строки больше нет в листе, а ТТК на неё ссылается. Считается по
+    последним известным данным и с замечанием (решение 23.09.2026)."""
+
 
 @dataclass(frozen=True, slots=True)
 class PackagingSpec:
@@ -61,6 +65,10 @@ class PackagingSpec:
     key: str
     name: str
     price_per_piece: Decimal | None = None
+
+    removed: bool = False
+    """Строки больше нет в листе, а ТТК на неё ссылается. Считается по
+    последним известным данным и с замечанием (решение 23.09.2026)."""
 
 
 @dataclass(frozen=True, slots=True)
