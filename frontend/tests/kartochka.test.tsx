@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -155,4 +155,54 @@ test('блюда с таким legacy_id нет — понятное сообщ�
   // Повторять запрос за несуществующей карточкой бессмысленно: тот же
   // legacy_id вернёт тот же 404.
   expect(screen.queryByRole('button', { name: 'Повторить' })).not.toBeInTheDocument()
+})
+
+test('состав и упаковка — одна таблица, колонки не разъезжаются', async () => {
+  // Две таблицы с автоматической шириной считали колонки каждая по своим
+  // данным: длинное имя контейнера растягивало первую колонку упаковки, и
+  // её цифры уезжали вправо от цифр состава. В макете упаковка — группа
+  // строк в той же таблице.
+  const { container } = narisovat()
+  const upakovka = await screen.findByText(/Контейнер бумажный/)
+  const tablitsy = container.querySelectorAll('table')
+  expect(tablitsy).toHaveLength(1)
+  expect(upakovka.closest('table')).toBe(tablitsy[0])
+  // Заголовок группы — на всю ширину таблицы, а не лишняя колонка.
+  const zagolovok = screen.getByRole('heading', { name: /упаковка/i }).closest('th')!
+  expect(zagolovok.colSpan).toBe(container.querySelectorAll('thead th').length)
+})
+
+test('у упаковки количество в штуках, а не в граммах', async () => {
+  // Упаковка считается «цена за штуку × количество» (domain/costs.py,
+  // add_packaging): в net_weight_g у неё штуки. «1 г» у контейнера —
+  // неправда, которую шеф видит на каждой карточке.
+  narisovat()
+  const stroka = (await screen.findByText(/Контейнер бумажный/)).closest('tr')!
+  expect(within(stroka).getByText('1 шт')).toBeInTheDocument()
+  expect(within(stroka).queryByText('1 г')).not.toBeInTheDocument()
+})
+
+test('без упаковки группы нет', async () => {
+  server.use(
+    http.get('/api/dishes/B001', () =>
+      HttpResponse.json({
+        ...B001,
+        components: B001.components.filter((k) => k.row_type === 'main'),
+      }),
+    ),
+  )
+  narisovat()
+  await screen.findByText('Салат айсберг')
+  expect(screen.queryByRole('heading', { name: /упаковка/i })).not.toBeInTheDocument()
+})
+
+test('без замечаний нет и раздела замечаний', async () => {
+  server.use(
+    http.get('/api/dishes/B001', () =>
+      HttpResponse.json({ ...B001, warnings: 0, warning_texts: [] }),
+    ),
+  )
+  narisovat()
+  await screen.findByText('Салат айсберг')
+  expect(screen.queryByRole('heading', { name: /замечания/i })).not.toBeInTheDocument()
 })

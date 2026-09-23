@@ -86,6 +86,21 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+/* Заголовок группы «Упаковка» внутри таблицы состава. Заголовки колонок
+   липнут к верху (table.css) — этот не должен; и на узком экране он
+   переносится, а не раздвигает таблицу. */
+.tablitsa .stroka-gruppy th {
+  position: static;
+  white-space: normal;
+  background: var(--fon);
+  font-weight: 400;
+}
+
+.tablitsa .stroka-gruppy [role='heading'] {
+  font-weight: 600;
+  color: var(--tekst);
+}
+
 .zamechaniya-spisok {
   margin: 0;
   padding-left: calc(var(--shag) * 5);

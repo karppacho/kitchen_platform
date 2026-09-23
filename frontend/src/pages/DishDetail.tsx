@@ -107,16 +107,7 @@ export function DishDetailPage() {
       </div>
 
       <h2>Состав</h2>
-      <Sostav stroki={osnova} />
-
-      {upakovka.length > 0 && (
-        <>
-          {/* Упаковка — отдельной группой в конце: в выход блюда она не
-              входит, и брутто у неё нет (gross_weight_g === null). */}
-          <h2>Упаковка</h2>
-          <Sostav stroki={upakovka} />
-        </>
-      )}
+      <Sostav osnova={osnova} upakovka={upakovka} />
 
       {blyudo.warning_texts.length > 0 && (
         <>
@@ -143,49 +134,79 @@ function Pokazatel({ podpis, children }: { podpis: string; children: ReactNode }
   )
 }
 
-function Sostav({ stroki }: { stroki: Component[] }) {
+// Первая колонка — имя, остальные — числа, прижатые вправо.
+const KOLONKI = ['Ингредиент', 'Нетто', 'Брутто', 'Цена за единицу', 'Стоимость', 'Доля']
+
+function Sostav({ osnova, upakovka }: { osnova: Component[]; upakovka: Component[] }) {
   return (
     <div className="tablitsa-obolochka">
       <table className="tablitsa">
         <thead>
           <tr>
-            <th>Ингредиент</th>
-            <th className="vpravo">Нетто</th>
-            <th className="vpravo">Брутто</th>
-            <th className="vpravo">Цена за единицу</th>
-            <th className="vpravo">Стоимость</th>
-            <th className="vpravo">Доля</th>
+            {KOLONKI.map((nazvanie, nomer) => (
+              <th key={nazvanie} className={nomer === 0 ? undefined : 'vpravo'}>
+                {nazvanie}
+              </th>
+            ))}
           </tr>
         </thead>
         <tbody>
-          {stroki.map((k) => (
-            <tr key={`${k.name}-${k.net_weight_g}`}>
-              <td className="imya-ingredienta">
-                {/* «Короткое для айки»: технологи работают в iiko и по
-                    обычному имени не всегда понимают, какой полуфабрикат
-                    брать. Бывает пустым — тогда показывается name. */}
-                {k.short_name || k.name}
-                {k.short_name && <span className="polnoe-imya">{k.name}</span>}
-              </td>
-              <td className="vpravo">
-                <Num value={k.net_weight_g} unit="г" />
-              </td>
-              <td className="vpravo">
-                <Num value={k.gross_weight_g} unit="г" />
-              </td>
-              <td className="vpravo">
-                <Num value={k.price_per_unit} fraction={2} unit={`₽/${k.unit}`} />
-              </td>
-              <td className="vpravo">
-                <Num value={k.cost_rub} fraction={2} unit="₽" />
-              </td>
-              <td className="vpravo">
-                <Num value={k.share_percent} fraction={1} unit="%" />
-              </td>
-            </tr>
+          {osnova.map((k) => (
+            <StrokaSostava key={`${k.name}-${k.net_weight_g}`} k={k} />
           ))}
         </tbody>
+        {upakovka.length > 0 && (
+          // Упаковка — группой строк в той же таблице, как в макете, а не
+          // второй таблицей: у второй ширина колонок считалась бы заново, и
+          // её цифры разъезжались бы с цифрами состава. В выход блюда
+          // упаковка не входит, брутто у неё нет (gross_weight_g === null).
+          <tbody>
+            <tr className="stroka-gruppy">
+              <th colSpan={KOLONKI.length} scope="colgroup">
+                <span role="heading" aria-level={3}>
+                  Упаковка
+                </span>{' '}
+                · в выход блюда не входит, брутто нет
+              </th>
+            </tr>
+            {upakovka.map((k) => (
+              <StrokaSostava key={`${k.name}-${k.net_weight_g}`} k={k} />
+            ))}
+          </tbody>
+        )}
       </table>
     </div>
+  )
+}
+
+function StrokaSostava({ k }: { k: Component }) {
+  // Упаковка считается «цена за штуку × количество» (domain/costs.py,
+  // add_packaging): в net_weight_g у неё штуки, а не граммы.
+  const edinitsa = k.row_type === 'packaging' ? 'шт' : 'г'
+  return (
+    <tr>
+      <td className="imya-ingredienta">
+        {/* «Короткое для айки»: технологи работают в iiko и по обычному
+            имени не всегда понимают, какой полуфабрикат брать. Бывает
+            пустым — тогда показывается name. */}
+        {k.short_name || k.name}
+        {k.short_name && <span className="polnoe-imya">{k.name}</span>}
+      </td>
+      <td className="vpravo">
+        <Num value={k.net_weight_g} unit={edinitsa} />
+      </td>
+      <td className="vpravo">
+        <Num value={k.gross_weight_g} unit="г" />
+      </td>
+      <td className="vpravo">
+        <Num value={k.price_per_unit} fraction={2} unit={`₽/${k.unit}`} />
+      </td>
+      <td className="vpravo">
+        <Num value={k.cost_rub} fraction={2} unit="₽" />
+      </td>
+      <td className="vpravo">
+        <Num value={k.share_percent} fraction={1} unit="%" />
+      </td>
+    </tr>
   )
 }
