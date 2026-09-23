@@ -52,6 +52,20 @@ def test_unread_column_does_not_wake_import() -> None:
     )
 
 
+def test_fallback_sheet_title_keeps_fingerprint() -> None:
+    """Лист под прежним именем «Впитывание масла» — то же содержимое, а не повод
+    переносить книгу: в отпечатке имя из описания, а не найденное в таблице."""
+    renamed = sheets_client(
+        missing=("Способы приготовления",),
+        kitchen={"Впитывание масла": kitchen_sheets()["Способы приготовления"]},
+    )
+
+    verdict = judge("kitchen", _read(renamed))
+
+    assert verdict.problem is None
+    assert verdict.fingerprint == judge("kitchen", _read(sheets_client())).fingerprint
+
+
 def test_shifted_columns_block_the_book() -> None:
     ing = kitchen_sheets()["ING"]
     ing[0] = list(ing[0])
@@ -100,6 +114,27 @@ def test_book_failure_is_explained_once_and_spares_other_book() -> None:
     assert judge("ingredient_cards", sheets).problem is None
 
 
+class NotFoundSpreadsheet:
+    """Таблица, которую Google не нашёл: неверный идентификатор или её удалили."""
+
+    def worksheets(self) -> list[object]:
+        raise RuntimeError("APIError: [404]: Requested entity was not found.")
+
+
+def test_unopened_book_is_one_problem_without_sheet_names() -> None:
+    """Непереведённый отказ открытия таблицы тоже приходит на каждый её лист.
+    Дело не в листе: причина одна и без имён листов."""
+    client = sheets_client()
+    client._spreadsheets["kitchen-id"] = NotFoundSpreadsheet()
+
+    problem = judge("kitchen", _read(client)).problem
+
+    assert problem is not None
+    assert problem.count("не удалось открыть таблицу") == 1
+    assert [spec.title for spec in BOOKS["kitchen"] if spec.title in problem] == []
+    assert "Requested entity was not found" in problem, "текст Google нужен разработчику"
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -111,6 +146,7 @@ def test_book_failure_is_explained_once_and_spares_other_book() -> None:
             "ReadTimeout: HTTPSConnectionPool(host='sheets.googleapis.com'): Read timed out",
             "Google не ответил",
         ),
+        ("APIError: [503]: The service is currently unavailable.", "Google не ответил"),
         ("листа «ТТК» нет в таблице", "листа «ТТК» нет в таблице"),
         ("что-то совсем новое", "не удалось прочитать лист «ING»: что-то совсем новое"),
     ],

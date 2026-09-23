@@ -50,12 +50,37 @@ class Verdict:
     fingerprint: str | None
 
 
+# Признаки «Google не ответил», без учёта регистра.
+_NO_ANSWER = (
+    # Сеть: ответа не дождались.
+    "timeout",
+    "timed out",
+    "connection",
+    "max retries",
+    # Сбой у самого Google (5xx). Для шефа это то же «не ответил», и лечится
+    # так же — следующим циклом (спека 4.5 ставит их в один ряд).
+    "[500]",
+    "[502]",
+    "[503]",
+    "[504]",
+    "internal error",
+    "backend error",
+    "unavailable",
+)
+
+# Так читатель (`SheetsReader._read_book`) помечает каждый лист таблицы,
+# которая не открылась целиком.
+_BOOK_NOT_OPENED = "не открылась таблица: "
+
+
 def explain(title: str, error: str) -> str:
     """Причина сбоя чтения словами, которые поймёт шеф.
 
     Текст исключения gspread написан для разработчика, а полосу на сайте видят
     все (решение Александра 23.09). Известные случаи переводим, остальное —
-    как есть, но с именем листа.
+    как есть, но с именем листа. Кроме отказа открытия всей таблицы: он приходит
+    одинаковым на каждый её лист, дело не в листе, и без имени листа пять
+    одинаковых причин сливаются в одну.
     """
     lowered = error.lower()
     if "[429]" in error or "quota" in lowered:
@@ -64,10 +89,12 @@ def explain(title: str, error: str) -> str:
         return (
             "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
         )
-    if any(word in lowered for word in ("timeout", "timed out", "connection", "max retries")):
+    if any(sign in lowered for sign in _NO_ANSWER):
         return "Google не ответил — следующая попытка через 5 минут"
     if "нет в таблице" in error or "не задан идентификатор" in error:
         return error
+    if error.startswith(_BOOK_NOT_OPENED):
+        return f"не удалось открыть таблицу: {error.removeprefix(_BOOK_NOT_OPENED)[:200]}"
     return f"не удалось прочитать лист «{title}»: {error[:200]}"
 
 
