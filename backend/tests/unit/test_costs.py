@@ -198,7 +198,7 @@ def test_piece_without_weight_warns() -> None:
 # ---------------------------------------------------------------------------
 # Штучные: в ТТК вписано количество штук, а не граммы
 # ---------------------------------------------------------------------------
-SHTUKI_VMESTO_GRAMMOV = "похоже, вписано количество штук"
+PIECES_NOT_GRAMS = "похоже, вписано количество штук"
 
 
 def croissant(**overrides: object) -> IngredientSpec:
@@ -215,20 +215,20 @@ def croissant(**overrides: object) -> IngredientSpec:
 
 @pytest.mark.parametrize(
     ("grams", "warns"),
-    [("1", True), ("0", True), ("6", False), ("30", False)],
+    [("1", True), ("0", True), ("5.9", True), ("6", False), ("30", False)],
 )
 def test_piece_net_below_tenth_of_piece_weight_warns(grams: str, warns: bool) -> None:
     """Нетто меньше 10 % веса штуки — почти наверняка штуки вместо граммов.
 
     B001: в ТТК «1» у круассана весом 60 г. Расчёт понимает граммы и берёт
     1/60 штуки — 0,83 ₽ вместо 49,50 ₽, а шеф не видит ни одного замечания.
-    0 г — тот же случай, только без единой штуки. Ровно 10 % (6 г из 60)
-    замечания не дают: правило — «меньше 10 %». 30 г из 60 — честные
-    полштуки.
+    0 г — тот же случай, только без единой штуки. 5,9 г и 6 г держат порог
+    с двух сторон: ровно 10 % замечания не дают, правило — «меньше 10 %».
+    30 г из 60 — честные полштуки.
     """
     result = calculate(dish(main(croissant(), grams)))
 
-    assert any(SHTUKI_VMESTO_GRAMMOV in w for w in result.warnings) is warns
+    assert any(PIECES_NOT_GRAMS in w for w in result.warnings) is warns
 
 
 def test_piece_warning_keeps_cost() -> None:
@@ -240,7 +240,7 @@ def test_piece_warning_keeps_cost() -> None:
     """
     result = calculate(dish(main(croissant(), "1")))
 
-    assert any(SHTUKI_VMESTO_GRAMMOV in w for w in result.warnings)
+    assert any(PIECES_NOT_GRAMS in w for w in result.warnings)
     assert result.uc_rub == Decimal("0.83")
 
 
@@ -254,22 +254,35 @@ def test_piece_warning_writes_weights_as_chef_does() -> None:
     item = croissant(weight_per_piece_g=Decimal("60.000"))
     result = calculate(dish(main(item, "1.000")))
 
-    [warning] = [w for w in result.warnings if SHTUKI_VMESTO_GRAMMOV in w]
+    [warning] = [w for w in result.warnings if PIECES_NOT_GRAMS in w]
     assert "«Круассан сливочный 60гр»" in warning
     assert "нетто 1 г" in warning
     assert "весе штуки 60 г" in warning
 
 
-def test_piece_without_weight_keeps_old_warning_only() -> None:
-    """Без веса штуки сравнивать не с чем — остаётся прежнее замечание.
+@pytest.mark.parametrize(
+    ("overrides", "old_fragment"),
+    [
+        ({"weight_per_piece_g": None}, "вес 1 шт"),
+        ({"weight_per_piece_g": Decimal("0.000")}, "вес 1 шт"),
+        ({"price_per_unit": None}, "не заполнена цена"),
+        ({"price_per_unit": Decimal("0")}, "не заполнена цена"),
+    ],
+)
+def test_zero_cost_row_keeps_only_its_old_warning(
+    overrides: dict[str, object], old_fragment: str
+) -> None:
+    """Строка, которая и так стоит 0, получает одно замечание — прежнее.
 
-    Второе замечание к той же строке было бы шумом: стоимость и так 0, и
-    шефу уже сказано, чего не хватает.
+    Второе к той же строке было бы шумом: шефу уже сказано, чего не хватает.
+    Вес штуки 0 — отдельный случай: база отдаёт его как «0.000», и проверка
+    `is None` вместо «пусто» пропустила бы строку с нулевой стоимостью без
+    единого замечания.
     """
-    result = calculate(dish(main(croissant(weight_per_piece_g=None), "1")))
+    result = calculate(dish(main(croissant(**overrides), "1")))
 
-    assert any("вес 1 шт" in w for w in result.warnings)
-    assert not any(SHTUKI_VMESTO_GRAMMOV in w for w in result.warnings)
+    assert any(old_fragment in w for w in result.warnings)
+    assert not any(PIECES_NOT_GRAMS in w for w in result.warnings)
 
 
 def test_weight_ingredient_with_piece_weight_does_not_warn() -> None:
@@ -281,7 +294,7 @@ def test_weight_ingredient_with_piece_weight_does_not_warn() -> None:
     salt = ing(name="Соль", unit="кг", weight_per_piece_g=Decimal("60"))
     result = calculate(dish(main(salt, "1")))
 
-    assert not any(SHTUKI_VMESTO_GRAMMOV in w for w in result.warnings)
+    assert not any(PIECES_NOT_GRAMS in w for w in result.warnings)
 
 
 # ---------------------------------------------------------------------------
