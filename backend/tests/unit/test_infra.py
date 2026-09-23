@@ -160,9 +160,9 @@ def test_worker_bez_tochki_vhoda_ne_zapuskaetsya() -> None:
     # его __main__.py.
     module = worker["command"][-1]
     entry = REPO / "backend" / "src" / Path(*module.split(".")) / "__main__.py"
-    if entry.exists():
-        return
-    assert worker.get("profiles"), (
+    # Одним утверждением, без раннего return (см. CONTRIBUTING): с точкой
+    # входа профиль можно снять, без неё он обязателен.
+    assert entry.exists() or worker.get("profiles"), (
         f"у {module} нет __main__.py: без профиля `up -d` поднимет контейнер, "
         f"который падает на старте и перезапускается по кругу"
     )
