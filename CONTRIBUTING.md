@@ -6,26 +6,38 @@
 cd backend
 uv sync --all-extras --dev
 cd .. && pre-commit install
+cd frontend && npm ci
 ```
 
-Нужны: Python 3.12+, [uv](https://docs.astral.sh/uv/), Docker (для Postgres
-в интеграционных тестах).
+Нужны: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node 22.4+ (ниже
+тесты фронтенда падают ещё до запуска: нет флага
+`--no-experimental-webstorage`), Docker (для Postgres в интеграционных
+тестах).
+
+Без `pre-commit install` `ruff format` при коммите не срабатывает, и
+неотформатированный код ловит уже CI.
 
 ## Проверки
 
 ```bash
 make check      # всё, что блокирует PR: ruff + mypy + слои + офлайн-тесты
+                # бэкенда, типы + eslint + тесты фронтенда
 make format     # починить то, что чинится автоматически
 make test-int   # тесты, которым нужен поднятый Postgres
 make test-live  # живые тесты: настоящие Sheets, нужны креды
+make front-build  # сборка фронтенда: в make check не входит, но CI её гоняет
 ```
+
+**Перед PR — `make check`.** CI гоняет то же самое, плюс сборку фронтенда
+и живую проверку образа nginx.
 
 **На Windows `make` обычно не установлен.** Команды внутри целей однострочные,
 их можно выполнять как есть — открой `Makefile` и скопируй нужную. Например
-вместо `make test`:
+вместо `make test` и целей фронтенда:
 
 ```bash
 cd backend && uv run pytest
+cd frontend && npm run types && npm run lint && npm run test && npm run build
 ```
 
 ## Ветки и PR
@@ -75,5 +87,15 @@ cd backend && uv run pytest
 ```
 
 Он снимает дамп базы до миграций, перезапускает контейнеры, проверяет, что
-`/healthz` отдаёт ожидаемый коммит, и откатывается при провале. Руками
-`git pull` на сервере не делаем — на этом уже обжигались.
+`/healthz` отдаёт ожидаемый коммит, а сайт отвечает через nginx, и
+откатывается при провале. Руками `git pull` на сервере не делаем — на этом
+уже обжигались.
+
+Сертификат выпускается один раз, `./scripts/setup_tls.sh`; продление и ночной
+дамп базы — кроны на сервере. Долгие скрипты по ssh запускаются через
+`nohup setsid … > ~/лог 2>&1 &`: обрыв соединения посреди `setup_tls.sh`
+оставил бы nginx без сертификата.
+
+Новый скрипт в `scripts/` — сразу `git update-index --chmod=+x`: с Windows бит
+исполнения в git сам не попадает, и тест `test_skripty_vykladki_ispolnyaemye_v_git`
+это ловит.
