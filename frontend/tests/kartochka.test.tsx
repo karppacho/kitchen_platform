@@ -218,3 +218,18 @@ test('сбой фонового обновления не стирает пок�
   expect(await screen.findByText(/не удалось обновить/i)).toBeInTheDocument()
   expect(screen.getByText('Салат айсберг')).toBeInTheDocument()
 })
+
+test('отказ по правам на фоновом обновлении убирает данные', async () => {
+  // В отличие от сбоя связи: 403 значит, что доступ отозван, и прежние
+  // данные больше не показываем.
+  const { queries } = narisovat()
+  await screen.findByText('Салат айсберг')
+  server.use(
+    http.get('/api/dishes/B001', () =>
+      HttpResponse.json({ detail: 'нужна роль: chef' }, { status: 403 }),
+    ),
+  )
+  await act(() => queries.refetchQueries())
+  expect(await screen.findByText('Доступа нет')).toBeInTheDocument()
+  expect(screen.queryByText('Салат айсберг')).not.toBeInTheDocument()
+})
