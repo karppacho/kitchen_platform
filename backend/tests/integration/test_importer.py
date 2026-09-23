@@ -10,11 +10,14 @@
 from __future__ import annotations
 
 import threading
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select, text
 
 from kitchen.db import models
+from kitchen.db.recipes import load_recipes
+from kitchen.domain.costs import calculate
 from kitchen.sync import specs
 from kitchen.sync.importer import Importer
 from kitchen.sync.reader import SheetsReader
@@ -279,6 +282,39 @@ def test_card_is_not_linked_to_removed_ingredient(sessions) -> None:
         )
     assert card.link_status != "linked"
     assert card.ingredient_id is None
+
+
+def test_removed_ingredient_still_counted_in_dish(sessions) -> None:
+    """Сквозь базу: ТТК ссылается на удалённый ингредиент — строка состава на
+    месте, счёт по последним данным, замечание есть."""
+    ing = [
+        header(specs.INGREDIENTS),
+        row(
+            specs.INGREDIENTS,
+            id="1",
+            name="Томаты",
+            unit="кг",
+            price_per_kg="177",
+            status="активное",
+        ),
+        row(
+            specs.INGREDIENTS,
+            id="2",
+            name="Сахар",
+            unit="кг",
+            price_per_kg="100",
+            status="активное",
+        ),
+    ]
+    Importer(SheetsReader(sheets_client(kitchen={"ING": ing}), IDS), sessions).run()
+    Importer(SheetsReader(sheets_client(kitchen={"ING": [ing[0], ing[2]]}), IDS), sessions).run()
+
+    with sessions() as session:
+        [recipe] = load_recipes(session)
+    cost = calculate(recipe)
+
+    assert cost.uc_rub == Decimal("17.70")
+    assert any("«Томаты» удалён из справочника" in w for w in cost.warnings)
 
 
 def test_parallel_imports_do_not_duplicate_ttk(sessions) -> None:
