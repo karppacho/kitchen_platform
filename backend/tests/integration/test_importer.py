@@ -10,97 +10,19 @@
 from __future__ import annotations
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select, text
 
 from kitchen.db import models
-from kitchen.db.session import make_session_factory
 from kitchen.sync import specs
 from kitchen.sync.importer import Importer
 from kitchen.sync.reader import SheetsReader
-from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
-from tests.integration.test_database import BACKEND, _url
+from tests.fake_sheets import IDS, header, row, sheets_client
 
 pytestmark = pytest.mark.integration
 
-IDS = {"kitchen": "kitchen-id", "ingredient_cards": "cards-id"}
-
-
-def _header(spec) -> list[str]:
-    return [c.expected_header for c in spec.columns]
-
-
-def _row(spec, **values: str) -> list[str]:
-    row = dict.fromkeys((c.field for c in spec.columns), "")
-    row.update(values)
-    return [row[c.field] for c in spec.columns]
-
-
-def _client(**overrides: list[list[str]]) -> FakeSheetsClient:
-    """Фальшивые таблицы с разумным содержимым по умолчанию."""
-    kitchen = {
-        "ING": [
-            _header(specs.INGREDIENTS),
-            _row(specs.INGREDIENTS, id="1", name="Томаты", price_per_kg="177", status="активное"),
-            _row(specs.INGREDIENTS, id="2", name="Сахар", price_per_kg="100", status="активное"),
-            _row(specs.INGREDIENTS, id="3", name="Сахар", price_per_kg="0", status="активное"),
-        ],
-        "Упаковка": [
-            _header(specs.PACKAGING),
-            _row(specs.PACKAGING, id="u1", name="Коробка", price_per_piece="12"),
-        ],
-        "Способы приготовления": [
-            _header(specs.COOKING_METHODS),
-            _row(specs.COOKING_METHODS, id="m1", method="Фритюр"),
-        ],
-        "Блюда": [
-            _header(specs.DISHES),
-            _row(specs.DISHES, id="B001", name="Ролл", price_menu="280", status="активное"),
-        ],
-        "ТТК": [
-            _header(specs.TTK),
-            _row(specs.TTK, dish_id="B001", ingredient_id="1", net_weight_g="100"),
-            _row(specs.TTK, dish_id="B001", packaging_id="u1", net_weight_g="0"),
-        ],
-    }
-    cards = {
-        "Лист1": [
-            _header(specs.INGREDIENT_CARDS),
-            [""] * len(specs.INGREDIENT_CARDS.columns),
-            _row(specs.INGREDIENT_CARDS, name="Томаты", supplier="Поставщик"),
-            _row(specs.INGREDIENT_CARDS, name="Сахар"),
-            _row(specs.INGREDIENT_CARDS, name="Пастрами из индейки"),
-        ]
-    }
-    kitchen.update({k: v for k, v in overrides.items() if k in kitchen or k == "ТТК"})
-    return FakeSheetsClient(
-        {
-            "kitchen-id": FakeSpreadsheet({t: FakeWorksheet(v, t) for t, v in kitchen.items()}),
-            "cards-id": FakeSpreadsheet({t: FakeWorksheet(v, t) for t, v in cards.items()}),
-        }
-    )
-
-
-@pytest.fixture
-def sessions():
-    url = _url()
-    config = Config(str(BACKEND / "alembic.ini"))
-    config.set_main_option("script_location", str(BACKEND / "alembic"))
-    config.set_main_option("sqlalchemy.url", url)
-    # Чистая база на каждый тест: импорт идёт одной транзакцией, и остатки
-    # прошлого прогона сделали бы результат зависящим от порядка тестов.
-    command.downgrade(config, "base")
-    command.upgrade(config, "head")
-
-    factory = make_session_factory(url)
-    yield factory
-
-    command.downgrade(config, "base")
-
 
 def test_import_fills_reference_tables(sessions) -> None:
-    result = Importer(SheetsReader(_client(), IDS), sessions).run()
+    result = Importer(SheetsReader(sheets_client(), IDS), sessions).run()
 
     assert result.ok, result.unreadable
     assert result.run_id is not None
@@ -124,12 +46,12 @@ def test_ttk_row_needs_exactly_one_reference(sessions) -> None:
     решение на базу в виде падения посреди транзакции.
     """
     broken = [
-        _header(specs.TTK),
-        _row(specs.TTK, dish_id="B001", ingredient_id="1", packaging_id="u1", net_weight_g="50"),
-        _row(specs.TTK, dish_id="B001", net_weight_g="50"),
-        _row(specs.TTK, dish_id="B001", ingredient_id="1", net_weight_g="100"),
+        header(specs.TTK),
+        row(specs.TTK, dish_id="B001", ingredient_id="1", packaging_id="u1", net_weight_g="50"),
+        row(specs.TTK, dish_id="B001", net_weight_g="50"),
+        row(specs.TTK, dish_id="B001", ingredient_id="1", net_weight_g="100"),
     ]
-    result = Importer(SheetsReader(_client(**{"ТТК": broken}), IDS), sessions).run()
+    result = Importer(SheetsReader(sheets_client(kitchen={"ТТК": broken}), IDS), sessions).run()
 
     assert result.counts["строки ТТК"] == 1, "приняться должна только корректная строка"
     assert sum("ровно одна ссылка" in w for w in result.warnings) == 2
@@ -137,10 +59,10 @@ def test_ttk_row_needs_exactly_one_reference(sessions) -> None:
 
 def test_unknown_dish_in_ttk_is_reported(sessions) -> None:
     rows = [
-        _header(specs.TTK),
-        _row(specs.TTK, dish_id="B999", ingredient_id="1", net_weight_g="100"),
+        header(specs.TTK),
+        row(specs.TTK, dish_id="B999", ingredient_id="1", net_weight_g="100"),
     ]
-    result = Importer(SheetsReader(_client(**{"ТТК": rows}), IDS), sessions).run()
+    result = Importer(SheetsReader(sheets_client(kitchen={"ТТК": rows}), IDS), sessions).run()
 
     assert result.counts["строки ТТК"] == 0
     assert any("B999" in w for w in result.warnings)
@@ -153,7 +75,7 @@ def test_card_linking_follows_domain_rules(sessions) -> None:
     первого попавшегося нельзя: цены различаются в сто раз. «Пастрами»
     пары не имеет вовсе.
     """
-    Importer(SheetsReader(_client(), IDS), sessions).run()
+    Importer(SheetsReader(sheets_client(), IDS), sessions).run()
 
     with sessions() as session:
         cards = {c.name: c for c in session.scalars(select(models.IngredientCard)).all()}
@@ -174,7 +96,7 @@ def test_reimport_preserves_confirmed_link(sessions) -> None:
     это решение сохранить, иначе сверку придётся проходить каждый раз
     заново.
     """
-    importer = Importer(SheetsReader(_client(), IDS), sessions)
+    importer = Importer(SheetsReader(sheets_client(), IDS), sessions)
     importer.run()
 
     with sessions() as session, session.begin():
@@ -201,7 +123,7 @@ def test_reimport_preserves_confirmed_link(sessions) -> None:
 def test_run_is_recorded(sessions) -> None:
     """Прогон записывается: «в понедельник было 130 блюд, во вторник 128»
     должно быть вопросом к данным, а не к памяти."""
-    Importer(SheetsReader(_client(), IDS), sessions).run()
+    Importer(SheetsReader(sheets_client(), IDS), sessions).run()
 
     with sessions() as session:
         run = session.scalars(select(models.SyncRun)).one()
@@ -221,14 +143,12 @@ def test_duplicate_card_names_are_reported(sessions) -> None:
     этом значит потерять чужую работу без следа.
     """
     cards = [
-        _header(specs.INGREDIENT_CARDS),
+        header(specs.INGREDIENT_CARDS),
         [""] * len(specs.INGREDIENT_CARDS.columns),
-        _row(specs.INGREDIENT_CARDS, name="Томаты", supplier="Первый"),
-        _row(specs.INGREDIENT_CARDS, name="томаты ", supplier="Второй"),
+        row(specs.INGREDIENT_CARDS, name="Томаты", supplier="Первый"),
+        row(specs.INGREDIENT_CARDS, name="томаты ", supplier="Второй"),
     ]
-    client = _client()
-    client._spreadsheets["cards-id"] = FakeSpreadsheet({"Лист1": FakeWorksheet(cards, "Лист1")})
-    result = Importer(SheetsReader(client, IDS), sessions).run()
+    result = Importer(SheetsReader(sheets_client(cards=cards), IDS), sessions).run()
 
     assert result.counts["карточки"] == 1, "по имени они одно и то же"
     assert any("уже была выше" in w for w in result.warnings)
