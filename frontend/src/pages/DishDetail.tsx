@@ -4,9 +4,9 @@ import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../api/client'
 import { useDish } from '../api/queries'
 import type { Component } from '../api/types'
-import { dorozhe } from '../domain/tseny'
+import { dorozhe, PODPIS_DOROZHE } from '../domain/tseny'
 import { Num } from '../ui/Num'
-import { Sostoyanie } from '../ui/Sostoyanie'
+import { estDannye, SboyObnovleniya, Sostoyanie } from '../ui/Sostoyanie'
 // Ruling 3: классы `.tablitsa` из table.css нужны здесь напрямую — этот
 // экран не гарантированно рисуется рядом с <DataTable>, который сам
 // импортирует table.css. Без явного импорта состав блюда выглядел бы
@@ -29,9 +29,9 @@ export function DishDetailPage() {
         <Link to="/dishes" className="nazad">
           ← Блюда
         </Link>
-        <div className="sboy" role="alert">
+        <div className="sostoyanie" role="alert">
           <h1>Такого блюда нет</h1>
-          <p className="sboy-prichina">
+          <p className="sostoyanie-prichina">
             В справочнике нет блюда с идентификатором «{legacyId}».
           </p>
         </div>
@@ -39,7 +39,7 @@ export function DishDetailPage() {
     )
   }
 
-  if (!query.isSuccess) return <Sostoyanie query={query} />
+  if (!estDannye(query)) return <Sostoyanie query={query} />
   const blyudo = query.data
 
   const osnova = blyudo.components.filter((k) => k.row_type === 'main')
@@ -60,19 +60,18 @@ export function DishDetailPage() {
         </p>
       </header>
 
+      <SboyObnovleniya query={query} />
+
       <div className="krupno">
         <Pokazatel podpis="Цена меню">
           <Num value={blyudo.price_menu} fraction={2} unit="₽" />
         </Pokazatel>
-        <Pokazatel podpis="Себестоимость">
+        <Pokazatel
+          podpis="Себестоимость"
+          poyasnenie={cenaVyshe ? PODPIS_DOROZHE : undefined}
+        >
           {cenaVyshe ? (
-            // Почти всегда это перепутанная единица измерения, а не
-            // настоящий убыток — подпись направляет к причине, слова
-            // «убыток» здесь нет.
-            <span
-              className="pokazatel-znachenie--ubytok"
-              title="Себестоимость выше цены меню — проверьте единицы измерения"
-            >
+            <span className="pokazatel-znachenie--ubytok">
               <Num value={blyudo.uc_rub} fraction={2} unit="₽" />
             </span>
           ) : (
@@ -115,8 +114,9 @@ export function DishDetailPage() {
           {/* Список целиком, а не числом: замечания и есть объяснение
               того, почему себестоимость такая. */}
           <ul className="zamechaniya-spisok">
-            {blyudo.warning_texts.map((tekst) => (
-              <li key={tekst}>{tekst}</li>
+            {/* Ключ с номером: два одинаковых замечания — не повод терять одно. */}
+            {blyudo.warning_texts.map((tekst, nomer) => (
+              <li key={`${nomer}-${tekst}`}>{tekst}</li>
             ))}
           </ul>
         </>
@@ -125,11 +125,20 @@ export function DishDetailPage() {
   )
 }
 
-function Pokazatel({ podpis, children }: { podpis: string; children: ReactNode }) {
+function Pokazatel({
+  podpis,
+  poyasnenie,
+  children,
+}: {
+  podpis: string
+  poyasnenie?: string | undefined
+  children: ReactNode
+}) {
   return (
     <div className="pokazatel">
       <span className="pokazatel-podpis">{podpis}</span>
       <span className="pokazatel-znachenie">{children}</span>
+      {poyasnenie && <span className="pokazatel-poyasnenie">{poyasnenie}</span>}
     </div>
   )
 }
@@ -151,8 +160,10 @@ function Sostav({ osnova, upakovka }: { osnova: Component[]; upakovka: Component
           </tr>
         </thead>
         <tbody>
-          {osnova.map((k) => (
-            <StrokaSostava key={`${k.name}-${k.net_weight_g}`} k={k} />
+          {/* Ключ с номером: в ТТК одна позиция может стоять дважды с тем
+              же весом, и ключ «имя + вес» склеил бы строки. */}
+          {osnova.map((k, nomer) => (
+            <StrokaSostava key={`osnova-${nomer}`} k={k} />
           ))}
         </tbody>
         {upakovka.length > 0 && (
@@ -162,15 +173,15 @@ function Sostav({ osnova, upakovka }: { osnova: Component[]; upakovka: Component
           // упаковка не входит, брутто у неё нет (gross_weight_g === null).
           <tbody>
             <tr className="stroka-gruppy">
-              <th colSpan={KOLONKI.length} scope="colgroup">
+              <th colSpan={KOLONKI.length} scope="rowgroup">
                 <span role="heading" aria-level={3}>
                   Упаковка
                 </span>{' '}
                 · в выход блюда не входит, брутто нет
               </th>
             </tr>
-            {upakovka.map((k) => (
-              <StrokaSostava key={`${k.name}-${k.net_weight_g}`} k={k} />
+            {upakovka.map((k, nomer) => (
+              <StrokaSostava key={`upakovka-${nomer}`} k={k} />
             ))}
           </tbody>
         )}

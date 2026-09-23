@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 // Пауза после последней буквы, прежде чем запрос уйдёт на сервер. На каждую
 // букву слать нельзя — 130 строк и печатающий шеф дадут запрос на каждый
@@ -21,13 +21,24 @@ export function useOtlozhennyiPoisk(
 ): [string, (znachenie: string) => void] {
   const [vvod, zadatVvod] = useState(search)
 
+  // Таймер зовёт последнюю версию колбэка, а не ту, что была при нажатии
+  // клавиши. Колбэк экрана строит адрес из параметров своего рендера, и
+  // старая версия за 300 мс успевает устареть: статус, выбранный в эту
+  // паузу, запись поиска стирала бы. Функциональная форма setSearchParams
+  // тут не спасает — в React Router 6 она получает параметры того же
+  // старого рендера.
+  const posledniyOtpravit = useRef(otpravit)
+  useEffect(() => {
+    posledniyOtpravit.current = otpravit
+  })
+
   useEffect(() => {
     zadatVvod(search)
   }, [search])
 
   useEffect(() => {
     if (vvod === search) return
-    const taimer = setTimeout(() => otpravit(vvod), ZADERZHKA_POISKA)
+    const taimer = setTimeout(() => posledniyOtpravit.current(vvod), ZADERZHKA_POISKA)
     return () => clearTimeout(taimer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vvod])

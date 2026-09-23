@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -59,7 +59,7 @@ afterAll(() => server.close())
 
 function narisovat() {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const vid = render(
     <QueryClientProvider client={queries}>
       <MemoryRouter initialEntries={['/dishes/B001']}>
         <Routes>
@@ -68,6 +68,7 @@ function narisovat() {
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return { ...vid, queries }
 }
 
 test('нетто и брутто — две разные колонки', async () => {
@@ -135,7 +136,7 @@ test('себестоимость выше цены меню — красным, 
   )
   narisovat()
 
-  const podskazka = await screen.findByTitle(/проверьте единицы измерения/i)
+  const podskazka = await screen.findByText(/проверьте единицы измерения/i)
   expect(podskazka).toBeInTheDocument()
   expect(screen.queryByText(/убыток/i)).not.toBeInTheDocument()
 })
@@ -205,4 +206,15 @@ test('без замечаний нет и раздела замечаний', as
   narisovat()
   await screen.findByText('Салат айсберг')
   expect(screen.queryByRole('heading', { name: /замечания/i })).not.toBeInTheDocument()
+})
+
+test('сбой фонового обновления не стирает показанное', async () => {
+  // Вернулся во вкладку на кухонном Wi-Fi — обновление упало. Прежние данные
+  // верны, пока не пришли новые; стирать их — отнять экран из-за связи.
+  const { queries } = narisovat()
+  await screen.findByText('Салат айсберг')
+  server.use(http.get('/api/dishes/B001', () => HttpResponse.error()))
+  await act(() => queries.refetchQueries())
+  expect(await screen.findByText(/не удалось обновить/i)).toBeInTheDocument()
+  expect(screen.getByText('Салат айсберг')).toBeInTheDocument()
 })

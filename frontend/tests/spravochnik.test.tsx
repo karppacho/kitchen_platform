@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
@@ -46,13 +46,14 @@ afterAll(() => server.close())
 
 function narisovat() {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const vid = render(
     <QueryClientProvider client={queries}>
       <MemoryRouter>
         <Ingredients />
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return { ...vid, queries }
 }
 
 test('показывает legacy_id, а не внутренний', async () => {
@@ -141,4 +142,15 @@ test('статус живёт в адресе и фильтруется на к�
   // можно было бы только сбросом фильтра.
   expect(screen.getByRole('option', { name: 'активный' })).toBeInTheDocument()
   expect(screen.getByRole('option', { name: 'архивный' })).toBeInTheDocument()
+})
+
+test('сбой фонового обновления не стирает показанное', async () => {
+  // Вернулся во вкладку на кухонном Wi-Fi — обновление упало. Прежние данные
+  // верны, пока не пришли новые; стирать их — отнять экран из-за связи.
+  const { queries } = narisovat()
+  await screen.findAllByText('Сахар')
+  server.use(http.get('/api/ingredients', () => HttpResponse.error()))
+  await act(() => queries.refetchQueries())
+  expect(await screen.findByText(/не удалось обновить/i)).toBeInTheDocument()
+  expect(screen.getAllByText('Сахар')[0]).toBeInTheDocument()
 })

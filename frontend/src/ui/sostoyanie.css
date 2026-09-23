@@ -1,0 +1,41 @@
+/* Состояния запроса внутри экрана. Полноэкранные сбой и отказ стартовой
+   проверки сессии живут в auth.css под классами .sboy и .otkaz — эти
+   классы здесь не трогаем, и наоборот. */
+
+.zagruzka,
+.sostoyanie {
+  color: var(--priglushyonnyy);
+  padding: calc(var(--shag) * 3) 0;
+}
+
+.sostoyanie p {
+  margin: 0 0 var(--shag);
+}
+
+.sostoyanie-prichina {
+  font-size: 12px;
+}
+
+.sostoyanie button,
+.sostoyanie-polosa button {
+  padding: var(--shag) calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  cursor: pointer;
+}
+
+/* Фоновое обновление упало, а данные на экране есть: полоса над ними, не
+   вместо них. Цвет внимания, не ошибки: данные верны, просто не свежие. */
+.sostoyanie-polosa {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--shag) * 2);
+  margin-bottom: calc(var(--shag) * 2);
+  padding: calc(var(--shag) * 2);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  color: var(--vnimanie);
+}

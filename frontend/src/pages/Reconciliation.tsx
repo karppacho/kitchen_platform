@@ -4,7 +4,7 @@ import { useIngredients, useReconciliation } from '../api/queries'
 import type { Ingredient, LinkStatus, ReconciliationRow } from '../api/types'
 import { NameDiff } from '../ui/NameDiff'
 import { Num } from '../ui/Num'
-import { Sostoyanie } from '../ui/Sostoyanie'
+import { estDannye, SboyObnovleniya, Sostoyanie } from '../ui/Sostoyanie'
 import './pages.css'
 import './sverka.css'
 
@@ -48,12 +48,13 @@ export function Reconciliation() {
     return new Map(spravochnik.data.map((stroka) => [stroka.id, stroka]))
   }, [spravochnik.data])
 
-  if (!query.isSuccess) return <Sostoyanie query={query} />
+  if (!estDannye(query)) return <Sostoyanie query={query} />
   const svodka = query.data
 
   return (
     <section>
       <h1>Сверка справочника</h1>
+      <SboyObnovleniya query={query} />
       <p className="poyasnenie">
         Справочник ингредиентов и карточки, которые заполняют повара, лежат в разных
         таблицах и не связаны между собой. Что склеилось по точному совпадению имени —
@@ -66,7 +67,9 @@ export function Reconciliation() {
         <Pokazatel podpis="Требуют решения" znachenie={svodka.needs_human} vnimanie />
       </div>
 
-      {spravochnik.isError && (
+      {/* Цены уже пришли раньше — они на экране; говорить приходится только
+          о том, что их нет вовсе. */}
+      {spravochnik.isError && !estDannye(spravochnik) && (
         <>
           {/* Молчать нельзя: без цен тёзки неотличимы, а экран выглядел бы
               целым. */}

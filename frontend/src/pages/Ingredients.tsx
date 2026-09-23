@@ -6,7 +6,7 @@ import type { Ingredient } from '../api/types'
 import { DataTable, type Column } from '../ui/DataTable'
 import { Filtry } from '../ui/Filtry'
 import { Num } from '../ui/Num'
-import { Sostoyanie } from '../ui/Sostoyanie'
+import { estDannye, SboyObnovleniya, Sostoyanie } from '../ui/Sostoyanie'
 import { useOtlozhennyiPoisk } from '../ui/useOtlozhennyiPoisk'
 import './pages.css'
 
@@ -109,16 +109,20 @@ export function Ingredients() {
         status={status}
         onStatus={zadatStatus}
         statusy={statusy}
-        vsego={query.isSuccess ? stroki.length : undefined}
+        vsego={estDannye(query) ? stroki.length : undefined}
       />
-      <Sostoyanie query={query} />
-      {query.isSuccess && (
-        <DataTable
-          columns={kolonki}
-          rows={stroki}
-          rowKey={(r) => String(r.id)}
-          empty="Ничего не найдено"
-        />
+      {estDannye(query) ? (
+        <>
+          <SboyObnovleniya query={query} />
+          <DataTable
+            columns={kolonki}
+            rows={stroki}
+            rowKey={(r) => String(r.id)}
+            empty="Ничего не найдено"
+          />
+        </>
+      ) : (
+        <Sostoyanie query={query} />
       )}
     </section>
   )

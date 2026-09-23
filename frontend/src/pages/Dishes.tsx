@@ -3,11 +3,11 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 
 import { useDishes } from '../api/queries'
 import type { Dish } from '../api/types'
-import { dorozhe } from '../domain/tseny'
+import { dorozhe, PODPIS_DOROZHE } from '../domain/tseny'
 import { DataTable, type Column } from '../ui/DataTable'
 import { Filtry } from '../ui/Filtry'
 import { Num } from '../ui/Num'
-import { Sostoyanie } from '../ui/Sostoyanie'
+import { estDannye, SboyObnovleniya, Sostoyanie } from '../ui/Sostoyanie'
 import { useOtlozhennyiPoisk } from '../ui/useOtlozhennyiPoisk'
 import './pages.css'
 
@@ -56,11 +56,13 @@ export function Dishes() {
       priority: 'always',
       render: (r) =>
         dorozhe(r.uc_rub, r.price_menu) ? (
-          // Подпись направляет к причине: перепутанная единица измерения
-          // встречается несравнимо чаще настоящего убытка.
-          <span title="Себестоимость выше цены меню — проверьте единицы измерения">
+          // Подпись видимым текстом, а не title — на телефоне всплывающей
+          // подсказки нет. Направляет к причине: перепутанная единица
+          // измерения встречается несравнимо чаще настоящего убытка.
+          <>
             <Num value={r.uc_rub} fraction={2} unit="₽" />
-          </span>
+            <span className="podpis-dorozhe">{PODPIS_DOROZHE}</span>
+          </>
         ) : (
           <Num value={r.uc_rub} fraction={2} unit="₽" />
         ),
@@ -115,18 +117,22 @@ export function Dishes() {
         status={status}
         onStatus={zadatStatus}
         statusy={statusy}
-        vsego={query.isSuccess ? stroki.length : undefined}
+        vsego={estDannye(query) ? stroki.length : undefined}
       />
-      <Sostoyanie query={query} />
-      {query.isSuccess && (
-        <DataTable
-          columns={kolonki}
-          rows={stroki}
-          rowKey={(r) => r.legacy_id}
-          rowClass={(r) => (dorozhe(r.uc_rub, r.price_menu) ? 'stroka--ubytok' : undefined)}
-          onOpen={(r) => idti(`/dishes/${r.legacy_id}`)}
-          empty="Ничего не найдено"
-        />
+      {estDannye(query) ? (
+        <>
+          <SboyObnovleniya query={query} />
+          <DataTable
+            columns={kolonki}
+            rows={stroki}
+            rowKey={(r) => r.legacy_id}
+            rowClass={(r) => (dorozhe(r.uc_rub, r.price_menu) ? 'stroka--ubytok' : undefined)}
+            onOpen={(r) => idti(`/dishes/${r.legacy_id}`)}
+            empty="Ничего не найдено"
+          />
+        </>
+      ) : (
+        <Sostoyanie query={query} />
       )}
     </section>
   )

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
@@ -57,13 +57,14 @@ afterAll(() => server.close())
 
 function narisovat() {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const vid = render(
     <QueryClientProvider client={queries}>
       <MemoryRouter>
         <Dishes />
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return { ...vid, queries }
 }
 
 test('проценты показываются числом с запятой', async () => {
@@ -90,15 +91,25 @@ test('подпись направляет к причине, а не пугае�
   // Это почти всегда перепутанная единица измерения, а не убыток.
   narisovat()
   await screen.findByText('Салат овощной')
-  const podskazka = screen.getByTitle(/проверьте единицы измерения/i)
-  expect(podskazka).toBeInTheDocument()
+  // Подпись видна текстом: всплывающий title на телефоне не показывается.
+  const stroka = screen.getByText('Салат овощной').closest('tr')!
+  expect(stroka).toHaveTextContent(/проверьте единицы измерения/i)
   expect(screen.queryByText(/убыток/i)).not.toBeInTheDocument()
 })
 
 test('ноль замечаний не тревожит, а больше нуля — заметен', async () => {
+  // Смотрим саму ячейку замечаний, а не всю строку: в строке есть «B001»,
+  // и проверка «где-то есть единица» прошла бы при любом числе.
+  server.use(
+    http.get('/api/dishes', () => HttpResponse.json([{ ...BLYUDA[0]!, warnings: 0 }, BLYUDA[2]!])),
+  )
   narisovat()
-  await screen.findByText('Круасан с мортаделой')
-  expect(screen.getByText('Круасан с мортаделой').closest('tr')!.textContent).toContain('1')
+  const bez = (await screen.findByText('Круасан с мортаделой')).closest('tr')!
+  expect(bez.lastElementChild).toHaveTextContent(/^0$/)
+  expect(bez.querySelector('.zamechaniya')).toBeNull()
+
+  const s = screen.getByText('Салат овощной').closest('tr')!
+  expect(s.querySelector('.zamechaniya')).toHaveTextContent(/^2$/)
 })
 
 test('на 360 px остаются название, себестоимость и маржа', async () => {
@@ -109,4 +120,28 @@ test('на 360 px остаются название, себестоимость 
   expect(screen.getByText('84,66 ₽')).toBeInTheDocument()
   expect(screen.getByText('77,1 %')).toBeInTheDocument()
   expect(screen.queryByText('369,00 ₽')).not.toBeInTheDocument()
+})
+
+test('сбой фонового обновления не стирает показанное', async () => {
+  // Вернулся во вкладку на кухонном Wi-Fi — обновление упало. Прежние данные
+  // верны, пока не пришли новые; стирать их — отнять экран из-за связи.
+  const { queries } = narisovat()
+  await screen.findByText('Круасан с мортаделой')
+  server.use(http.get('/api/dishes', () => HttpResponse.error()))
+  await act(() => queries.refetchQueries())
+  expect(await screen.findByText(/не удалось обновить/i)).toBeInTheDocument()
+  expect(screen.getByText('Круасан с мортаделой')).toBeInTheDocument()
+})
+
+test('статус, выбранный пока поиск ждёт паузы, не пропадает', async () => {
+  // Поиск уходит в адрес через 300 мс после последней буквы. Если за это
+  // время выбрать статус, отложенная запись поиска не должна его стереть.
+  narisovat()
+  await screen.findByText('Круасан с мортаделой')
+  fireEvent.change(screen.getByLabelText('Поиск по названию'), { target: { value: 'кр' } })
+  fireEvent.change(screen.getByLabelText('Статус'), { target: { value: 'активное' } })
+  await act(() => new Promise((r) => setTimeout(r, 400)))
+  // Ждём ответа на новый поиск: пока он идёт, вариантов статуса в списке
+  // нет, и выпадающий список не может показать выбранный.
+  await waitFor(() => expect(screen.getByLabelText('Статус')).toHaveValue('активное'))
 })

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, within } from '@testing-library/react'
+import { act, render, screen, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
@@ -77,13 +77,14 @@ afterAll(() => server.close())
 
 function narisovat() {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return render(
+  const vid = render(
     <QueryClientProvider client={queries}>
       <MemoryRouter>
         <Reconciliation />
       </MemoryRouter>
     </QueryClientProvider>,
   )
+  return { ...vid, queries }
 }
 
 test('сводка называет три числа', async () => {
@@ -174,4 +175,15 @@ test('позиции нет в справочнике — прочерк, а н�
   const gruppa = await screen.findByTestId('kartochka-7')
   expect(await within(gruppa).findByText('18,50 ₽/шт')).toBeInTheDocument()
   expect(within(gruppa).getByLabelText('значения нет')).toBeInTheDocument()
+})
+
+test('сбой фонового обновления не стирает показанное', async () => {
+  // Вернулся во вкладку на кухонном Wi-Fi — обновление упало. Прежние данные
+  // верны, пока не пришли новые; стирать их — отнять экран из-за связи.
+  const { queries } = narisovat()
+  await screen.findByText('101')
+  server.use(http.get('/api/reconciliation', () => HttpResponse.error()))
+  await act(() => queries.refetchQueries())
+  expect(await screen.findByText(/не удалось обновить/i)).toBeInTheDocument()
+  expect(screen.getByText('101')).toBeInTheDocument()
 })
