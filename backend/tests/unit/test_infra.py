@@ -14,6 +14,8 @@ Supabase пулер и шлюз по умолчанию публикуются �
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -142,6 +144,28 @@ def test_unused_supabase_services_are_disabled() -> None:
             f"«{name}» должен быть выключен профилем. PostgREST отдельно: "
             f"решение не использовать его принято в docs/adr/0002."
         )
+
+
+def test_worker_bez_tochki_vhoda_ne_zapuskaetsya() -> None:
+    """Воркер без точки входа не должен подниматься выкладкой.
+
+    `python -m <пакет>` без `__main__.py` падает на старте, а с
+    `restart: unless-stopped` такой контейнер перезапускается по кругу.
+    `deploy.sh` поднимает всё через `up -d` и этого не заметит: смоук смотрит
+    только на api и nginx. Пока задач нет, воркер держится в профиле, и
+    профиль снимается вместе с первой фоновой задачей.
+    """
+    worker = _load(COMPOSE)["services"]["worker"]
+    # Команда вида ["python", "-m", "kitchen.worker"]: точка входа пакета —
+    # его __main__.py.
+    module = worker["command"][-1]
+    entry = REPO / "backend" / "src" / Path(*module.split(".")) / "__main__.py"
+    # Одним утверждением, без раннего return (см. CONTRIBUTING): с точкой
+    # входа профиль можно снять, без неё он обязателен.
+    assert entry.exists() or worker.get("profiles"), (
+        f"у {module} нет __main__.py: без профиля `up -d` поднимет контейнер, "
+        f"который падает на старте и перезапускается по кругу"
+    )
 
 
 def test_nginx_sobiraetsya_a_ne_tyanetsya() -> None:
@@ -376,6 +400,40 @@ def test_env_example_sends_cookies_only_over_https() -> None:
 # ---------------------------------------------------------------------------
 DEPLOY = REPO / "scripts" / "deploy.sh"
 FRONTEND_INDEX = REPO / "frontend" / "index.html"
+
+
+def test_skripty_vykladki_ispolnyaemye_v_git() -> None:
+    """Скрипты выкладки вызываются одним словом: `./scripts/deploy.sh`.
+
+    Коммиты идут с Windows, где `core.fileMode=false`: права на исполнение
+    там не видны и в индекс сами не попадают. С режимом 100644 из git на
+    сервере `./scripts/…` отвечает «Permission denied» — так и случилось
+    23.09.2026 с setup_tls.sh при первой выкладке. Проверяется режим в
+    индексе git, а не на диске: на Windows дискового режима нет вовсе.
+    """
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git не найден")
+    vyvod = subprocess.run(
+        [git, "ls-files", "-s", "--", "scripts/*.sh"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if vyvod.returncode != 0:
+        pytest.skip(f"не git-checkout: {vyvod.stderr.strip()}")
+
+    # Строка: «<режим> <хеш> <стадия>\t<путь>».
+    rezhimy = {stroka.split("\t", 1)[1]: stroka.split()[0] for stroka in vyvod.stdout.splitlines()}
+    assert {"scripts/deploy.sh", "scripts/setup_tls.sh"} <= set(rezhimy), (
+        f"скрипты выкладки не найдены в индексе: {sorted(rezhimy)}"
+    )
+    for put, rezhim in sorted(rezhimy.items()):
+        assert rezhim == "100755", (
+            f"{put}: режим {rezhim}, на сервере не запустится. "
+            f"Починка: git update-index --chmod=+x {put}"
+        )
 
 
 def test_deploy_uses_only_services_that_exist() -> None:

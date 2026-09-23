@@ -125,10 +125,16 @@ ssh -N -L 8000:127.0.0.1:8000 artem@<IP>
 
 В облаке это делалось само. Здесь — наше:
 
+Стоит в crontab пользователя `artem` с 23.09.2026 — та же команда дампа,
+что в `scripts/deploy.sh`, с `pipefail` (без него упавший `pg_dump` дал бы
+«успешный» пустой архив) и хранением 14 дней:
+
 ```bash
-0 4 * * * cd /home/artem/supabase && docker compose exec -T db \
-  pg_dump -U postgres postgres | gzip > /var/backups/kitchen-platform/nightly-$(date +\%F).sql.gz
+0 4 * * * bash -o pipefail -c 'f=/var/backups/kitchen-platform/nightly-$(date +\%F).sql.gz; docker exec supabase-db pg_dump -U postgres postgres | gzip > "$f" || { rm -f "$f"; echo "$(date) ночной дамп не снялся" >&2; exit 1; }; find /var/backups/kitchen-platform -name "nightly-*.sql.gz" -mtime +14 -delete' >> /home/artem/backup-nightly.log 2>&1
 ```
+
+Копии пока лежат на той же машине, что и база: выключение ВМ провайдером
+(18–22.09.2026) унесло бы их вместе с ней. Нужна копия вне сервера.
 
 **Восстановление обязано быть проверено.** Дамп, который ни разу не
 разворачивали в пустую базу, бэкапом не является — это файл с надеждой.

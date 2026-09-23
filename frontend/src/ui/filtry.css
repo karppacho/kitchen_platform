@@ -1,0 +1,45 @@
+.filtry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--shag);
+  margin-bottom: calc(var(--shag) * 3);
+}
+
+.filtry-pole {
+  display: flex;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.filtry-pole input,
+.filtry-pole select {
+  width: 100%;
+  padding: var(--shag) calc(var(--shag) * 2);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font: inherit;
+}
+
+.filtry-schyot {
+  align-self: center;
+  color: var(--priglushyonnyy);
+  white-space: nowrap;
+}
+
+/* Общий приём «скрыто визуально, доступно программе чтения с экрана» —
+   узел остаётся в потоке доступности, но не занимает места и не виден.
+   Компонент самодостаточен: не полагается, что этот класс уже определит
+   родительская оболочка. */
+.vizualno-skryto {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

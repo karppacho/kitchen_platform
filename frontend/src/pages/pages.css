@@ -1,0 +1,131 @@
+h1 {
+  font-size: 18px;
+  margin: 0 0 calc(var(--shag) * 3);
+}
+
+/* Архивные не прячем, но и не выдаём за живые. */
+.arhivnyy {
+  color: var(--priglushyonnyy);
+  text-decoration: line-through;
+  text-decoration-color: var(--granitsa);
+}
+
+.net-kartochki {
+  color: var(--vnimanie);
+}
+
+/* Замечание не значит поломку: ноль — нейтрален, больше нуля — заметен,
+   но не тревогой (не цвет ошибки). */
+.zamechaniya {
+  color: var(--vnimanie);
+  font-weight: 600;
+}
+
+.krupno {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 6);
+  padding: calc(var(--shag) * 3) 0;
+  border-block: 1px solid var(--granitsa);
+}
+
+/* align-content: start — в ряду показатели растягиваются по высоте самого
+   высокого (у себестоимости выше цены под числом подпись), и без этого
+   строки сетки делили бы лишнее место: число соседа сползало бы вниз. */
+.pokazatel {
+  display: grid;
+  align-content: start;
+  gap: calc(var(--shag) / 2);
+}
+
+.pokazatel-podpis {
+  color: var(--priglushyonnyy);
+  font-size: 12px;
+}
+
+.pokazatel-znachenie {
+  font-size: 22px;
+}
+
+/* Себестоимость выше цены меню — почти всегда перепутанная единица
+   измерения, а не настоящий убыток. Подпись под числом направляет к
+   причине, слова «убыток» в ней нет — как и на экране списка блюд. */
+.pokazatel-znachenie--ubytok {
+  color: var(--oshibka);
+}
+
+/* Та же подпись в списке блюд — под числом в колонке себестоимости.
+   Узко, чтобы на 360 px не выдавливать название блюда. */
+.podpis-dorozhe {
+  display: block;
+  max-width: 18ch;
+  margin-left: auto;
+  color: var(--oshibka);
+  font-size: 12px;
+  white-space: normal;
+}
+
+/* Подпись под красной себестоимостью — видимым текстом: title на телефоне
+   не показывается. Узкая колонка, чтобы не раздвигать ряд показателей. */
+.pokazatel-poyasnenie {
+  color: var(--oshibka);
+  font-size: 12px;
+  max-width: 26ch;
+}
+
+.kbju {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 4);
+  padding: calc(var(--shag) * 2) 0;
+  color: var(--priglushyonnyy);
+}
+
+.kbju-slabo {
+  color: var(--vnimanie);
+}
+
+.polnoe-imya {
+  display: block;
+  color: var(--priglushyonnyy);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* Имена бывают по 53 символа — «Контейнер бумажный без крышки
+   207х127х55 крафт/чёрный». Колонка обязана переносить их, не выталкивая
+   таблицу (а с ней и страницу) в горизонтальную прокрутку на 360 px. */
+.imya-ingredienta {
+  overflow-wrap: anywhere;
+}
+
+/* Заголовок группы «Упаковка» внутри таблицы состава. Заголовки колонок
+   липнут к верху (table.css) — этот не должен; и на узком экране он
+   переносится, а не раздвигает таблицу. */
+.tablitsa .stroka-gruppy th {
+  position: static;
+  white-space: normal;
+  background: var(--fon);
+  font-weight: 400;
+}
+
+.tablitsa .stroka-gruppy [role='heading'] {
+  font-weight: 600;
+  color: var(--tekst);
+}
+
+.zamechaniya-spisok {
+  margin: 0;
+  padding-left: calc(var(--shag) * 5);
+  color: var(--vnimanie);
+}
+
+.nazad {
+  color: var(--aktsent);
+  text-decoration: none;
+}
+
+h2 {
+  font-size: 15px;
+  margin: calc(var(--shag) * 5) 0 calc(var(--shag) * 2);
+}

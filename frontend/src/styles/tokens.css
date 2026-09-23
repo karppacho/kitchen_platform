@@ -8,6 +8,9 @@
   --granitsa: #e2e2de;
   --aktsent: #2f5ecb;
   --vnimanie: #9a6400;
+  /* Подложка под различие имён на сверке — оттенок того же «внимания»,
+     а не новый цвет, по образцу --oshibka-fon. */
+  --vnimanie-fon: #fdf3e3;
   --oshibka: #b3261e;
   --oshibka-fon: #fbe9e7;
 

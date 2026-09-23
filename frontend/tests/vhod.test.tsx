@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'vitest'
 
 import { App } from '../src/App'
 import { useDishes } from '../src/api/queries'
@@ -14,6 +14,19 @@ import { SessionProvider, useSession } from '../src/auth/session'
 const server = setupServer()
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }))
+// С задачи 11 /dishes — настоящий экран: любой вход в приложение уводит
+// на него (индексный редирект), и он сам вызывает useDishes прямо при
+// монтировании. Большинству тестов этого файла всё равно, что вернёт
+// /api/dishes, — но без мока запрос ушёл бы неперехваченным
+// (onUnhandledRequest: 'bypass' пускает его в настоящую сеть), и его
+// непредсказуемое по времени завершение могло бы застать проверку
+// сессии где угодно. Регистрируем нейтральный ответ по умолчанию, а
+// тесты, которым важен другой ответ /api/dishes (401, 502, обрыв сети),
+// перекрывают его собственным server.use — более поздняя регистрация
+// побеждает.
+beforeEach(() => {
+  server.use(http.get('/api/dishes', () => HttpResponse.json([])))
+})
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
@@ -226,6 +239,11 @@ test('запрос с данными, упавший 401, не мешает по
   // состояние), а не sobytie.action — у запроса с уже загруженными данными
   // старая 401-ошибка не обнулялась действием 'fetch' и могла сорвать
   // самый первый повторный вход.
+  //
+  // Автозапрос /dishes при монтировании (задача 11) успевает осесть на
+  // общем моке по умолчанию из beforeEach ещё до ручного fetchQuery ниже —
+  // иначе TanStack Query задедуплицировал бы ручной вызов в тот же, ещё не
+  // осевший запрос, и получил бы обрыв сети вместо 401 из мока «ночи».
   server.use(
     http.get('/api/me', () =>
       HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
@@ -264,10 +282,19 @@ test('запрос с данными, упавший 401, не мешает по
   expect(await screen.findByLabelText('Почта')).toBeInTheDocument()
 
   // «Шеф входит.» Первый повторный вход не должен молча сорваться.
+  //
+  // С задачи 11 экран блюд больше не заглушка: он сам вызывает useDishes и
+  // после входа перемонтируется на /dishes, тут же запуская собственный
+  // запрос за тем же ключом. Без свежего /api/dishes этот автоматический
+  // запрос застал бы старый 401-обработчик и сорвал бы только что открытый
+  // вход тем же способом, который тест и проверяет, — поэтому вместе с
+  // login добавляем и успешный /api/dishes: в реальности после входа
+  // сессия снова живая, и данные экрана приходят как обычно.
   server.use(
     http.post('/api/auth/login', () =>
       HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef'] }),
     ),
+    http.get('/api/dishes', () => HttpResponse.json([])),
   )
   await userEvent.type(screen.getByLabelText('Почта'), 'chef@example.com')
   await userEvent.type(screen.getByLabelText('Пароль'), 'пароль')
