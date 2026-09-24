@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 from sqlalchemy import func, select
@@ -13,7 +14,12 @@ from kitchen.sync.cycle import SyncCycle
 from kitchen.sync.reader import BOOK_OPEN_FAILED, SheetsReader
 from tests.fake_sheets import IDS, cards_sheet, kitchen_sheets, row, sheets_client
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 pytestmark = pytest.mark.integration
+
+ACCESS = "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
 
 
 class Clock:
@@ -27,6 +33,20 @@ class Clock:
 
     def tick(self, minutes: int = 5) -> None:
         self.now += timedelta(minutes=minutes)
+
+
+class SlowReader(SheetsReader):
+    """Чтение, за которое что-то успевает случиться: `meanwhile` вызывается,
+    когда листы прочитаны, а цикл ещё не встал в очередь импорта."""
+
+    def __init__(self, meanwhile: Callable[[], object], **sheets) -> None:
+        super().__init__(sheets_client(**sheets), IDS)
+        self._meanwhile = meanwhile
+
+    def read_many(self, wanted):
+        sheets = super().read_many(wanted)
+        self._meanwhile()
+        return sheets
 
 
 def _cycle(sessions, clock, **sheets) -> SyncCycle:
@@ -49,6 +69,13 @@ def _tomato_price(sessions) -> str:
         return str(tomato.price_per_kg)
 
 
+def _tomato_supplier(sessions) -> str:
+    """Поставщик в карточке ингредиента «Томаты»."""
+    query = select(models.IngredientCard.supplier).where(models.IngredientCard.name == "Томаты")
+    with sessions() as session:
+        return session.scalar(query)
+
+
 def _cheaper_tomato() -> list[list[str]]:
     ing = kitchen_sheets()["ING"]
     ing[1] = row(specs.INGREDIENTS, id="1", name="Томаты", price_per_kg="170", status="активное")
@@ -63,15 +90,20 @@ def _shifted(ing: list[list[str]]) -> list[list[str]]:
 
 def test_first_cycle_imports_both_books(sessions) -> None:
     clock = Clock()
+    read_started = clock.now
 
-    result = _cycle(sessions, clock).run()
+    # Чтение идёт минуту: иначе время начала чтения и время переноса совпали
+    # бы, и тест не отличил бы одно от другого.
+    result = SyncCycle(SlowReader(lambda: clock.tick(1)), sessions, clock).run()
 
     assert {b: o.action for b, o in result.outcomes.items()} == {
         "kitchen": "imported",
         "ingredient_cards": "imported",
     }
     kitchen = _state(sessions, "kitchen")
-    assert (kitchen.checked_at, kitchen.changed_at) == (clock.now, clock.now)
+    after_read = read_started + timedelta(minutes=1)
+    assert kitchen.read_started_at == read_started, "запомнено начало чтения, а не перенос"
+    assert (kitchen.checked_at, kitchen.changed_at) == (after_read, after_read)
     assert kitchen.fingerprint is not None and len(kitchen.fingerprint) == 64
     assert kitchen.problem is None
     assert _runs(sessions) == 1, "перенос — событие журнала"
@@ -121,6 +153,7 @@ def test_shifted_columns_block_book_but_not_the_other(sessions) -> None:
     assert kitchen.action == "failed"
     assert "в листе «ING» сдвинулись колонки" in kitchen.problem
     assert result.outcomes["ingredient_cards"].action == "imported"
+    assert _tomato_supplier(sessions) == "Новый поставщик", "карточки в базе новые"
     state = _state(sessions, "kitchen")
     assert state.checked_at == checked, "непроверенное не считается свежим"
     assert state.problem_since == clock.now
@@ -196,6 +229,63 @@ def test_force_imports_even_unchanged(sessions) -> None:
     assert _state(sessions, "kitchen").changed_at == clock.now - timedelta(minutes=5)
 
 
+def test_force_does_not_import_broken_book(sessions) -> None:
+    """Ручной импорт переносит и без изменений, но не книгу со сдвигом колонок:
+    колонки читаются по позиции, и цена приехала бы из чужой колонки (спека 4.4)."""
+    clock = Clock()
+    _cycle(sessions, clock).run()
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _shifted(_cheaper_tomato())}).run(force=True)
+
+    assert result.outcomes["kitchen"].action == "failed"
+    assert _tomato_price(sessions) == "177.00"
+
+
+# ---------------------------------------------------------------------------
+# Гонка с ручным импортом — без потоков: чужой цикл проходит, пока идёт наше
+# чтение (спека 4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_import_during_our_read_wins(sessions) -> None:
+    """Пока воркер читал, ручной импорт прочитал лист новее и перенёс его.
+    Чтение воркера старше: перенеси он его — в базу вернулась бы старая цена."""
+    clock = Clock()
+    _cycle(sessions, clock).run()
+    clock.tick()
+
+    def manual_import() -> None:
+        clock.tick(1)
+        _cycle(sessions, clock, kitchen={"ING": _cheaper_tomato()}).run(force=True)
+
+    result = SyncCycle(SlowReader(manual_import), sessions, clock).run()
+
+    assert result.outcomes["kitchen"].action == "stale"
+    assert _tomato_price(sessions) == "170.00", "в базе — чтение новее"
+
+
+def test_failed_read_older_than_import_is_not_a_problem(sessions) -> None:
+    """Наше чтение упало, а ручной импорт тем временем прочитал книгу позже и
+    перенёс. Сбой старого чтения — уже не правда о книге: ни причины на сайт,
+    ни события в журнал."""
+    clock = Clock()
+    _cycle(sessions, clock).run()
+    clock.tick()
+
+    def manual_import() -> None:
+        clock.tick(1)
+        _cycle(sessions, clock).run(force=True)
+
+    reader = SlowReader(manual_import, kitchen={"ING": _shifted(kitchen_sheets()["ING"])})
+    result = SyncCycle(reader, sessions, clock).run()
+
+    assert result.outcomes["kitchen"].action == "stale"
+    state = _state(sessions, "kitchen")
+    assert (state.problem, state.problem_since) == (None, None)
+    assert _runs(sessions) == 2, "два переноса; сбоя старого чтения в журнале нет"
+
+
 # ---------------------------------------------------------------------------
 # Запись о сбое в журнале: причина словами шефа и исходный текст ошибки
 # ---------------------------------------------------------------------------
@@ -225,12 +315,10 @@ def test_failure_note_keeps_raw_error(sessions) -> None:
     result = SyncCycle(SheetsReader(client, IDS), sessions, Clock()).run()
 
     kitchen = result.outcomes["kitchen"]
-    assert kitchen.action == "failed"
-    assert kitchen.problem.startswith("доступ платформы к таблице закрыт")
-    assert kitchen.details == f"{BOOK_OPEN_FAILED}PermissionError"
-    assert _failure_notes(sessions) == [
-        f"kitchen: {kitchen.problem} — {BOOK_OPEN_FAILED}PermissionError"
-    ]
+    raw = f"{BOOK_OPEN_FAILED}PermissionError"
+    assert (kitchen.action, kitchen.problem, kitchen.details) == ("failed", ACCESS, raw)
+    assert _state(sessions, "kitchen").problem == ACCESS, "на сайт — только перевод"
+    assert _failure_notes(sessions) == [f"kitchen: {ACCESS} — {raw}"]
 
 
 def test_failure_note_does_not_repeat_the_problem(sessions) -> None:
