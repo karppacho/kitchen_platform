@@ -10,18 +10,21 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
+from kitchen.config import Settings
 from kitchen.db import models
 from kitchen.db.recipes import load_recipes
 from kitchen.domain.costs import calculate
-from kitchen.web.auth import CurrentUserDep, SessionDep
+from kitchen.web.auth import CurrentUserDep, SessionDep, get_settings
+from kitchen.web.sync_status import BookRow, SyncStatus, build_sync_status
 
 if TYPE_CHECKING:
     from kitchen.domain.recipe import DishCost
@@ -331,4 +334,26 @@ def reconciliation(
         linked=linked,
         needs_human=total - linked,
         rows=rows,
+    )
+
+
+@router.get("/sync", response_model=SyncStatus)
+def sync(
+    session: SessionDep,
+    user: CurrentUserDep,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> SyncStatus:
+    """Насколько свежи данные — для строки над каждым экраном."""
+    rows = [
+        BookRow(
+            book=state.book,
+            checked_at=state.checked_at,
+            changed_at=state.changed_at,
+            problem=state.problem,
+            problem_since=state.problem_since,
+        )
+        for state in session.scalars(select(models.SyncState)).all()
+    ]
+    return build_sync_status(
+        rows, datetime.now(UTC), timedelta(seconds=settings.sync_stale_after_seconds)
     )
