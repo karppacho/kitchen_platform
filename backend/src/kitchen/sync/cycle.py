@@ -290,13 +290,14 @@ class SyncCycle:
                     session.add(state)
                     states[book] = state
 
-                if verdict.problem is not None:
+                if state.read_started_at is not None and state.read_started_at > read_started_at:
+                    # Пока мы читали, другой импорт перенёс более свежее чтение:
+                    # наше старше. Ни переносить его, ни судить по нему о сбое —
+                    # причина поверх свежего переноса была бы неправдой.
+                    result.outcomes[book] = BookOutcome("stale")
+                elif verdict.problem is not None:
                     _record_failure(session, state, verdict.problem, verdict.details, now)
                     result.outcomes[book] = BookOutcome("failed", verdict.problem, verdict.details)
-                elif state.read_started_at is not None and state.read_started_at > read_started_at:
-                    # Пока мы читали, другой импорт перенёс более свежее чтение:
-                    # наше старше, перезаписывать им нельзя.
-                    result.outcomes[book] = BookOutcome("stale")
                 elif force or state.fingerprint != verdict.fingerprint:
                     to_import.append(book)
                 else:
