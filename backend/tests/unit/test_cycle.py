@@ -9,7 +9,13 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 from kitchen.sync import specs
 from kitchen.sync.cycle import BOOKS, explain, judge
 from kitchen.sync.importer import Importer
-from kitchen.sync.reader import BOOK_OPEN_FAILED, SheetData, SheetsReader, sheet_label
+from kitchen.sync.reader import (
+    BOOK_OPEN_FAILED,
+    BOOK_READ_FAILED,
+    SheetData,
+    SheetsReader,
+    sheet_label,
+)
 from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
 from tests.fake_sheets import IDS, header, kitchen_sheets, row, sheets_client
 
@@ -387,3 +393,38 @@ def test_details_are_what_translation_lost() -> None:
 
     assert verdict.problem == f"{NO_ANSWER} | листа «Блюда» нет в таблице"
     assert verdict.details == f"{unavailable} | {timeout}"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        f"{BOOK_OPEN_FAILED}ModuleNotFoundError: No module named 'gspread'",
+        f"{BOOK_READ_FAILED}RuntimeError: что-то совсем новое",
+        "ответ Google короче запроса",
+        "листа «ING» нет в таблице",
+    ],
+    ids=["book-open", "book-read", "sheet", "verbatim"],
+)
+def test_raw_error_already_in_the_problem_is_not_repeated(error: str) -> None:
+    """Непереведённый отказ стоит в причине целиком — дословно, после своей
+    метки или после имени листа. Рядом его не повторяем: в журнале вышло бы
+    «kitchen: не удалось открыть таблицу: X — не открылась таблица: X»."""
+    sheets = _read(sheets_client())
+    sheets[sheet_label(specs.INGREDIENTS)] = error
+
+    verdict = judge("kitchen", sheets)
+
+    assert verdict.problem is not None
+    assert verdict.details is None
+
+
+def test_raw_error_cut_in_the_problem_is_kept_whole() -> None:
+    """В причину идут первые 200 знаков исходника, в details — он целиком."""
+    raw = f"{BOOK_OPEN_FAILED}RuntimeError: что-то совсем новое: " + ", ".join(["деталь"] * 40)
+    sheets = _read(sheets_client())
+    sheets[sheet_label(specs.INGREDIENTS)] = raw
+
+    verdict = judge("kitchen", sheets)
+
+    assert verdict.problem is not None and len(verdict.problem) < len(raw)
+    assert verdict.details == raw

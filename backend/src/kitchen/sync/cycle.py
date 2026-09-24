@@ -63,8 +63,8 @@ class Verdict:
 
     Перевод для шефа сводит разные отказы к одной фразе: «доступ закрыт» — и
     нет доступа, и выключенный API. Чинить на бою без исходника — гадать.
-    Здесь только то, что перевод изменил: причину, которую читатель сказал
-    словами шефа, второй раз не повторяем."""
+    Здесь только то, чего в причине нет: исходник, который уже стоит в ней
+    целиком, второй раз не повторяем."""
 
 
 # Признаки «Google не ответил», без учёта регистра.
@@ -164,7 +164,10 @@ def judge(book: str, sheets: Mapping[str, SheetData | str]) -> Verdict:
         elif isinstance(data, str):
             problem = explain(spec.title, data)
             problems.append(problem)
-            if problem != data:  # перевод не изменил текст — повторять незачем
+            # Исходник, который уже стоит в причине целиком — дословно, после
+            # своей метки или после имени листа, — рядом не повторяем.
+            # Обрезанный в причине идёт в details полностью.
+            if data.removeprefix(BOOK_OPEN_FAILED).removeprefix(BOOK_READ_FAILED) not in problem:
                 raw.append(data)
         elif data.header_issues:
             problems.append(_header_problem(data.title, data.header_issues))
