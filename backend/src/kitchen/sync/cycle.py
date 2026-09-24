@@ -154,3 +154,17 @@ def judge(book: str, sheets: Mapping[str, SheetData | str]) -> Verdict:
         return Verdict(problem=" | ".join(dict.fromkeys(problems)), fingerprint=None)
     digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
     return Verdict(problem=None, fingerprint=digest)
+
+
+class SyncCycle:
+    """Цикл синхронизации — пока заготовка без поведения.
+
+    Интеграционные тесты импортируют имя на уровне модуля; без него падал бы
+    сбор всего набора, офлайн-части тоже. Поведение — следующим коммитом.
+    """
+
+    def __init__(self, *_: object) -> None:
+        pass
+
+    def run(self, *, force: bool = False) -> None:
+        raise NotImplementedError
