@@ -233,6 +233,23 @@ def test_unknown_spreadsheet_is_not_found() -> None:
     assert _kitchen_problem(SpreadsheetNotFound(_response(404))) == NOT_FOUND
 
 
+def test_spreadsheet_not_found_is_known_by_class_name() -> None:
+    """Без ответа внутри `SpreadsheetNotFound` приходит голым — кода 404 в
+    тексте нет, узнаём по имени класса."""
+    assert _kitchen_problem(SpreadsheetNotFound()) == NOT_FOUND
+
+
+def test_missing_module_is_not_a_missing_spreadsheet() -> None:
+    """gspread импортируется лениво, внутри `open()`, и без него летит
+    ModuleNotFoundError. Это поломка у нас, а не ответ Google: «таблица не
+    найдена» отправила бы проверять идентификатор таблицы."""
+    error = ModuleNotFoundError("No module named 'gspread'")
+
+    assert _kitchen_problem(error) == (
+        "не удалось открыть таблицу: ModuleNotFoundError: No module named 'gspread'"
+    )
+
+
 KEY_FILE = "/etc/kitchen-platform/service_account.json"
 
 

@@ -95,8 +95,10 @@ def explain(title: str, error: str) -> str:
         return (
             "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
         )
-    # 404: `SpreadsheetNotFound` при открытии или `APIError` с [404].
-    if google_answered and ("[404]" in error or "notfound" in lowered):
+    # 404: `SpreadsheetNotFound` при открытии или `APIError` с [404]. Имя
+    # класса — целиком: «NotFound» есть и в ModuleNotFoundError (gspread
+    # импортируется лениво, внутри `open()`), а это поломка у нас.
+    if google_answered and ("[404]" in error or "spreadsheetnotfound" in lowered):
         return (
             "таблица не найдена — проверьте её идентификатор в настройках (SHEETS_ID_*) "
             "и доступ сервисного аккаунта"
