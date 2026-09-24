@@ -350,15 +350,19 @@ def test_integratsiya_idyot_i_posle_krasnyh_oflayn_testov() -> None:
     condition = str(_ci_step("test", "Интеграционные тесты и порог покрытия").get("if", ""))
 
     assert offline.get("id"), "у шага офлайн-тестов нет id — на его исход не сослаться"
-    assert f"steps.{offline['id']}.outcome" in condition, (
-        f"условие интеграции не смотрит на исход офлайн-тестов: if={condition!r}"
+    # Выражение сверяется целиком: по частям проходили и `&&` вместо `||`
+    # (шаг не идёт никогда — CI зелёный без интеграции и без порога
+    # покрытия), и `'skipped'` вместо `'failure'`, и снятые скобки. Части:
+    # !cancelled() — не идти при отмене; success() — идти на зелёном прогоне;
+    # outcome == 'failure' — идти после упавших офлайн-тестов, но не после
+    # пропущенных (сбой установки). Без статусной функции GitHub неявно
+    # предваряет условие `success() &&`, и ветка «офлайн упали» мертва.
+    expected = (
+        f"${{{{ !cancelled() && (success() || steps.{offline['id']}.outcome == 'failure') }}}}"
     )
-    assert "always()" not in condition, "с always() интеграция шла бы и при отмене прогона"
-    # Условие без статусной функции GitHub неявно предваряет `success() &&`,
-    # и ветка «офлайн-тесты упали» не сработала бы никогда. Нужны обе:
-    # !cancelled() — не идти при отмене, success() — идти на зелёном прогоне.
-    assert "!cancelled()" in condition, f"в условии нет !cancelled(): if={condition!r}"
-    assert "success()" in condition, f"в условии нет success(): if={condition!r}"
+    assert " ".join(condition.split()) == expected, (
+        f"условие шага интеграции: {condition!r}, ожидалось {expected!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -548,10 +552,11 @@ def test_deploy_proveryaet_vorker() -> None:
     assert "RestartCount" in text, "перезапуск по кругу обязан считаться провалом"
     assert check < done, "проверка воркера — до «Готово»"
     # Строки выше стоят в теле функции: без её вызова они на месте, а воркер
-    # не проверяется. Вызов — после определения и до «Готово», провал
-    # откатывает выкладку.
-    call = re.search(r"^proverit_worker \|\| \{ rollback;", text, re.MULTILINE)
-    assert call, "проверка воркера не вызывается или её провал не откатывает выкладку"
+    # не проверяется. Вызов — после определения и до «Готово»; провал
+    # откатывает выкладку и роняет скрипт: без fail после отката он
+    # напечатал бы «Готово. Версия <новая>» с кодом 0.
+    call = re.search(r"^proverit_worker \|\| \{ rollback; fail\b", text, re.MULTILINE)
+    assert call, "провал проверки воркера не откатывает выкладку или не роняет скрипт"
     assert check < call.start() < done, "вызов проверки воркера — после её определения, до «Готово»"
 
 
@@ -563,7 +568,7 @@ def _bash_function_body(text: str, name: str) -> str:
 
 
 def test_otkat_ostanavlivaet_vorker_do_otkata_koda() -> None:
-    """Откат останавливает воркер, пока на диске ещё новый compose.
+    """Откат останавливает воркер нового кода, пока на диске ещё новый compose.
 
     `up -d` откаченного compose поднимает только то, что в нём описано, и
     воркер, которого там в выкладке нет, не тронет: новый код писал бы в базу
@@ -579,6 +584,39 @@ def test_otkat_ostanavlivaet_vorker_do_otkata_koda() -> None:
     assert "||" in stop.group(1), (
         "без `|| …` сбой остановки под set -e оборвал бы откат, не дойдя до git reset"
     )
+
+
+def test_otkat_ne_ostanavlivaet_staryy_vorker() -> None:
+    """До шага 5 работает старый здоровый воркер, и откат его не трогает.
+
+    Сборка или миграции падают и по внешней причине (реестр пакетов
+    недоступен), а пересборка в откате упадёт по той же. Остановленный
+    воркер остался бы лежать: `unless-stopped` после ручной остановки не
+    поднимает и перезагрузка. Флаг ставится до `up -d` шага 5, а не после:
+    частично упавший `up -d` мог успеть поднять новый воркер.
+    """
+    text = DEPLOY.read_text(encoding="utf-8")
+    body = _bash_function_body(text, "rollback")
+    guarded = re.search(
+        r'^[ \t]*if \[\[ "\$NOVYE_ZAPUSHCHENY" == 1 \]\]; then\n'
+        r"[ \t]*\$COMPOSE stop worker\b.*\n"
+        r"[ \t]*fi$",
+        body,
+        re.MULTILINE,
+    )
+    init = re.search(r"^NOVYE_ZAPUSHCHENY=0$", text, re.MULTILINE)
+    build = text.find("$COMPOSE build ||")
+    migrations = text.find("alembic upgrade head")
+    flag = re.search(r"^NOVYE_ZAPUSHCHENY=1$", text, re.MULTILINE)
+    up = re.search(r'^APP_VERSION="\$TARGET_REF" \$COMPOSE up -d\b', text, re.MULTILINE)
+
+    assert guarded, "откат останавливает воркер без условия — и старый здоровый тоже"
+    assert build != -1 and migrations != -1 and up, "разбор deploy.sh сломан"
+    assert flag, "флаг «новые контейнеры запускались» нигде не ставится"
+    assert migrations < flag.start() < up.start(), "флаг — после миграций и до up -d шага 5"
+    # set -u: без начального значения откат после упавшей сборки оборвался бы
+    # на чтении флага, не дойдя до git reset.
+    assert init and init.start() < build, "флаг не задан до первого возможного отката"
 
 
 def test_frontend_index_has_root_marker() -> None:
