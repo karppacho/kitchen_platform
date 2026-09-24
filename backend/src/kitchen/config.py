@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     google_read_timeout: int = 60
     google_refresh_timeout: int = 15
 
+    # Синхронизация «лист → база»: воркер раз в столько секунд читает книги.
+    sync_interval_seconds: int = 300
+    # Данные старше этого — полоса «не обновляются» на сайте: три пропущенных цикла.
+    sync_stale_after_seconds: int = 900
+
     # --- LLM ----------------------------------------------------------------
     # Только polza.ai: прямой доступ к OpenAI и Anthropic из РФ закрыт.
     polza_api_key: SecretStr = SecretStr("")
