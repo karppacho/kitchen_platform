@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 import requests
 from gspread.exceptions import APIError, SpreadsheetNotFound
 
+from kitchen.config import Settings
 from kitchen.sync import specs
-from kitchen.sync.cycle import BOOKS, explain, judge
+from kitchen.sync.cycle import BOOKS, explain, judge, reader_from
 from kitchen.sync.importer import Importer
 from kitchen.sync.reader import (
     BOOK_OPEN_FAILED,
@@ -18,6 +21,9 @@ from kitchen.sync.reader import (
 )
 from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
 from tests.fake_sheets import IDS, header, kitchen_sheets, row, sheets_client
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 ACCESS = "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
 NOT_FOUND = (
@@ -428,3 +434,51 @@ def test_raw_error_cut_in_the_problem_is_kept_whole() -> None:
 
     assert verdict.problem is not None and len(verdict.problem) < len(raw)
     assert verdict.details == raw
+
+
+# ---------------------------------------------------------------------------
+# Боевой читатель — из настроек
+# ---------------------------------------------------------------------------
+
+
+def test_reader_from_takes_everything_from_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Воркер и ручной импорт собирают читатель одной функцией. Опечатка в ключе
+    книги или перепутанный идентификатор всплыли бы только на бою. Клиент
+    подменён: настоящий в сеть не ходит до open(), но и не скажет, что открыл."""
+    made: list[tuple[object, ...]] = []
+    opened: list[str] = []
+
+    class Client:
+        """Вместо GspreadClient: помнит, с чем создан и какие таблицы открывал."""
+
+        def __init__(
+            self, credentials_path: Path, *, timeout: tuple[int, int], refresh_timeout: int
+        ) -> None:
+            made.append((credentials_path, timeout, refresh_timeout))
+
+        def open(self, spreadsheet_id: str) -> FakeSpreadsheet:
+            opened.append(spreadsheet_id)
+            return FakeSpreadsheet({})
+
+    monkeypatch.setattr("kitchen.sync.cycle.GspreadClient", Client)
+    key = tmp_path / "service_account.json"
+    settings = Settings(
+        google_credentials_path=key,
+        google_connect_timeout=3,
+        google_read_timeout=7,
+        google_refresh_timeout=5,
+        sheets_id_kitchen="kitchen-id",
+        sheets_id_competitors="competitors-id",
+        sheets_id_ingredient_cards="cards-id",
+        sheets_id_tastings="tastings-id",
+    )
+
+    # По листу из каждой книги; таблицы открываются в порядке первого листа.
+    reader_from(settings).read_many(
+        [specs.INGREDIENTS, specs.COMPETITOR_ITEMS, specs.INGREDIENT_CARDS, specs.TASTING_RATINGS]
+    )
+
+    assert made == [(key, (3, 7), 5)]
+    assert opened == ["kitchen-id", "competitors-id", "cards-id", "tastings-id"]
