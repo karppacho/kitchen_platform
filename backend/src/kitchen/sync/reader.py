@@ -39,6 +39,15 @@ CellValue = str | Decimal | int | None
 это к лучшему — вызывающий код обязан знать, что он получил.
 """
 
+BOOK_OPEN_FAILED = "не открылась таблица: "
+"""Метка отказа открытия всей таблицы в :meth:`SheetsReader.read_many`.
+
+Ставится на каждый лист таблицы; по ней цикл синхронизации говорит о таблице,
+а не о листе, и не повторяет одну причину по разу на лист."""
+
+BOOK_READ_FAILED = "не прочитан: "
+"""Метка отказа пакетного чтения значений — тоже на каждый лист таблицы."""
+
 
 @dataclass(frozen=True, slots=True)
 class Row:
@@ -211,7 +220,7 @@ class SheetsReader:
             existing = {sheet.title for sheet in book.worksheets()}
         except Exception as error:
             for spec in specs:
-                result[sheet_label(spec)] = f"не открылась таблица: {error}"
+                result[sheet_label(spec)] = BOOK_OPEN_FAILED + describe_error(error)
             return
 
         resolved: list[tuple[SheetSpec, str]] = []
@@ -232,7 +241,7 @@ class SheetsReader:
             payload = book.values_batch_get([_quote_range(title) for _, title in resolved])
         except Exception as error:
             for spec, _ in resolved:
-                result[sheet_label(spec)] = f"не прочитан: {error}"
+                result[sheet_label(spec)] = BOOK_READ_FAILED + describe_error(error)
             return
 
         # Ответ Sheets API приходит нетипизированным, и сузить его надо
@@ -346,6 +355,24 @@ def _values_of(block: object) -> Cells:
 def sheet_label(spec: SheetSpec) -> str:
     """Ключ листа в результатах: «таблица/лист»."""
     return f"{spec.spreadsheet}/{spec.title}"
+
+
+def describe_error(error: Exception) -> str:
+    """Исключение одной строкой, по которой видно, что случилось.
+
+    Одного ``str(error)`` мало. gspread 6.2 при открытии таблицы
+    (``open_by_key``) на 403 бросает голый ``PermissionError()`` — текста нет
+    вовсе, на 404 — ``SpreadsheetNotFound`` с текстом «<Response [404]>», а
+    ``APIError`` на HTML-странице 502 пишет в тексте код -1. Поэтому впереди —
+    имя класса (если текст с него не начинается), а HTTP-код ответа
+    дописывается, если в тексте его нет.
+    """
+    name = type(error).__name__
+    text = str(error).strip().removeprefix(f"{name}: ")
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if isinstance(status, int) and f"[{status}]" not in text:
+        name = f"{name} [{status}]"
+    return f"{name}: {text}" if text else name
 
 
 def _quote_range(title: str) -> str:

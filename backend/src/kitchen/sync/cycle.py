@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from kitchen.sync import specs
-from kitchen.sync.reader import sheet_label
+from kitchen.sync.reader import BOOK_OPEN_FAILED, BOOK_READ_FAILED, sheet_label
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -68,42 +68,64 @@ _NO_ANSWER = (
     "unavailable",
 )
 
-# Так читатель (`SheetsReader._read_book`) помечает каждый лист таблицы,
-# которая не открылась целиком.
-_BOOK_NOT_OPENED = "не открылась таблица: "
-
 
 def explain(title: str, error: str) -> str:
     """Причина сбоя чтения словами, которые поймёт шеф.
 
     Текст исключения gspread написан для разработчика, а полосу на сайте видят
-    все (решение Александра 23.09). Известные случаи переводим, остальное —
-    как есть, но с именем листа. Кроме отказа открытия всей таблицы: он приходит
-    одинаковым на каждый её лист, дело не в листе, и без имени листа пять
-    одинаковых причин сливаются в одну.
+    все (решение Александра 23.09). Известные случаи переводим. Отказ всей
+    таблицы — открытия или пакетного чтения — приходит одинаковым на каждый её
+    лист; дело не в листе, и без имени листа одинаковые причины сливаются в
+    одну. Остальное — как есть, с именем листа.
+
+    `error` — строка читателя: метка вроде `BOOK_OPEN_FAILED` и
+    `describe_error` исключения, в котором есть имя класса и HTTP-код.
     """
     lowered = error.lower()
-    if "[429]" in error or "quota" in lowered:
+    # «[Errno N]» — ошибка ОС: на нашей стороне (нет прав на файл ключа, нет
+    # самого файла) или в сети. Это не ответ Google о таблице — ни квота, ни
+    # доступ, ни «не найдена»: такой перевод увёл бы искать не там. Сетевой
+    # сбой при этом узнаёт проверка «не ответил» ниже, по своим признакам.
+    google_answered = "[errno" not in lowered
+    if google_answered and ("[429]" in error or "quota" in lowered):
         return "Google временно ограничил число запросов — следующая попытка через 5 минут"
-    if "[403]" in error or "permission" in lowered:
+    # 403: `APIError` с [403] или голый `PermissionError()` — так gspread
+    # отвечает на закрытый доступ при открытии таблицы.
+    if google_answered and ("[403]" in error or "permission" in lowered):
         return (
             "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
+        )
+    # 404: `SpreadsheetNotFound` при открытии или `APIError` с [404].
+    if google_answered and ("[404]" in error or "notfound" in lowered):
+        return (
+            "таблица не найдена — проверьте её идентификатор в настройках (SHEETS_ID_*) "
+            "и доступ сервисного аккаунта"
         )
     if any(sign in lowered for sign in _NO_ANSWER):
         return "Google не ответил — следующая попытка через 5 минут"
     if "нет в таблице" in error or "не задан идентификатор" in error:
         return error
-    if error.startswith(_BOOK_NOT_OPENED):
-        return f"не удалось открыть таблицу: {error.removeprefix(_BOOK_NOT_OPENED)[:200]}"
+    if error.startswith(BOOK_OPEN_FAILED):
+        return f"не удалось открыть таблицу: {error.removeprefix(BOOK_OPEN_FAILED)[:200]}"
+    if error.startswith(BOOK_READ_FAILED):
+        return f"не удалось прочитать таблицу: {error.removeprefix(BOOK_READ_FAILED)[:200]}"
     return f"не удалось прочитать лист «{title}»: {error[:200]}"
+
+
+_SHOWN_ISSUES = 3
+"""Сколько расхождений заголовков называть. Съехавший лист даёт расхождение в
+каждой колонке, а полосу на сайте читают целиком."""
 
 
 def _header_problem(title: str, issues: Sequence[str]) -> str:
     if tuple(issues) == ("лист пуст",):
         return f"лист «{title}» пуст"
+    listed = "; ".join(issues[:_SHOWN_ISSUES])
+    if len(issues) > _SHOWN_ISSUES:
+        listed += f"; и ещё {len(issues) - _SHOWN_ISSUES}"
     if all(issue.startswith("колонка ") for issue in issues):
-        return f"в листе «{title}» сдвинулись колонки — " + "; ".join(issues)
-    return f"лист «{title}»: " + "; ".join(issues)
+        return f"в листе «{title}» сдвинулись колонки — {listed}"
+    return f"лист «{title}»: {listed}"
 
 
 def judge(book: str, sheets: Mapping[str, SheetData | str]) -> Verdict:
@@ -127,7 +149,8 @@ def judge(book: str, sheets: Mapping[str, SheetData | str]) -> Verdict:
             lines.extend(f"{spec.title}|{row.number}|{row.content_hash}" for row in data.rows)
     if problems:
         # Отказ открытия таблицы приходит одинаковым на каждый её лист —
-        # повторять одну причину пять раз незачем.
-        return Verdict(problem="; ".join(dict.fromkeys(problems)), fingerprint=None)
+        # повторять одну причину пять раз незачем. Причины разных листов
+        # разделяет « | »: внутри причины листа уже стоят «; ».
+        return Verdict(problem=" | ".join(dict.fromkeys(problems)), fingerprint=None)
     digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
     return Verdict(problem=None, fingerprint=digest)
