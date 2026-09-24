@@ -38,6 +38,14 @@ PREVIOUS_REF="$(git rev-parse HEAD)"
 
 rollback() {
   log "Откат на ${PREVIOUS_REF:0:8}"
+  # Воркер останавливаем, пока compose на диске ещё новый и воркер в нём
+  # описан: `up -d` ниже поднимает то, что есть в откаченном compose, и
+  # воркер, которого там в выкладке нет, не тронет — новый код писал бы в
+  # базу при откаченном сайте, а падающий на старте крутился бы по кругу.
+  # Если воркер в откаченном compose есть, `up -d` поднимет его уже со старым
+  # кодом. `|| true`: сбой остановки не должен оборвать откат (set -e)
+  # раньше, чем откатится код.
+  $COMPOSE stop worker || true
   git reset --hard "$PREVIOUS_REF"
   $COMPOSE up -d --build
   printf '\nОткат выполнен. Дамп базы лежит в %s — миграции при необходимости\n' "$BACKUP_DIR"
@@ -144,5 +152,26 @@ for attempt in $(seq 1 30); do
   [[ $attempt -eq 30 ]] && { rollback; fail "$PRICHINA — проверка через nginx не прошла за 30 секунд"; }
   sleep 1
 done
+
+# Воркер синхронизации. Проверки выше смотрят только сайт: воркер, падающий на
+# старте, прошёл бы незамеченным — `restart: unless-stopped` поднимал бы его по
+# кругу, а данные на сайте молча перестали бы обновляться. Даём ему поработать
+# и требуем: запущен и ни разу не перезапускался.
+proverit_worker() {
+  local id sostoyanie
+  id="$($COMPOSE ps -q worker)"
+  if [[ -z "$id" ]]; then
+    PRICHINA="контейнер воркера не создан"
+    return 1
+  fi
+  sostoyanie="$(docker inspect -f '{{.State.Status}} {{.RestartCount}}' "$id")"
+  if [[ "$sostoyanie" != "running 0" ]]; then
+    PRICHINA="воркер: состояние и число перезапусков — $sostoyanie"
+    return 1
+  fi
+}
+
+sleep 15
+proverit_worker || { rollback; fail "$PRICHINA"; }
 
 printf '\n\033[32mГотово. Версия %s\033[0m\n' "${TARGET_REF:0:8}"

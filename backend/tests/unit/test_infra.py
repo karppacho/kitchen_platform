@@ -147,25 +147,39 @@ def test_unused_supabase_services_are_disabled() -> None:
 
 
 def test_worker_bez_tochki_vhoda_ne_zapuskaetsya() -> None:
-    """Воркер без точки входа не должен подниматься выкладкой.
+    """Команда воркера указывает на пакет с точкой входа.
 
     `python -m <пакет>` без `__main__.py` падает на старте, а с
     `restart: unless-stopped` такой контейнер перезапускается по кругу.
-    `deploy.sh` поднимает всё через `up -d` и этого не заметит: смоук смотрит
-    только на api и nginx. Пока задач нет, воркер держится в профиле, и
-    профиль снимается вместе с первой фоновой задачей.
+    Воркер поднимается выкладкой, и смоук deploy.sh такое поймает — но уже
+    на сервере, откатом. Переименованный пакет или опечатка в команде
+    видны здесь, до пуша.
     """
     worker = _load(COMPOSE)["services"]["worker"]
     # Команда вида ["python", "-m", "kitchen.worker"]: точка входа пакета —
     # его __main__.py.
     module = worker["command"][-1]
     entry = REPO / "backend" / "src" / Path(*module.split(".")) / "__main__.py"
-    # Одним утверждением, без раннего return (см. CONTRIBUTING): с точкой
-    # входа профиль можно снять, без неё он обязателен.
-    assert entry.exists() or worker.get("profiles"), (
-        f"у {module} нет __main__.py: без профиля `up -d` поднимет контейнер, "
-        f"который падает на старте и перезапускается по кругу"
+    assert entry.exists(), (
+        f"у {module} нет __main__.py: контейнер воркера упадёт на старте "
+        f"и будет перезапускаться по кругу"
     )
+
+
+def test_worker_podnimaetsya_vykladkoy() -> None:
+    """С первой задачей — синхронизацией — воркер поднимается вместе с сайтом.
+
+    Под профилем `up -d` из deploy.sh его не запустил бы, и данные на сайте
+    молча перестали бы обновляться.
+    """
+    worker = _load(COMPOSE)["services"]["worker"]
+    assert not worker.get("profiles"), "у воркера профиль — выкладка его не поднимет"
+
+
+def test_worker_dokanchivaet_tsikl_pri_ostanovke() -> None:
+    """docker по умолчанию ждёт 10 с и убивает; перенос должен успеть закончиться."""
+    grace = str(_load(COMPOSE)["services"]["worker"].get("stop_grace_period", "10s"))
+    assert grace.endswith("s") and int(grace[:-1]) >= 20, f"stop_grace_period={grace}"
 
 
 def test_nginx_sobiraetsya_a_ne_tyanetsya() -> None:
@@ -481,6 +495,49 @@ def test_deploy_smoke_goes_through_nginx() -> None:
     assert 'id="root"' in text
     assert health != -1 and via_nginx != -1 and api != -1
     assert health < via_nginx < done and api < done, "проверка nginx — после /healthz, до «Готово»"
+
+
+def test_deploy_proveryaet_vorker() -> None:
+    """Смоук смотрел только сайт и nginx: падающий воркер прошёл бы незамеченным."""
+    text = DEPLOY.read_text(encoding="utf-8")
+    check = text.find("$COMPOSE ps -q worker")
+    done = text.find("Готово. Версия")
+
+    assert check != -1, "смоук не находит контейнер воркера"
+    assert "RestartCount" in text, "перезапуск по кругу обязан считаться провалом"
+    assert check < done, "проверка воркера — до «Готово»"
+    # Строки выше стоят в теле функции: без её вызова они на месте, а воркер
+    # не проверяется. Вызов — после определения и до «Готово», провал
+    # откатывает выкладку.
+    call = re.search(r"^proverit_worker \|\| \{ rollback;", text, re.MULTILINE)
+    assert call, "проверка воркера не вызывается или её провал не откатывает выкладку"
+    assert check < call.start() < done, "вызов проверки воркера — после её определения, до «Готово»"
+
+
+def _bash_function_body(text: str, name: str) -> str:
+    """Тело функции `name() { … }` — до первой `}` в начале строки."""
+    match = re.search(rf"^{re.escape(name)}\(\) \{{\n(.*?)^\}}", text, re.MULTILINE | re.DOTALL)
+    assert match, f"в deploy.sh нет функции {name}()"
+    return match.group(1)
+
+
+def test_otkat_ostanavlivaet_vorker_do_otkata_koda() -> None:
+    """Откат останавливает воркер, пока на диске ещё новый compose.
+
+    `up -d` откаченного compose поднимает только то, что в нём описано, и
+    воркер, которого там в выкладке нет, не тронет: новый код писал бы в базу
+    при откаченном сайте, а падающий на старте крутился бы по кругу.
+    """
+    body = _bash_function_body(DEPLOY.read_text(encoding="utf-8"), "rollback")
+    stop = re.search(r"^[ \t]*\$COMPOSE stop worker\b(.*)$", body, re.MULTILINE)
+    reset = re.search(r"^[ \t]*git reset --hard\b", body, re.MULTILINE)
+
+    assert stop, "откат не останавливает воркер"
+    assert reset, "в откате нет git reset --hard — разбор сломан"
+    assert stop.start() < reset.start(), "воркер останавливается до git reset --hard, а не после"
+    assert "||" in stop.group(1), (
+        "без `|| …` сбой остановки под set -e оборвал бы откат, не дойдя до git reset"
+    )
 
 
 def test_frontend_index_has_root_marker() -> None:
