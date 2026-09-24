@@ -320,6 +320,47 @@ def test_frontend_ci_npm_cache_matches_lock_file() -> None:
     assert with_.get("cache-dependency-path") == "frontend/package-lock.json"
 
 
+def _ci_step(job: str, name: str) -> dict[str, Any]:
+    steps = _load_ci()["jobs"][job]["steps"]
+    step = next((s for s in steps if s.get("name") == name), None)
+    assert step is not None, f"в задаче {job} нет шага «{name}»"
+    return step
+
+
+def test_ci_testy_ogranicheny_po_vremeni() -> None:
+    """Повисший тест обязан ронять CI, а не держать его шесть часов.
+
+    Гоночные тесты цикла (потоки, advisory-блокировка) при ошибке повисли
+    бы, а не упали; без `timeout-minutes` GitHub ждёт задание 360 минут.
+    """
+    limit = _load_ci()["jobs"]["test"].get("timeout-minutes")
+    assert isinstance(limit, int) and 0 < limit < 360, (
+        f"у задачи test timeout-minutes={limit!r}: повисший тест держал бы CI шесть часов"
+    )
+
+
+def test_integratsiya_idyot_i_posle_krasnyh_oflayn_testov() -> None:
+    """Красная интеграция не прячется за красными офлайн-тестами.
+
+    Без условия шаг идёт только после успешных: при упавших офлайн-тестах
+    интеграция пропускалась, и её собственный провал всплывал лишь
+    следующим прогоном. После сбоя установки и при отмене ей идти незачем.
+    """
+    offline = _ci_step("test", "Офлайн-тесты")
+    condition = str(_ci_step("test", "Интеграционные тесты и порог покрытия").get("if", ""))
+
+    assert offline.get("id"), "у шага офлайн-тестов нет id — на его исход не сослаться"
+    assert f"steps.{offline['id']}.outcome" in condition, (
+        f"условие интеграции не смотрит на исход офлайн-тестов: if={condition!r}"
+    )
+    assert "always()" not in condition, "с always() интеграция шла бы и при отмене прогона"
+    # Условие без статусной функции GitHub неявно предваряет `success() &&`,
+    # и ветка «офлайн-тесты упали» не сработала бы никогда. Нужны обе:
+    # !cancelled() — не идти при отмене, success() — идти на зелёном прогоне.
+    assert "!cancelled()" in condition, f"в условии нет !cancelled(): if={condition!r}"
+    assert "success()" in condition, f"в условии нет success(): if={condition!r}"
+
+
 # ---------------------------------------------------------------------------
 # Сертификат: где лежит и кто его читает
 # ---------------------------------------------------------------------------
