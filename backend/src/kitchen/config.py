@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Self
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +18,11 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Ошибка проверки печатает входное значение, а у проверки всей модели
+        # (порог «устарело» против интервала) это словарь всех настроек вместе
+        # с секретами. Сейчас его усечённые края безопасны случайно — по
+        # порядку полей; в лог контейнера входные значения не пускаем вовсе.
+        hide_input_in_errors=True,
     )
 
     # --- База ---------------------------------------------------------------
@@ -47,8 +53,11 @@ class Settings(BaseSettings):
     google_refresh_timeout: int = 15
 
     # Синхронизация «лист → база»: воркер раз в столько секунд читает книги.
-    sync_interval_seconds: int = 300
+    # Не чаще раза в минуту: меньшее число — почти наверняка минуты вместо
+    # секунд, и цикл без передышки съедал бы квоту Google.
+    sync_interval_seconds: int = Field(default=300, ge=60)
     # Данные старше этого — полоса «не обновляются» на сайте: три пропущенных цикла.
+    # Строго больше интервала (проверка ниже).
     sync_stale_after_seconds: int = 900
 
     # --- LLM ----------------------------------------------------------------
@@ -69,6 +78,19 @@ class Settings(BaseSettings):
     @property
     def google_timeout(self) -> tuple[int, int]:
         return (self.google_connect_timeout, self.google_read_timeout)
+
+    @model_validator(mode="after")
+    def check_sync_thresholds(self) -> Self:
+        # Порог не длиннее интервала — полоса «не обновляются» горела бы между
+        # обычными циклами, и её скоро перестали бы замечать.
+        if self.sync_stale_after_seconds <= self.sync_interval_seconds:
+            msg = (
+                f"SYNC_STALE_AFTER_SECONDS ({self.sync_stale_after_seconds}) должен быть "
+                f"больше SYNC_INTERVAL_SECONDS ({self.sync_interval_seconds}): иначе полоса "
+                "«не обновляются» горит между обычными циклами"
+            )
+            raise ValueError(msg)
+        return self
 
 
 def load_settings() -> Settings:

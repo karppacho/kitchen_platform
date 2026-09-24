@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import import_sheets
 import pytest
 
@@ -12,19 +14,25 @@ ACCESS = "доступ платформы к таблице закрыт — п�
 
 
 def _run(monkeypatch: pytest.MonkeyPatch, result: CycleResult) -> tuple[int, list[bool]]:
-    """Код выхода `main()` на готовом итоге цикла и `force` каждого запуска."""
+    """Код выхода `main()` на готовом итоге цикла и `force` каждого запуска.
+
+    Настройки — заглушка: настоящие читали бы окружение и backend/.env, а
+    скрипт лишь передаёт их подменённым `reader_from` и `make_session_factory`.
+    """
+    settings = SimpleNamespace(database_url="postgresql+psycopg://тест")
     forced: list[bool] = []
 
     class Cycle:
-        def __init__(self, *_: object) -> None:
-            pass
+        def __init__(self, reader: object, sessions: object) -> None:
+            assert (reader, sessions) == (("читатель", settings), ("сессии", settings.database_url))
 
         def run(self, *, force: bool = False) -> CycleResult:
             forced.append(force)
             return result
 
-    monkeypatch.setattr(import_sheets, "reader_from", lambda _settings: None)
-    monkeypatch.setattr(import_sheets, "make_session_factory", lambda _url: None)
+    monkeypatch.setattr(import_sheets, "load_settings", lambda: settings)
+    monkeypatch.setattr(import_sheets, "reader_from", lambda given: ("читатель", given))
+    monkeypatch.setattr(import_sheets, "make_session_factory", lambda url: ("сессии", url))
     monkeypatch.setattr(import_sheets, "SyncCycle", Cycle)
     return import_sheets.main(), forced
 

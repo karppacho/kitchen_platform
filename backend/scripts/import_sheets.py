@@ -10,7 +10,7 @@
 
     docker compose -f infra/docker-compose.yml exec api python scripts/import_sheets.py
 
-Код выхода 1 — хотя бы одна книга не перенесена.
+Код выхода 1 — хотя бы одна книга не перенесена из-за сбоя.
 """
 
 from __future__ import annotations
