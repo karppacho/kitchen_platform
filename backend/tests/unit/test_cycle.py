@@ -9,7 +9,7 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 from kitchen.sync import specs
 from kitchen.sync.cycle import BOOKS, explain, judge
 from kitchen.sync.importer import Importer
-from kitchen.sync.reader import SheetData, SheetsReader
+from kitchen.sync.reader import BOOK_OPEN_FAILED, SheetData, SheetsReader, sheet_label
 from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
 from tests.fake_sheets import IDS, header, kitchen_sheets, row, sheets_client
 
@@ -44,6 +44,7 @@ def test_readable_book_gets_fingerprint() -> None:
 
     assert verdict.problem is None
     assert verdict.fingerprint is not None and len(verdict.fingerprint) == 64
+    assert verdict.details is None
 
 
 def test_fingerprint_follows_content() -> None:
@@ -94,6 +95,7 @@ def test_shifted_columns_block_the_book() -> None:
     assert verdict.problem is not None
     assert "в листе «ING» сдвинулись колонки" in verdict.problem
     assert "Совсем другая колонка" in verdict.problem
+    assert verdict.details is None, "заголовки — не ошибка читателя: всё названо в причине"
 
 
 def _renamed(*columns: int) -> list[list[str]]:
@@ -351,3 +353,37 @@ def test_every_google_failure_sign_means_no_answer(error: str) -> None:
     """Каждый признак сбоя у Google (5xx) — отдельным случаем: признак, выпавший
     из списка, вернул бы шефу текст исключения."""
     assert explain("ING", error) == NO_ANSWER
+
+
+# ---------------------------------------------------------------------------
+# Исходный текст ошибки — для журнала и лога, не для сайта
+# ---------------------------------------------------------------------------
+
+
+def test_raw_error_is_kept_for_the_journal() -> None:
+    """Сайту — перевод, журналу — исходник: по одному «доступ закрыт» не
+    отличить закрытый доступ от выключенного API. Отказ открытия приходит на
+    каждый лист книги, а исходник нужен один."""
+    verdict = judge("kitchen", _read(KitchenWontOpen(PermissionError())))
+
+    assert verdict.problem == ACCESS
+    assert verdict.details == f"{BOOK_OPEN_FAILED}PermissionError"
+
+
+def test_details_are_what_translation_lost() -> None:
+    """Разные исходники под одной причиной различимы только в details — каждый
+    по разу, через « | ». Что читатель уже сказал словами шефа, не повторяем."""
+    unavailable = "APIError: [503]: The service is currently unavailable."
+    timeout = "ReadTimeout: HTTPSConnectionPool(host='sheets.googleapis.com'): Read timed out"
+    sheets: dict[str, SheetData | str] = {
+        sheet_label(specs.INGREDIENTS): unavailable,
+        sheet_label(specs.PACKAGING): timeout,
+        sheet_label(specs.COOKING_METHODS): unavailable,
+        sheet_label(specs.DISHES): "листа «Блюда» нет в таблице",
+        sheet_label(specs.TTK): timeout,
+    }
+
+    verdict = judge("kitchen", sheets)
+
+    assert verdict.problem == f"{NO_ANSWER} | листа «Блюда» нет в таблице"
+    assert verdict.details == f"{unavailable} | {timeout}"

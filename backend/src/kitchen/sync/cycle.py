@@ -10,21 +10,31 @@
   цену из колонки веса — тихо и каждые пять минут.
 * **Только изменения.** Отпечаток книги совпал с перенесённым — в базу
   пишется одна отметка «проверено».
-* **Сбой в журнал — один раз**, когда причина появилась или сменилась.
+* **Сбой в журнал — один раз**, когда причина появилась или сменилась. Рядом
+  с причиной словами шефа — исходный текст ошибки: по нему её чинят.
 """
 
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Literal
 
+from sqlalchemy import select
+
+from kitchen.db import models
 from kitchen.sync import specs
-from kitchen.sync.reader import BOOK_OPEN_FAILED, BOOK_READ_FAILED, sheet_label
+from kitchen.sync.client import GspreadClient
+from kitchen.sync.importer import Importer, ImportResult, take_import_lock
+from kitchen.sync.reader import BOOK_OPEN_FAILED, BOOK_READ_FAILED, SheetsReader, sheet_label
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
+    from sqlalchemy.orm import Session, sessionmaker
+
+    from kitchen.config import Settings
     from kitchen.sync.ownership import SheetSpec
     from kitchen.sync.reader import SheetData
 
@@ -48,6 +58,13 @@ class Verdict:
 
     problem: str | None
     fingerprint: str | None
+    details: str | None
+    """Исходный текст ошибок читателя — журналу и логу воркера, не сайту.
+
+    Перевод для шефа сводит разные отказы к одной фразе: «доступ закрыт» — и
+    нет доступа, и выключенный API. Чинить на бою без исходника — гадать.
+    Здесь только то, что перевод изменил: причину, которую читатель сказал
+    словами шефа, второй раз не повторяем."""
 
 
 # Признаки «Google не ответил», без учёта регистра.
@@ -138,13 +155,17 @@ def judge(book: str, sheets: Mapping[str, SheetData | str]) -> Verdict:
     колонкам, поэтому заметка на полях перенос не будит.
     """
     problems: list[str] = []
+    raw: list[str] = []
     lines: list[str] = []
     for spec in BOOKS[book]:
         data = sheets.get(sheet_label(spec))
         if data is None:
             problems.append(f"лист «{spec.title}» не прочитан")
         elif isinstance(data, str):
-            problems.append(explain(spec.title, data))
+            problem = explain(spec.title, data)
+            problems.append(problem)
+            if problem != data:  # перевод не изменил текст — повторять незачем
+                raw.append(data)
         elif data.header_issues:
             problems.append(_header_problem(data.title, data.header_issues))
         else:
@@ -152,21 +173,146 @@ def judge(book: str, sheets: Mapping[str, SheetData | str]) -> Verdict:
     if problems:
         # Отказ открытия таблицы приходит одинаковым на каждый её лист —
         # повторять одну причину пять раз незачем. Причины разных листов
-        # разделяет « | »: внутри причины листа уже стоят «; ».
-        return Verdict(problem=" | ".join(dict.fromkeys(problems)), fingerprint=None)
+        # разделяет « | »: внутри причины листа уже стоят «; ». Исходники —
+        # так же.
+        return Verdict(
+            problem=" | ".join(dict.fromkeys(problems)),
+            fingerprint=None,
+            details=" | ".join(dict.fromkeys(raw)) or None,
+        )
     digest = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
-    return Verdict(problem=None, fingerprint=digest)
+    return Verdict(problem=None, fingerprint=digest, details=None)
+
+
+Action = Literal["imported", "unchanged", "failed", "stale"]
+
+
+@dataclass(frozen=True, slots=True)
+class BookOutcome:
+    """Чем кончился цикл для книги."""
+
+    action: Action
+    problem: str | None = None
+    details: str | None = None
+    """Исходный текст ошибок читателя (см. `Verdict.details`) — для лога."""
+
+
+@dataclass(slots=True)
+class CycleResult:
+    outcomes: dict[str, BookOutcome] = field(default_factory=dict)
+    imported: ImportResult | None = None
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def reader_from(settings: Settings) -> SheetsReader:
+    """Читатель боевых таблиц: воркер и ручной импорт собирают его одинаково."""
+    return SheetsReader(
+        GspreadClient(
+            settings.google_credentials_path,
+            timeout=settings.google_timeout,
+            refresh_timeout=settings.google_refresh_timeout,
+        ),
+        {
+            "kitchen": settings.sheets_id_kitchen,
+            "competitors": settings.sheets_id_competitors,
+            "ingredient_cards": settings.sheets_id_ingredient_cards,
+            "tastings": settings.sheets_id_tastings,
+        },
+    )
+
+
+def _mark_checked(state: models.SyncState, now: datetime) -> None:
+    state.checked_at = now
+    state.problem = None
+    state.problem_since = None
+
+
+def _record_failure(
+    session: Session,
+    state: models.SyncState,
+    problem: str,
+    details: str | None,
+    now: datetime,
+) -> None:
+    """Причина держится в состоянии книги; в журнал — только новая.
+
+    Новизна — по переведённой причине: исходник той же беды от раза к разу
+    разный (в тексте сетевой ошибки — адрес объекта в памяти), и по нему
+    журнал пополнялся бы каждые пять минут. Зато в запись журнала исходник
+    идёт рядом с причиной: по нему её и чинят.
+    """
+    if state.problem == problem:
+        return
+    state.problem = problem
+    state.problem_since = now
+    note = f"{state.book}: {problem}"
+    if details:
+        note += f" — {details[:500]}"
+    session.add(models.SyncRun(finished_at=now, ok=False, note=note))
 
 
 class SyncCycle:
-    """Цикл синхронизации — пока заготовка без поведения.
+    """Один цикл: прочитать книги, решить по каждой, перенести нужное."""
 
-    Интеграционные тесты импортируют имя на уровне модуля; без него падал бы
-    сбор всего набора, офлайн-части тоже. Поведение — следующим коммитом.
-    """
+    def __init__(
+        self,
+        reader: SheetsReader,
+        sessions: sessionmaker[Session],
+        clock: Callable[[], datetime] = _utcnow,
+    ) -> None:
+        self._reader = reader
+        self._sessions = sessions
+        self._clock = clock
 
-    def __init__(self, *_: object) -> None:
-        pass
+    def run(self, *, force: bool = False) -> CycleResult:
+        """`force` — переносить и без изменений (ручной запуск)."""
+        read_started_at = self._clock()
+        sheets = self._reader.read_many(Importer.SPECS)
+        verdicts = {book: judge(book, sheets) for book in BOOKS}
+        result = CycleResult()
 
-    def run(self, *, force: bool = False) -> None:
-        raise NotImplementedError
+        with self._sessions() as session, session.begin():
+            take_import_lock(session)
+            now = self._clock()
+            states = {state.book: state for state in session.scalars(select(models.SyncState))}
+            to_import: list[str] = []
+
+            for book, verdict in verdicts.items():
+                state = states.get(book)
+                if state is None:
+                    state = models.SyncState(book=book)
+                    session.add(state)
+                    states[book] = state
+
+                if verdict.problem is not None:
+                    _record_failure(session, state, verdict.problem, verdict.details, now)
+                    result.outcomes[book] = BookOutcome("failed", verdict.problem, verdict.details)
+                elif state.read_started_at is not None and state.read_started_at > read_started_at:
+                    # Пока мы читали, другой импорт перенёс более свежее чтение:
+                    # наше старше, перезаписывать им нельзя.
+                    result.outcomes[book] = BookOutcome("stale")
+                elif force or state.fingerprint != verdict.fingerprint:
+                    to_import.append(book)
+                else:
+                    _mark_checked(state, now)
+                    result.outcomes[book] = BookOutcome("unchanged")
+
+            if to_import:
+                wanted = {sheet_label(spec) for book in to_import for spec in BOOKS[book]}
+                result.imported = Importer(self._reader, self._sessions).apply(
+                    session, {label: data for label, data in sheets.items() if label in wanted}
+                )
+                for book in to_import:
+                    state = states[book]
+                    fingerprint = verdicts[book].fingerprint
+                    if state.fingerprint != fingerprint:
+                        state.changed_at = now
+                    state.fingerprint = fingerprint
+                    state.read_started_at = read_started_at
+                    _mark_checked(state, now)
+                    result.outcomes[book] = BookOutcome("imported")
+
+        return result
