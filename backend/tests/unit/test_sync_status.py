@@ -80,6 +80,7 @@ def test_one_book_behind_with_reason() -> None:
     assert status.stale is True
     assert books["ingredient_cards"].stale is True
     assert books["ingredient_cards"].problem == "доступ платформы к таблице закрыт"
+    assert books["ingredient_cards"].problem_since == NOW - timedelta(minutes=30)
     assert books["kitchen"].stale is False, "свежая книга в полосу не попадает"
 
 
