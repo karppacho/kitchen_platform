@@ -6,22 +6,27 @@
 
 Все ручки требуют входа. Открытым остаётся только `/healthz`, и то он
 слушается изнутри — наружу его закрывает nginx.
+
+Строки, удалённые из листа, ручки не показывают (`removed_at`).
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
+from kitchen.config import Settings
 from kitchen.db import models
 from kitchen.db.recipes import load_recipes
 from kitchen.domain.costs import calculate
-from kitchen.web.auth import CurrentUserDep, SessionDep
+from kitchen.web.auth import CurrentUserDep, SessionDep, get_settings
+from kitchen.web.sync_status import BookRow, SyncStatus, build_sync_status
 
 if TYPE_CHECKING:
     from kitchen.domain.recipe import DishCost
@@ -156,9 +161,15 @@ def ingredients(
 
     Архивные не прячем: они стоят в составе живых блюд, и вопрос «почему
     у этого блюда такая себестоимость» без них не разобрать. Фильтр по
-    статусу есть, умолчание — показывать всё.
+    статусу есть, умолчание — показывать всё. Удалённые из листа — прячем:
+    шеф сказал, что позиции больше нет; в составе блюда она остаётся видна
+    с замечанием «удалён из справочника».
     """
-    query = select(models.Ingredient).order_by(models.Ingredient.name)
+    query = (
+        select(models.Ingredient)
+        .where(models.Ingredient.removed_at.is_(None))
+        .order_by(models.Ingredient.name)
+    )
     if search:
         query = query.where(models.Ingredient.name.ilike(f"%{search}%"))
     if status_filter:
@@ -168,7 +179,10 @@ def ingredients(
     linked = {
         card.ingredient_id
         for card in session.scalars(
-            select(models.IngredientCard).where(models.IngredientCard.ingredient_id.is_not(None))
+            select(models.IngredientCard).where(
+                models.IngredientCard.ingredient_id.is_not(None),
+                models.IngredientCard.removed_at.is_(None),
+            )
         ).all()
     }
 
@@ -203,7 +217,9 @@ def dishes(
     """
     recipes = {recipe.key: recipe for recipe in load_recipes(session)}
 
-    query = select(models.Dish).order_by(models.Dish.legacy_id)
+    query = (
+        select(models.Dish).where(models.Dish.removed_at.is_(None)).order_by(models.Dish.legacy_id)
+    )
     if search:
         query = query.where(models.Dish.name.ilike(f"%{search}%"))
     if status_filter:
@@ -236,6 +252,9 @@ def dish_detail(
     )
     if dish is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="блюдо не найдено")
+    if dish.removed_at is not None:
+        # Не 404: блюдо было, шеф убрал строку из листа. Вернёт — появится снова.
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="блюдо удалено из таблицы")
 
     recipe = next((r for r in load_recipes(session) if r.key == legacy_id), None)
     if recipe is None:
@@ -284,15 +303,18 @@ def reconciliation(
     # dict-comprehension не принимает ruff.
     counts: dict[str, int] = {}
     for link_status, number in session.execute(
-        select(models.IngredientCard.link_status, func.count()).group_by(
-            models.IngredientCard.link_status
-        )
+        select(models.IngredientCard.link_status, func.count())
+        .where(models.IngredientCard.removed_at.is_(None))
+        .group_by(models.IngredientCard.link_status)
     ).all():
         counts[link_status] = number
 
     cards = session.scalars(
         select(models.IngredientCard)
-        .where(models.IngredientCard.link_status != "linked")
+        .where(
+            models.IngredientCard.link_status != "linked",
+            models.IngredientCard.removed_at.is_(None),
+        )
         .order_by(models.IngredientCard.link_status, models.IngredientCard.name)
     ).all()
 
@@ -307,6 +329,7 @@ def reconciliation(
                 select(models.Ingredient).where(
                     func.lower(models.Ingredient.name) == card.name.lower(),
                     or_(models.Ingredient.status != "архив", models.Ingredient.status.is_(None)),
+                    models.Ingredient.removed_at.is_(None),
                 )
             ).all()
             candidates = [
@@ -331,4 +354,26 @@ def reconciliation(
         linked=linked,
         needs_human=total - linked,
         rows=rows,
+    )
+
+
+@router.get("/sync", response_model=SyncStatus)
+def sync(
+    session: SessionDep,
+    user: CurrentUserDep,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> SyncStatus:
+    """Насколько свежи данные — для строки над каждым экраном."""
+    rows = [
+        BookRow(
+            book=state.book,
+            checked_at=state.checked_at,
+            changed_at=state.changed_at,
+            problem=state.problem,
+            problem_since=state.problem_since,
+        )
+        for state in session.scalars(select(models.SyncState)).all()
+    ]
+    return build_sync_status(
+        rows, datetime.now(UTC), timedelta(seconds=settings.sync_stale_after_seconds)
     )

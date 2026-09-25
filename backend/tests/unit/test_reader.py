@@ -10,10 +10,12 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+import requests
+from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from kitchen.sync import specs
 from kitchen.sync.client import SheetNotFoundError
-from kitchen.sync.reader import SheetsReader
+from kitchen.sync.reader import SheetsReader, describe_error
 from tests.conftest import ExplodingSpreadsheet, FakeSheetsClient
 
 IDS = {
@@ -338,3 +340,48 @@ def test_read_many_handles_empty_sheet(make_client) -> None:
     assert not isinstance(sheet, str)
     assert len(sheet) == 0
     assert sheet.header_issues == ("лист пуст",)
+
+
+# ---------------------------------------------------------------------------
+# Исключение одной строкой
+# ---------------------------------------------------------------------------
+
+
+def _response(status: int, body: bytes = b"") -> requests.Response:
+    """Ответ requests, из которого gspread строит свои исключения."""
+    response = requests.Response()
+    response.status_code = status
+    response._content = body
+    return response
+
+
+class _BareError(Exception):
+    """Исключение без текста, но с ответом сервера."""
+
+    def __init__(self, status: int) -> None:
+        super().__init__()
+        self.response = _response(status)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        # Текста нет — остаётся имя класса.
+        (PermissionError(), "PermissionError"),
+        # Текста нет, но есть ответ — имя класса с кодом.
+        (_BareError(503), "_BareError [503]"),
+        # Текст без имени класса — имя впереди; код в тексте уже есть.
+        (SpreadsheetNotFound(_response(404)), "SpreadsheetNotFound: <Response [404]>"),
+        # Имя в тексте есть — не повторяется; кода нет — дописан из ответа.
+        (APIError(_response(502, b"<html>")), "APIError [502]: [-1]: <html>"),
+        # Всё уже есть — текст как был.
+        (
+            APIError(_response(429, b'{"error": {"code": 429, "message": "Quota exceeded"}}')),
+            "APIError: [429]: Quota exceeded",
+        ),
+    ],
+)
+def test_describe_error_keeps_class_and_status(error: Exception, expected: str) -> None:
+    """`str()` исключений gspread на открытии таблицы теряет главное: у 403 текста
+    нет вовсе, у 404 — «<Response [404]>», у HTML-страницы 502 в тексте код -1."""
+    assert describe_error(error) == expected

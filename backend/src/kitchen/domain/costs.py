@@ -22,6 +22,8 @@
 * Нет цены меню — маржа `None`, а не ноль.
 * Себестоимость выше цены — почти всегда ошибка в данных, и молчать
   нельзя: 04.08.2026 так создалось блюдо с UC 1398 ₽ при цене 280 ₽.
+* Ингредиент или упаковка удалены из справочника, а ТТК на них ссылается, —
+  счёт по последним известным данным и предупреждение (решение 23.09.2026).
 """
 
 from __future__ import annotations
@@ -266,6 +268,11 @@ class _Accumulator:
                 f"Строка ТТК без id_ингредиента (вес {money_text(component.net_weight_g)} г)"
             )
             return
+        if ingredient.removed:
+            self.warnings.append(
+                f"Ингредиент «{ingredient.name}» удалён из справочника — посчитан по "
+                f"последним известным данным, поправьте ТТК"
+            )
 
         cost = self._main_cost(ingredient, component.net_weight_g)
 
@@ -337,6 +344,11 @@ class _Accumulator:
         if packaging is None:
             self.warnings.append("Строка ТТК-упаковки без id_упаковки")
             return
+        if packaging.removed:
+            self.warnings.append(
+                f"Упаковка «{packaging.name}» удалена из справочника — посчитана по "
+                f"последним известным данным, поправьте ТТК"
+            )
         if packaging.price_per_piece is None:
             # Строка выпадает целиком, а не добавляется с нулём: у бота было
             # так, и эталон снят с него.

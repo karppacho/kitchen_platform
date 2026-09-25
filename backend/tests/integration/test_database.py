@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from sqlalchemy.engine import Engine
 
 pytestmark = pytest.mark.integration
 
@@ -43,8 +49,19 @@ def alembic_config() -> Config:
     return config
 
 
-def test_database_is_reachable() -> None:
+@pytest.fixture
+def engine() -> Iterator[Engine]:
+    """Движок на тест — и закрывается после него.
+
+    Пул держит соединение открытым и после `with engine.connect()`. Незакрытый
+    движок сборщик мусора находит уже в чужом тесте, и psycopg ругается туда
+    ResourceWarning «connection was deleted while still open»."""
     engine = create_engine(_url(), pool_pre_ping=True)
+    yield engine
+    engine.dispose()
+
+
+def test_database_is_reachable(engine: Engine) -> None:
     with engine.connect() as connection:
         assert connection.execute(text("select 1")).scalar() == 1
 
@@ -70,3 +87,17 @@ def test_alembic_has_single_head(alembic_config: Config) -> None:
 
     heads = ScriptDirectory.from_config(alembic_config).get_heads()
     assert len(heads) <= 1, f"голов в графе миграций: {len(heads)} — {heads}"
+
+
+def test_sync_schema_after_upgrade(alembic_config: Config, engine: Engine) -> None:
+    """После upgrade head есть отметка удаления и состояние книг.
+
+    Отдельно от обратимости: тот тест прошёл бы и с пустой ревизией.
+    """
+    command.upgrade(alembic_config, "head")
+    inspector = inspect(engine)
+    for table in ("ingredients", "ingredient_cards", "packaging", "cooking_methods", "dishes"):
+        removed = {c["name"]: c for c in inspector.get_columns(table)}.get("removed_at")
+        assert removed is not None, f"у {table} нет removed_at"
+        assert removed["nullable"], "пусто — строка есть в листе"
+    assert inspector.get_pk_constraint("sync_state")["constrained_columns"] == ["book"]
