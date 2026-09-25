@@ -88,3 +88,24 @@ export type Reconciliation = {
   needs_human: number
   rows: ReconciliationRow[]
 }
+
+/** Книга — Google-таблица. Ответ GET /api/sync. */
+export type SyncBook = {
+  book: string
+  /** Со строчной: стоит посреди фразы. */
+  title: string
+  checked_at: string | null
+  changed_at: string | null
+  /** Старше 15 минут — считает сервер по своим часам. */
+  stale: boolean
+  /** Причина сбоя словами для всех, не код ошибки. */
+  problem: string | null
+  problem_since: string | null
+}
+
+export type SyncStatus = {
+  data_as_of: string | null
+  changed_at: string | null
+  stale: boolean
+  books: SyncBook[]
+}

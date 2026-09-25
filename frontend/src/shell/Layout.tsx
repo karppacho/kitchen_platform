@@ -4,6 +4,7 @@ import { Outlet } from 'react-router-dom'
 import { ROLI, useSession } from '../auth/session'
 import { MenuIcon } from '../ui/Icons'
 import { Nav } from './Nav'
+import { Svezhest } from './Svezhest'
 import './shell.css'
 
 export function Layout() {
@@ -39,6 +40,7 @@ export function Layout() {
           <Nav onGo={() => otkryt(false)} />
         </aside>
         <main className="soderzhimoe">
+          <Svezhest />
           <Outlet />
         </main>
       </div>

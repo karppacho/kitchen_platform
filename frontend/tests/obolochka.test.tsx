@@ -19,6 +19,19 @@ const server = setupServer(
   http.get('/api/reconciliation', () =>
     HttpResponse.json({ total: 0, linked: 0, needs_human: 0, rows: [] }),
   ),
+  // Строка свежести в оболочке сама ходит в /api/sync на каждом экране: без
+  // ответа запрос ушёл бы мимо msw в настоящую сеть (Ruling 42).
+  http.get('/api/sync', () =>
+    HttpResponse.json({
+      data_as_of: '2026-09-23T11:35:00Z',
+      changed_at: '2026-09-23T11:20:00Z',
+      stale: false,
+      books: [
+        { book: 'kitchen', title: 'таблица кухни', checked_at: '2026-09-23T11:35:00Z', changed_at: '2026-09-23T11:20:00Z', stale: false, problem: null, problem_since: null },
+        { book: 'ingredient_cards', title: 'карточки ингредиентов', checked_at: '2026-09-23T11:36:00Z', changed_at: '2026-09-23T09:00:00Z', stale: false, problem: null, problem_since: null },
+      ],
+    }),
+  ),
   // Карточка блюда с задачи 12 сама ходит за данными — этому файлу нужен
   // ответ, а не заглушка, чтобы проверить, что оболочка держит текущим
   // пункт «Блюда» и на вложенном маршруте.
@@ -146,6 +159,11 @@ test('на узком экране меню открывается кнопко�
 
   expect(knopka).toHaveAttribute('aria-expanded', 'false')
   expect(container.querySelector('.bok')).not.toHaveClass('bok--otkryt')
+})
+
+test('строка свежести стоит над экраном', async () => {
+  narisovat()
+  expect(await screen.findByText(/^Данные из таблицы на /)).toBeInTheDocument()
 })
 
 test('шапка показывает обе роли по-русски, включая узкий экран', async () => {
