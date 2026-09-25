@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import requests
+from google.auth.exceptions import RefreshError
 from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from kitchen.config import Settings
@@ -31,6 +32,9 @@ NOT_FOUND = (
     "и доступ сервисного аккаунта"
 )
 NO_ANSWER = "Google не ответил — следующая попытка через 5 минут"
+UNKNOWN = "причина неизвестна, подробности в журнале синхронизации"
+OPEN_UNKNOWN = f"не удалось открыть таблицу — {UNKNOWN}"
+READ_UNKNOWN = f"не удалось прочитать таблицу — {UNKNOWN}"
 
 
 def _read(client: FakeSheetsClient) -> dict[str, SheetData | str]:
@@ -237,6 +241,10 @@ def _kitchen_problem(error: Exception) -> str | None:
     return judge("kitchen", _read(KitchenWontOpen(error))).problem
 
 
+def _kitchen_details(error: Exception) -> str | None:
+    return judge("kitchen", _read(KitchenWontOpen(error))).details
+
+
 def test_forbidden_spreadsheet_is_access() -> None:
     """На 403 gspread бросает голый `PermissionError()` — текста нет вовсе."""
     assert _kitchen_problem(PermissionError()) == ACCESS
@@ -256,11 +264,13 @@ def test_spreadsheet_not_found_is_known_by_class_name() -> None:
 def test_missing_module_is_not_a_missing_spreadsheet() -> None:
     """gspread импортируется лениво, внутри `open()`, и без него летит
     ModuleNotFoundError. Это поломка у нас, а не ответ Google: «таблица не
-    найдена» отправила бы проверять идентификатор таблицы."""
+    найдена» отправила бы проверять идентификатор таблицы. Перевода у неё нет:
+    на сайт — постоянная фраза, исходник — в журнал."""
     error = ModuleNotFoundError("No module named 'gspread'")
 
-    assert _kitchen_problem(error) == (
-        "не удалось открыть таблицу: ModuleNotFoundError: No module named 'gspread'"
+    assert _kitchen_problem(error) == OPEN_UNKNOWN
+    assert _kitchen_details(error) == (
+        f"{BOOK_OPEN_FAILED}ModuleNotFoundError: No module named 'gspread'"
     )
 
 
@@ -268,24 +278,39 @@ KEY_FILE = "/etc/kitchen-platform/service_account.json"
 
 
 @pytest.mark.parametrize(
-    ("error", "expected"),
+    ("error", "raw"),
     [
         (
             PermissionError(13, "Permission denied", KEY_FILE),
-            f"не удалось открыть таблицу: PermissionError: [Errno 13] Permission denied: "
-            f"'{KEY_FILE}'",
+            f"PermissionError: [Errno 13] Permission denied: '{KEY_FILE}'",
         ),
         (
             FileNotFoundError(2, "No such file or directory", KEY_FILE),
-            f"не удалось открыть таблицу: FileNotFoundError: [Errno 2] No such file or "
-            f"directory: '{KEY_FILE}'",
+            f"FileNotFoundError: [Errno 2] No such file or directory: '{KEY_FILE}'",
         ),
     ],
+    ids=["key-unreadable", "key-missing"],
 )
-def test_local_os_error_is_not_about_the_spreadsheet(error: Exception, expected: str) -> None:
+def test_local_os_error_is_not_about_the_spreadsheet(error: Exception, raw: str) -> None:
     """Ключ сервисного аккаунта не читается или его нет — это наша ошибка, а не
-    ответ Google: «доступ закрыт» или «таблица не найдена» увели бы искать не там."""
-    assert _kitchen_problem(error) == expected
+    ответ Google: «доступ закрыт» или «таблица не найдена» увели бы искать не там.
+    Путь к ключу на сайт не идёт — только в журнал."""
+    assert _kitchen_problem(error) == OPEN_UNKNOWN
+    assert _kitchen_details(error) == f"{BOOK_OPEN_FAILED}{raw}"
+
+
+def test_revoked_key_is_not_shown_raw() -> None:
+    """Ключ отозван: google-auth бросает `RefreshError` с ответом сервера внутри.
+    Перевода нет — и шефу незачем читать «invalid_grant»: на сайт — постоянная
+    фраза, исходник — в журнал."""
+    error = RefreshError(
+        "invalid_grant: Invalid JWT Signature.",
+        {"error": "invalid_grant", "error_description": "Invalid JWT Signature."},
+    )
+
+    assert _kitchen_problem(error) == OPEN_UNKNOWN
+    details = _kitchen_details(error)
+    assert details is not None and "RefreshError: ('invalid_grant" in details
 
 
 def test_google_error_page_is_no_answer() -> None:
@@ -317,15 +342,17 @@ class BatchReadFails(FakeSpreadsheet):
 
 
 def test_failed_batch_read_is_one_problem() -> None:
-    """Значения всех листов читаются одним запросом — и отказ у них один."""
+    """Значения всех листов читаются одним запросом — и отказ у них один: одна
+    причина на сайте и один исходник в журнале, а не по разу на лист."""
     client = sheets_client()
     client._spreadsheets["kitchen-id"] = BatchReadFails(
         {title: FakeWorksheet(cells, title) for title, cells in kitchen_sheets().items()}
     )
 
-    problem = judge("kitchen", _read(client)).problem
+    verdict = judge("kitchen", _read(client))
 
-    assert problem == "не удалось прочитать таблицу: RuntimeError: что-то совсем новое"
+    assert verdict.problem == READ_UNKNOWN
+    assert verdict.details == f"{BOOK_READ_FAILED}RuntimeError: что-то совсем новое"
 
 
 @pytest.mark.parametrize(
@@ -341,7 +368,7 @@ def test_failed_batch_read_is_one_problem() -> None:
         ),
         ("APIError: [503]: The service is currently unavailable.", "Google не ответил"),
         ("листа «ТТК» нет в таблице", "листа «ТТК» нет в таблице"),
-        ("что-то совсем новое", "не удалось прочитать лист «ING»: что-то совсем новое"),
+        ("что-то совсем новое", f"не удалось прочитать лист «ING» — {UNKNOWN}"),
     ],
 )
 def test_explain_speaks_plainly(error: str, expected: str) -> None:
@@ -402,37 +429,59 @@ def test_details_are_what_translation_lost() -> None:
 
 
 @pytest.mark.parametrize(
-    "error",
+    ("error", "problem"),
     [
-        f"{BOOK_OPEN_FAILED}ModuleNotFoundError: No module named 'gspread'",
-        f"{BOOK_READ_FAILED}RuntimeError: что-то совсем новое",
-        "ответ Google короче запроса",
-        "листа «ING» нет в таблице",
+        (f"{BOOK_OPEN_FAILED}ModuleNotFoundError: No module named 'gspread'", OPEN_UNKNOWN),
+        (f"{BOOK_READ_FAILED}RuntimeError: что-то совсем новое", READ_UNKNOWN),
+        ("ответ Google короче запроса", f"не удалось прочитать лист «ING» — {UNKNOWN}"),
     ],
-    ids=["book-open", "book-read", "sheet", "verbatim"],
+    ids=["book-open", "book-read", "sheet"],
 )
-def test_raw_error_already_in_the_problem_is_not_repeated(error: str) -> None:
-    """Непереведённый отказ стоит в причине целиком — дословно, после своей
-    метки или после имени листа. Рядом его не повторяем: в журнале вышло бы
-    «kitchen: не удалось открыть таблицу: X — не открылась таблица: X»."""
+def test_unknown_failure_goes_to_details_not_to_problem(error: str, problem: str) -> None:
+    """Непереведённый отказ: на сайт — постоянная фраза, исходник — в details.
+
+    Причину видит каждый вошедший на каждом экране (спека: простыми словами),
+    а в исходнике — имя класса, путь к ключу, ответ сервера. Чинят по журналу
+    и логу воркера, туда details и идут."""
     sheets = _read(sheets_client())
     sheets[sheet_label(specs.INGREDIENTS)] = error
 
     verdict = judge("kitchen", sheets)
 
-    assert verdict.problem is not None
+    assert verdict.problem == problem
+    assert verdict.details == error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "листа «ING» нет в таблице",
+        "не задан идентификатор таблицы «kitchen» (переменные SHEETS_ID_* в окружении)",
+    ],
+    ids=["missing-sheet", "no-id"],
+)
+def test_raw_error_already_in_the_problem_is_not_repeated(error: str) -> None:
+    """Отказ, который читатель сам сказал простыми словами, идёт в причину
+    дословно. Рядом его не повторяем: в журнале вышло бы «kitchen: X — X»."""
+    sheets = _read(sheets_client())
+    sheets[sheet_label(specs.INGREDIENTS)] = error
+
+    verdict = judge("kitchen", sheets)
+
+    assert verdict.problem == error
     assert verdict.details is None
 
 
-def test_raw_error_cut_in_the_problem_is_kept_whole() -> None:
-    """В причину идут первые 200 знаков исходника, в details — он целиком."""
+def test_long_raw_error_is_kept_whole_for_the_journal() -> None:
+    """Исходник в details — целиком, каким бы длинным он ни был; причина на
+    сайте от него не растёт. Обрезает только запись журнала (до 500 знаков)."""
     raw = f"{BOOK_OPEN_FAILED}RuntimeError: что-то совсем новое: " + ", ".join(["деталь"] * 40)
     sheets = _read(sheets_client())
     sheets[sheet_label(specs.INGREDIENTS)] = raw
 
     verdict = judge("kitchen", sheets)
 
-    assert verdict.problem is not None and len(verdict.problem) < len(raw)
+    assert verdict.problem == OPEN_UNKNOWN
     assert verdict.details == raw
 
 
