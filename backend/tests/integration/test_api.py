@@ -105,6 +105,24 @@ def test_sync_reports_both_books(sessions, client) -> None:
     ]
 
 
+def test_sync_names_the_book_that_failed(sessions, client) -> None:
+    """Первый цикл: в таблице кухни нет листа ТТК — кухня не перенесена ни разу,
+    карточки перенесены. Причина доходит до сайта из sync_state через ручку."""
+    SyncCycle(SheetsReader(sheets_client(missing=("ТТК",)), IDS), sessions).run()
+
+    body = client.get("/api/sync").json()
+
+    books = {b["book"]: b for b in body["books"]}
+    kitchen, cards = books["kitchen"], books["ingredient_cards"]
+    assert kitchen["problem"] == "листа «ТТК» нет в таблице"
+    assert kitchen["problem_since"] is not None
+    assert (kitchen["checked_at"], kitchen["stale"]) == (None, True)
+    assert (cards["problem"], cards["problem_since"], cards["stale"]) == (None, None, False)
+    assert cards["checked_at"] is not None
+    assert cards["changed_at"] is not None
+    assert (body["data_as_of"], body["stale"]) == (None, True)
+
+
 def test_sync_before_first_cycle_is_stale(sessions, client) -> None:
     body = client.get("/api/sync").json()
 

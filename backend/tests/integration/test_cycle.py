@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from google.auth.exceptions import RefreshError
 from sqlalchemy import func, select
 
 from kitchen.db import models
@@ -20,6 +21,9 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.integration
 
 ACCESS = "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
+OPEN_UNKNOWN = (
+    "не удалось открыть таблицу — причина неизвестна, подробности в журнале синхронизации"
+)
 
 
 class Clock:
@@ -326,3 +330,34 @@ def test_failure_note_does_not_repeat_the_problem(sessions) -> None:
     _cycle(sessions, Clock(), missing=("ТТК",)).run()
 
     assert _failure_notes(sessions) == ["kitchen: листа «ТТК» нет в таблице"]
+
+
+class RevokedKey:
+    """Ключ сервисного аккаунта отозван: google-auth отвечает `RefreshError` с
+    ответом сервера внутри. Перевода у этого отказа нет."""
+
+    def worksheets(self) -> list[object]:
+        raise RefreshError(
+            "invalid_grant: Invalid JWT Signature.",
+            {"error": "invalid_grant", "error_description": "Invalid JWT Signature."},
+        )
+
+
+def test_unknown_failure_goes_to_journal_not_to_site(sessions) -> None:
+    """Непереведённый отказ: на сайт — постоянная фраза, исходник — в журнал.
+
+    Причину видит каждый вошедший на каждом экране; имя класса и ответ
+    сервера ему ничего не скажут, а чинят по журналу."""
+    client = sheets_client()
+    client._spreadsheets["kitchen-id"] = RevokedKey()
+
+    result = SyncCycle(SheetsReader(client, IDS), sessions, Clock()).run()
+
+    kitchen = result.outcomes["kitchen"]
+    raw = (
+        f"{BOOK_OPEN_FAILED}RefreshError: ('invalid_grant: Invalid JWT Signature.', "
+        "{'error': 'invalid_grant', 'error_description': 'Invalid JWT Signature.'})"
+    )
+    assert (kitchen.action, kitchen.problem, kitchen.details) == ("failed", OPEN_UNKNOWN, raw)
+    assert _state(sessions, "kitchen").problem == OPEN_UNKNOWN, "на сайт — без сырого текста"
+    assert _failure_notes(sessions) == [f"kitchen: {OPEN_UNKNOWN} — {raw}"]
