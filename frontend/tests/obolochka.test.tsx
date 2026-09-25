@@ -163,7 +163,13 @@ test('на узком экране меню открывается кнопко�
 
 test('строка свежести стоит над экраном', async () => {
   narisovat()
-  expect(await screen.findByText(/^Данные из таблицы на /)).toBeInTheDocument()
+  const stroka = await screen.findByText(/^Данные из таблицы на /)
+  const soderzhimoe = screen.getByRole('main')
+  const zagolovok = await within(soderzhimoe).findByRole('heading', { level: 1, name: 'Блюда' })
+
+  // В содержимом раздела и раньше заголовка экрана — не в шапке и не под ним.
+  expect(soderzhimoe).toContainElement(stroka)
+  expect(stroka.compareDocumentPosition(zagolovok) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 })
 
 test('шапка показывает обе роли по-русски, включая узкий экран', async () => {

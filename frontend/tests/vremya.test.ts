@@ -37,3 +37,13 @@ test('один момент в любом виде ISO 8601 — одно и то
     expect(vremyaDannyh(iso, zavtra)).toBe('23.09 01:30')
   }
 })
+
+test('неразбираемая строка — null, а не исключение', () => {
+  // Intl.DateTimeFormat.format на Invalid Date бросает RangeError, а строка
+  // свежести рисуется в оболочке над каждым экраном: исключение при отрисовке
+  // уронило бы все разделы разом.
+  const seychas = new Date('2026-09-23T12:00:00Z')
+  for (const musor of ['', 'не время', '2026-13-45T99:99:99Z']) {
+    expect(vremyaDannyh(musor, seychas)).toBeNull()
+  }
+})

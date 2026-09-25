@@ -51,6 +51,18 @@ afterEach(() => {
 })
 afterAll(() => server.close())
 
+function nikogda(): SyncStatus {
+  return {
+    data_as_of: null,
+    changed_at: null,
+    stale: true,
+    books: [
+      kniga({ ...KUHNYA, checked_at: null, changed_at: null, stale: true }),
+      kniga({ ...KARTOCHKI, checked_at: null, changed_at: null, stale: true }),
+    ],
+  }
+}
+
 function narisovat(deti: ReactNode = <p>экран на месте</p>) {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   render(
@@ -62,11 +74,29 @@ function narisovat(deti: ReactNode = <p>экран на месте</p>) {
   return queries
 }
 
-test('свежо — приглушённая строка со временем по Москве', async () => {
+// Живая область полосы есть всегда (иначе программа чтения с экрана могла бы
+// её не объявить) — ждём не её появления, а текста в ней.
+function polosa(): Promise<HTMLElement> {
+  return waitFor(() => {
+    const oblast = screen.getByRole('status')
+    expect(oblast).not.toBeEmptyDOMElement()
+    return oblast
+  })
+}
+
+test('свежо — приглушённая строка со временем по Москве, полоса пуста', async () => {
   narisovat()
 
   expect(await screen.findByText('Данные из таблицы на 14:35')).toBeInTheDocument()
-  expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  expect(screen.getByRole('status')).toBeEmptyDOMElement()
+})
+
+test('живая область полосы есть и до ответа ручки', () => {
+  // Многие программы чтения с экрана объявляют изменения внутри уже
+  // существующей области, а область, появившуюся сразу с текстом, пропускают.
+  narisovat()
+
+  expect(screen.getByRole('status')).toBeEmptyDOMElement()
 })
 
 test('отставшая книга — полоса с временем и причиной, свежая книга в неё не попадает', async () => {
@@ -87,35 +117,63 @@ test('отставшая книга — полоса с временем и пр
   }
   narisovat()
 
-  const polosa = await screen.findByRole('status')
-  expect(polosa).toHaveTextContent(
+  const oblast = await polosa()
+  expect(oblast).toHaveTextContent(
     'Данные не обновляются с 14:05 — карточки ингредиентов: доступ платформы к таблице закрыт',
   )
-  expect(polosa).not.toHaveTextContent('таблица кухни')
+  expect(oblast).not.toHaveTextContent('таблица кухни')
 })
 
 test('отстала без причины — значит, не работает сам воркер', async () => {
   otvet = { ...svezho(), stale: true, books: [kniga({ ...KUHNYA, checked_at: '2026-09-23T11:05:00Z', stale: true }), kniga({ ...KARTOCHKI })] }
   narisovat()
 
-  expect(await screen.findByRole('status')).toHaveTextContent('синхронизация не запущена')
+  expect(await polosa()).toHaveTextContent('синхронизация не запущена')
 })
 
 test('ни одной проверки — так и сказано', async () => {
+  otvet = nikogda()
+  narisovat()
+
+  expect(await polosa()).toHaveTextContent('Данные не синхронизировались — таблица кухни')
+})
+
+test('нечего сказать — ни строки, ни жёлтой полосы', async () => {
+  // По контракту недостижимо: несверенная книга всегда stale. Но пустая
+  // жёлтая полоса хуже никакой — она выглядит как тревога без слов.
+  otvet = { ...svezho(), data_as_of: null }
+  const queries = narisovat()
+
+  await waitFor(() => expect(queries.getQueryState(['sync'])?.status).toBe('success'))
+  expect(screen.getByRole('status')).toBeEmptyDOMElement()
+  expect(screen.getByRole('status')).not.toHaveClass('svezhest--staro')
+  expect(screen.queryByText(/Данные/)).not.toBeInTheDocument()
+})
+
+test('неразбираемое время не роняет экраны', async () => {
+  // Строка рисуется в оболочке над каждым экраном, а error boundary нет:
+  // исключение при отрисовке дало бы белый экран во всех разделах.
   otvet = {
-    data_as_of: null,
-    changed_at: null,
+    ...svezho(),
+    data_as_of: 'не время',
     stale: true,
-    books: [
-      kniga({ ...KUHNYA, checked_at: null, changed_at: null, stale: true }),
-      kniga({ ...KARTOCHKI, checked_at: null, changed_at: null, stale: true }),
-    ],
+    books: [kniga({ ...KUHNYA, checked_at: 'не время', stale: true }), kniga({ ...KARTOCHKI })],
   }
   narisovat()
 
-  expect(await screen.findByRole('status')).toHaveTextContent(
-    'Данные не синхронизировались — таблица кухни',
+  expect(await polosa()).toHaveTextContent(
+    'Данные не обновляются — таблица кухни: синхронизация не запущена',
   )
+  expect(screen.getByText('экран на месте')).toBeInTheDocument()
+})
+
+test('неразбираемое время свежих данных — строки нет, экран на месте', async () => {
+  otvet = { ...svezho(), data_as_of: 'не время' }
+  const queries = narisovat()
+
+  await waitFor(() => expect(queries.getQueryState(['sync'])?.status).toBe('success'))
+  expect(screen.queryByText(/Данные/)).not.toBeInTheDocument()
+  expect(screen.getByText('экран на месте')).toBeInTheDocument()
 })
 
 test('первая выкладка: кухня перенесена, карточки ни разу — полоса только про карточки', async () => {
@@ -133,9 +191,9 @@ test('первая выкладка: кухня перенесена, карто
   }
   narisovat()
 
-  const polosa = await screen.findByRole('status')
-  expect(polosa).toHaveTextContent('Данные не синхронизировались — карточки ингредиентов')
-  expect(polosa).not.toHaveTextContent('таблица кухни')
+  const oblast = await polosa()
+  expect(oblast).toHaveTextContent('Данные не синхронизировались — карточки ингредиентов')
+  expect(oblast).not.toHaveTextContent('таблица кухни')
 })
 
 test('ручка не ответила — строки нет, экран живёт', async () => {
@@ -145,6 +203,19 @@ test('ручка не ответила — строки нет, экран жи�
   await waitFor(() => expect(queries.getQueryState(['sync'])?.status).toBe('error'))
   expect(screen.getByText('экран на месте')).toBeInTheDocument()
   expect(screen.queryByText(/Данные/)).not.toBeInTheDocument()
+})
+
+test('опрос упал после успешного — остаётся последняя известная строка', async () => {
+  // Время в строке абсолютное, поэтому она не врёт; а исчезай она при
+  // разовом сбое опроса — мигала бы на каждом.
+  const queries = narisovat()
+  await screen.findByText('Данные из таблицы на 14:35')
+
+  server.use(http.get('/api/sync', () => new HttpResponse(null, { status: 500 })))
+  await queries.refetchQueries({ queryKey: ['sync'] })
+
+  await waitFor(() => expect(queries.getQueryState(['sync'])?.status).toBe('error'))
+  expect(screen.getByText('Данные из таблицы на 14:35')).toBeInTheDocument()
 })
 
 function Proba() {
@@ -164,10 +235,37 @@ test('сменилось время изменения — открытые эк
   await screen.findByText('Данные из таблицы на 14:35')
   await waitFor(() => expect(zaprosov).toBe(1))
 
-  await queries.refetchQueries({ queryKey: ['sync'] }) // то же время изменения
+  // Тот же changed_at, но ответ другой: строка перерисована, экраны — нет.
+  // Ждём, пока новый ответ дойдёт до экрана и затихнут запросы: проверка
+  // сразу после refetchQueries прошла бы раньше, чем эффект успел бы
+  // перезапросить экраны.
+  otvet = { ...svezho(), data_as_of: '2026-09-23T11:40:00Z' }
+  await queries.refetchQueries({ queryKey: ['sync'] })
+  await screen.findByText('Данные из таблицы на 14:40')
+  await waitFor(() => expect(queries.isFetching()).toBe(0))
   expect(zaprosov).toBe(1)
 
   otvet = svezho('2026-09-23T11:55:00Z')
+  await queries.refetchQueries({ queryKey: ['sync'] })
+  await waitFor(() => expect(zaprosov).toBe(2))
+})
+
+test('первый перенос после выкладки: changed_at был null — экраны перезапрашиваются', async () => {
+  // Сайт открыт до первого цикла воркера: changed_at приходит null, потом
+  // появляется. null — тоже прежнее значение, и его смена — смена.
+  let zaprosov = 0
+  server.use(
+    http.get('/api/dishes', () => {
+      zaprosov += 1
+      return HttpResponse.json([])
+    }),
+  )
+  otvet = nikogda()
+  const queries = narisovat(<Proba />)
+  await polosa()
+  await waitFor(() => expect(zaprosov).toBe(1))
+
+  otvet = svezho()
   await queries.refetchQueries({ queryKey: ['sync'] })
   await waitFor(() => expect(zaprosov).toBe(2))
 })
