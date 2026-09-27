@@ -127,6 +127,24 @@
   color: var(--vnimanie);
 }
 
+/* Строка свежести данных над каждым экраном. */
+.svezhest {
+  margin: 0 0 calc(var(--shag) * 2);
+  color: var(--priglushyonnyy);
+  font-size: 0.875em;
+}
+
+.svezhest--staro {
+  padding: calc(var(--shag) * 2);
+  border-left: 3px solid var(--vnimanie);
+  background: var(--vnimanie-fon);
+  color: var(--tekst);
+}
+
+.svezhest--staro p {
+  margin: 0;
+}
+
 /* Кнопка меню нужна только там, где меню спрятано: на широком экране бок
    показан всегда и постоянно стоит рядом с содержимым в одной строке. */
 @media (min-width: 1080px) {

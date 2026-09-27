@@ -24,8 +24,25 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }))
 // тесты, которым важен другой ответ /api/dishes (401, 502, обрыв сети),
 // перекрывают его собственным server.use — более поздняя регистрация
 // побеждает.
+//
+// То же со строкой свежести (задача 9 синхронизации): она стоит в оболочке
+// над каждым экраном и сама ходит в /api/sync. Ответ по умолчанию — свежий;
+// тест, которому важен другой, перекрывает его так же.
 beforeEach(() => {
-  server.use(http.get('/api/dishes', () => HttpResponse.json([])))
+  server.use(
+    http.get('/api/dishes', () => HttpResponse.json([])),
+    http.get('/api/sync', () =>
+      HttpResponse.json({
+        data_as_of: '2026-09-23T11:35:00Z',
+        changed_at: '2026-09-23T11:20:00Z',
+        stale: false,
+        books: [
+          { book: 'kitchen', title: 'таблица кухни', checked_at: '2026-09-23T11:35:00Z', changed_at: '2026-09-23T11:20:00Z', stale: false, problem: null, problem_since: null },
+          { book: 'ingredient_cards', title: 'карточки ингредиентов', checked_at: '2026-09-23T11:36:00Z', changed_at: '2026-09-23T09:00:00Z', stale: false, problem: null, problem_since: null },
+        ],
+      }),
+    ),
+  )
 })
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())

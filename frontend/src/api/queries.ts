@@ -1,7 +1,7 @@
 import { useQuery, type UseQueryResult } from '@tanstack/react-query'
 
 import { api } from './client'
-import type { Dish, DishDetail, Ingredient, Me, Reconciliation } from './types'
+import type { Dish, DishDetail, Ingredient, Me, Reconciliation, SyncStatus } from './types'
 
 export function useMe(): UseQueryResult<Me> {
   return useQuery({ queryKey: ['me'], queryFn: () => api<Me>('/me') })
@@ -37,5 +37,14 @@ export function useReconciliation(): UseQueryResult<Reconciliation> {
   return useQuery({
     queryKey: ['reconciliation'],
     queryFn: () => api<Reconciliation>('/reconciliation'),
+  })
+}
+
+export function useSync(): UseQueryResult<SyncStatus> {
+  return useQuery({
+    queryKey: ['sync'],
+    queryFn: () => api<SyncStatus>('/sync'),
+    // Синхронизация — раз в пять минут; строка отстаёт от неё не больше чем на минуту.
+    refetchInterval: 60_000,
   })
 }
