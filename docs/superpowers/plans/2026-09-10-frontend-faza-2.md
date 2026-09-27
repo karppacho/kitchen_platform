@@ -920,7 +920,7 @@ export default ts.config(
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Кухня — Тим Кук</title>
+    <title>Кухня</title>
   </head>
   <body>
     <div id="root"></div>
