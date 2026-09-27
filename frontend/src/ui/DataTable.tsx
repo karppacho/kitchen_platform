@@ -54,6 +54,11 @@ function Shirokaya<T>({ columns, rows, rowKey, empty, rowClass, onOpen, sortirov
                 key={k.key}
                 className={k.align === 'right' ? 'vpravo' : undefined}
                 aria-sort={ariaSort(k.key, sortirovka)}
+                // Имя заголовка звучит на каждом переходе по ячейкам колонки.
+                // Из содержимого с кнопками оно вышло бы «Категория Фильтр:
+                // Категория, выбрано 2» — оставляем название, у кнопок внутри
+                // свои имена.
+                aria-label={zagolovok ? k.title : undefined}
               >
                 {zagolovok ? zagolovok(k) : k.title}
               </th>

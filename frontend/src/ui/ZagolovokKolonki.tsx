@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 
 import type { GruppaFiltra, Sortirovka } from '../domain/tablitsa'
 import type { Column } from './DataTable'
@@ -27,6 +27,9 @@ type Props<T> = {
 export function ZagolovokKolonki<T>({ kolonka, sortirovka, onSort, gruppa, onVybor }: Props<T>) {
   const znachok = useRef<HTMLButtonElement>(null)
   const [otkryta, otkryt] = useState(false)
+  // Стабильная: от неё зависит слушатель нажатия снаружи, а панель
+  // перерисовывается на каждой галочке.
+  const zakryt = useCallback(() => otkryt(false), [])
   const napravlenie = sortirovka?.kolonka === kolonka.key ? sortirovka.napravlenie : null
 
   return (
@@ -62,7 +65,7 @@ export function ZagolovokKolonki<T>({ kolonka, sortirovka, onSort, gruppa, onVyb
           yakor={znachok}
           vyravnivanie={kolonka.align ?? 'left'}
           nazvanie={`Фильтр: ${kolonka.title}`}
-          onZakryt={() => otkryt(false)}
+          onZakryt={zakryt}
         >
           <Galochki gruppa={gruppa} onVybor={onVybor} />
         </Vsplyvashka>

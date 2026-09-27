@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
-import { beforeEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
 import { primenit, type Sortirovka, type Vybor } from '../src/domain/tablitsa'
 import { DataTable, type Column } from '../src/ui/DataTable'
@@ -323,12 +323,28 @@ test('галочка зовёт onVybor, панель остаётся откр�
   expect(screen.queryByRole('cell', { name: 'Маргарита' })).not.toBeInTheDocument()
 })
 
-// Размеров в jsdom нет: ширину окна, прокрутку и место значка задаём сами.
-// Каждый файл тестов — в своём окне, так что свойства живут до конца файла.
+// Размеров в jsdom нет: ширину окна, прокрутку и место значка задаём сами —
+// только на время теста, после него свойства возвращаются, как были.
+const vernut: (() => void)[] = []
+
+function podmenit(obekt: object, svoystvo: string, znachenie: number) {
+  const bylo = Object.getOwnPropertyDescriptor(obekt, svoystvo)
+  Object.defineProperty(obekt, svoystvo, { configurable: true, value: znachenie })
+  vernut.push(() => {
+    if (bylo) Object.defineProperty(obekt, svoystvo, bylo)
+    else Reflect.deleteProperty(obekt, svoystvo)
+  })
+}
+
+afterEach(() => {
+  for (const f of vernut.splice(0).reverse()) f()
+  vi.restoreAllMocks()
+})
+
 function zadatOkno(shirina: number, prokrutkaY: number) {
-  Object.defineProperty(document.documentElement, 'clientWidth', { configurable: true, value: shirina })
-  Object.defineProperty(window, 'scrollX', { configurable: true, value: 0 })
-  Object.defineProperty(window, 'scrollY', { configurable: true, value: prokrutkaY })
+  podmenit(document.documentElement, 'clientWidth', shirina)
+  podmenit(window, 'scrollX', 0)
+  podmenit(window, 'scrollY', prokrutkaY)
 }
 
 /** Значок 14×14, низ — на 40 px от верха окна. */
@@ -359,4 +375,48 @@ test('панель стоит под значком в координатах д
   zadatMestoZnachka(tsena, 500)
   fireEvent(window, new Event('resize'))
   expect(dialog.style.left).toBe(`${514 - 264}px`)
+})
+
+test('галочка перестроила таблицу — панель едет за значком', async () => {
+  // У таблицы нет фиксированной раскладки: фильтр меняет строки, ширины
+  // колонок пересчитываются, значок съезжает — без прокрутки и без смены
+  // окна. Над таблицей появятся фишки — шапка уедет и вниз.
+  zadatOkno(1440, 0)
+  render(<Stend />)
+  const tsena = znachok('Фильтр: Цена')
+  zadatMestoZnachka(tsena, 900)
+  await userEvent.click(tsena)
+  const dialog = screen.getByRole('dialog', { name: 'Фильтр: Цена' })
+  expect(dialog.style.left).toBe(`${914 - 264}px`)
+
+  zadatMestoZnachka(tsena, 600)
+  await userEvent.click(within(dialog).getByRole('checkbox', { name: 'есть · 2' }))
+  expect(dialog.style.left).toBe(`${614 - 264}px`)
+})
+
+test('слушатель нажатия снаружи ставится один раз на открытие', async () => {
+  // Каждая галочка перерисовывает панель; снимать и ставить слушатель на
+  // каждую незачем.
+  const dobavit = vi.spyOn(document, 'addEventListener')
+  render(<Stend />)
+  await otkrytKategoriyu()
+  await userEvent.click(galochka('Соус · 2'))
+  await userEvent.click(galochka('Пицца · 1'))
+  expect(dobavit.mock.calls.filter(([tip]) => tip === 'pointerdown')).toHaveLength(1)
+})
+
+test('имя заголовка колонки — только её название', () => {
+  // Программа чтения с экрана называет заголовок на каждом переходе по
+  // ячейкам колонки: «Категория», а не «Категория Фильтр: Категория,
+  // выбрано 1». Кнопки внутри — со своими именами.
+  render(<Stend nachalo={{ category: ['Соус'] }} />)
+  const kategoriya = screen.getByRole('columnheader', { name: 'Категория' })
+  // Одного имени мало: dom-accessibility-api (jsdom) в имени из содержимого
+  // пропускает aria-label вложенных кнопок и дал бы «Категория» и так, а
+  // браузеры его берут. Поэтому — и сам aria-label у th.
+  expect(kategoriya).toHaveAttribute('aria-label', 'Категория')
+  expect(within(kategoriya).getByRole('button', { name: 'Категория' })).toBeInTheDocument()
+  expect(within(kategoriya).getByRole('button', { name: 'Фильтр: Категория, выбрано 1' })).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: 'Цена' })).toHaveAttribute('aria-label', 'Цена')
+  expect(screen.getByRole('columnheader', { name: 'Код' })).toHaveAttribute('aria-label', 'Код')
 })

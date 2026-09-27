@@ -1,4 +1,13 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from 'react'
 import { createPortal } from 'react-dom'
 
 import { raspolozhit, SHIRINA_PANELI } from './raspolozhenie'
@@ -12,6 +21,8 @@ type Props = {
   vyravnivanie: 'left' | 'right'
   /** Имя диалога — «Фильтр: Категория». */
   nazvanie: string
+  /** Лучше стабильная (`useCallback`): от неё зависит слушатель нажатия
+   *  снаружи — новая функция на каждой отрисовке переставляла бы его. */
   onZakryt: () => void
   children: ReactNode
 }
@@ -47,29 +58,41 @@ export function Vsplyvashka({ yakor, vyravnivanie, nazvanie, onZakryt, children 
   const panel = useRef<HTMLDivElement>(null)
   const [mesto, zadatMesto] = useState<Mesto | null>(null)
 
-  // Место — до первой отрисовки, так что панель не мелькнёт в углу. Значок
-  // сдвигается, когда таблицу прокручивают вбок внутри обёртки (эта
-  // прокрутка не всплывает — слушаем на погружении) и когда меняется
-  // ширина окна; панель едет за ним. Прокрутка страницы места в документе
-  // не меняет — тогда состояние прежнее и перерисовки нет.
+  // Панель едет за значком. Место не изменилось (прокрутка страницы: в
+  // документе всё на месте) — состояние прежнее, перерисовки нет.
+  const postavit = useCallback(() => {
+    const znachok = yakor.current
+    if (znachok === null) return
+    const novoe = raspolozhit(znachok.getBoundingClientRect(), vyravnivanie, document.documentElement.clientWidth, {
+      x: window.scrollX,
+      y: window.scrollY,
+    })
+    zadatMesto((bylo) => (bylo?.left === novoe.left && bylo.top === novoe.top ? bylo : novoe))
+  }, [yakor, vyravnivanie])
+
+  // После каждой отрисовки, первая — тоже: панель не мелькнёт в углу.
+  // Значок сдвигает и главное действие самой панели: у таблицы нет
+  // фиксированной раскладки — галочка меняет строки, ширины колонок
+  // пересчитываются; при 0 строках колонки сжимаются до заголовков; над
+  // таблицей появляются фишки, и шапка уезжает вниз. Панель при этом
+  // перерисовывается (новая группа), а раскладка к эффекту уже новая.
+  // Без зависимостей намеренно; зацикливания нет — то же место не меняет
+  // состояния.
   useLayoutEffect(() => {
-    function postavit() {
-      const znachok = yakor.current
-      if (znachok === null) return
-      const novoe = raspolozhit(znachok.getBoundingClientRect(), vyravnivanie, document.documentElement.clientWidth, {
-        x: window.scrollX,
-        y: window.scrollY,
-      })
-      zadatMesto((bylo) => (bylo?.left === novoe.left && bylo.top === novoe.top ? bylo : novoe))
-    }
     postavit()
+  })
+
+  // Сдвиги без перерисовки панели: таблицу прокрутили вбок внутри обёртки
+  // (эта прокрутка не всплывает — слушаем на погружении) или сменили
+  // ширину окна.
+  useLayoutEffect(() => {
     window.addEventListener('resize', postavit)
     document.addEventListener('scroll', postavit, true)
     return () => {
       window.removeEventListener('resize', postavit)
       document.removeEventListener('scroll', postavit, true)
     }
-  }, [yakor, vyravnivanie])
+  }, [postavit])
 
   // Фокус — на первое, что берёт Tab (первую галочку), когда панель уже на
   // месте: focus() прокручивает страницу к элементу, а до расстановки
