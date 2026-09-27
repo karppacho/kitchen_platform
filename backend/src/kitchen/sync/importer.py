@@ -9,7 +9,8 @@
 
 Что импорт **не** делает: не решает за человека. Связь карточки со
 справочником он предлагает, но подтверждённой считает только ту, которую
-подтвердили руками — `link_confirmed_at` переживает переимпорт.
+подтвердили руками — `link_confirmed_at` переживает переимпорт. И не стирает
+строки, исчезнувшие из листа, — скрывает их отметкой `removed_at`.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from kitchen.db import models
 from kitchen.domain.matching import Entry, NameIndex, normalise_name
@@ -27,7 +28,7 @@ from kitchen.sync import specs
 from kitchen.sync.reader import SheetData
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from sqlalchemy.orm import Session, sessionmaker
 
@@ -35,6 +36,21 @@ if TYPE_CHECKING:
 
 # Как в листе ТТК называется тип строки.
 _ROW_TYPE_PACKAGING = "упаковка"
+
+# Ключ advisory-блокировки импорта — одно число на всю базу: воркер и ручной
+# import_sheets.py обязаны стоять в одной очереди.
+IMPORT_LOCK_KEY = 20260923
+
+
+def take_import_lock(session: Session) -> None:
+    """Дождаться, пока закончит другой импорт, и занять очередь.
+
+    Два импорта разом задвоили бы состав: оба стирают строки ТТК и вставляют
+    свои. Блокировка транзакционная (`xact`), а не сессионная: приложение ходит
+    через пулер в transaction-режиме, и сессионная повисла бы на чужом
+    соединении. Снимается сама на commit или rollback.
+    """
+    session.execute(text("select pg_advisory_xact_lock(:key)"), {"key": IMPORT_LOCK_KEY})
 
 
 @dataclass
@@ -44,6 +60,14 @@ class ImportResult:
     run_id: int | None = None
     counts: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # Отдельно от warnings: строк «пустой id, пропущена» в живом ING десятки, и
+    # они забивают note прогона раньше, чем до него доедет «скрыто» — а это
+    # единственный след массового удаления в журнале (см. _mark_presence).
+    presence: list[str] = field(default_factory=list)
+    # Сколько карточек получили, потеряли или сменили пару в справочнике — по
+    # той же причине отдельно от warnings: массовая потеря пар (шеф убрал из
+    # ING десяток позиций) обязана дойти до журнала.
+    links: list[str] = field(default_factory=list)
     unreadable: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -96,28 +120,41 @@ class Importer:
     )
 
     def run(self) -> ImportResult:
+        """Прочитать все листы и перенести прочитанное одной транзакцией."""
         sheets = self._reader.read_many(self.SPECS)
-        result = ImportResult()
-
         with self._sessions() as session, session.begin():
-            run = models.SyncRun()
-            session.add(run)
-            session.flush()
+            return self.apply(session, sheets)
 
-            for label, data in sheets.items():
-                self._record_sheet(session, run, label, data, result)
+    def apply(self, session: Session, sheets: Mapping[str, SheetData | str]) -> ImportResult:
+        """Перенести уже прочитанные листы в открытой транзакции.
 
-            ok_sheets = {
-                data.spec.title: data for data in sheets.values() if isinstance(data, SheetData)
-            }
-            self._import_all(session, ok_sheets, result)
+        Листа нет в `sheets` — его сущности не трогаются: ни обновлений, ни
+        отметок удаления. Так воркер переносит одну книгу, не задевая другую.
+        """
+        take_import_lock(session)
+        result = ImportResult()
+        now = datetime.now(UTC)
 
-            run.finished_at = datetime.now(UTC)
-            run.ok = result.ok
-            run.note = "; ".join(result.warnings[:20])
-            session.flush()
-            result.run_id = run.id
+        run = models.SyncRun()
+        session.add(run)
+        session.flush()
 
+        for label, data in sheets.items():
+            self._record_sheet(session, run, label, data, result)
+
+        ok_sheets = {
+            data.spec.title: data for data in sheets.values() if isinstance(data, SheetData)
+        }
+        self._import_all(session, ok_sheets, result, now)
+
+        run.finished_at = datetime.now(UTC)
+        run.ok = result.ok
+        # presence и links — первыми: это самые важные замечания прогона, и
+        # обрезка не имеет права их выбросить, пока в warnings болтаются
+        # десятки строк «пустой id».
+        run.note = "; ".join([*result.presence, *result.links, *result.warnings][:20])
+        session.flush()
+        result.run_id = run.id
         return result
 
     # ------------------------------------------------------------------
@@ -152,21 +189,36 @@ class Importer:
             result.warnings.append(f"{label}: расхождений заголовков {len(data.header_issues)}")
 
     def _import_all(
-        self, session: Session, sheets: dict[str, SheetData], result: ImportResult
+        self,
+        session: Session,
+        sheets: dict[str, SheetData],
+        result: ImportResult,
+        now: datetime,
     ) -> None:
-        ingredients = self._import_ingredients(session, sheets.get(specs.INGREDIENTS.title), result)
-        packaging = self._import_packaging(session, sheets.get(specs.PACKAGING.title), result)
-        methods = self._import_methods(session, sheets.get(specs.COOKING_METHODS.title), result)
-        dishes = self._import_dishes(session, sheets.get(specs.DISHES.title), result)
+        ingredients = self._import_ingredients(
+            session, sheets.get(specs.INGREDIENTS.title), result, now
+        )
+        packaging = self._import_packaging(session, sheets.get(specs.PACKAGING.title), result, now)
+        methods = self._import_methods(
+            session, sheets.get(specs.COOKING_METHODS.title), result, now
+        )
+        dishes = self._import_dishes(session, sheets.get(specs.DISHES.title), result, now)
 
         self._import_components(
             session, sheets.get(specs.TTK.title), dishes, ingredients, packaging, methods, result
         )
-        self._import_cards(session, sheets.get(specs.INGREDIENT_CARDS.title), result)
+        cards = sheets.get(specs.INGREDIENT_CARDS.title)
+        self._import_cards(session, cards, result, now)
+        if cards is None and specs.INGREDIENTS.title in sheets:
+            # Лист карточек в этом переносе не участвует, а справочник
+            # обновился: пары карточек зависят и от него. Лист карточек
+            # заполнял бот, боты лежат — ждать его правки значило бы держать
+            # на сверке снятый спор тёзок и пару к удалённой позиции.
+            self._suggest_links(session, result)
 
     # ------------------------------------------------------------------
     def _import_ingredients(
-        self, session: Session, data: SheetData | None, result: ImportResult
+        self, session: Session, data: SheetData | None, result: ImportResult, now: datetime
     ) -> dict[str, models.Ingredient]:
         existing: dict[str, models.Ingredient] = {
             row.legacy_id: row for row in session.scalars(select(models.Ingredient)).all()
@@ -174,8 +226,10 @@ class Importer:
         if data is None:
             return existing
 
+        present: set[str] = set()
         for row in _identified(data.rows, "id", result, "ING"):
             key = _text(row["id"])
+            present.add(key)
             item = existing.get(key) or models.Ingredient(legacy_id=key)
             item.name = _text(row["name"])
             item.full_name = _text(row["full_name"])
@@ -200,12 +254,13 @@ class Importer:
             session.add(item)
             existing[key] = item
 
+        _mark_presence(existing, present, now, result, "ING")
         session.flush()
-        result.add("ингредиенты", len(existing))
+        result.add("ингредиенты", len(present))
         return existing
 
     def _import_packaging(
-        self, session: Session, data: SheetData | None, result: ImportResult
+        self, session: Session, data: SheetData | None, result: ImportResult, now: datetime
     ) -> dict[str, models.Packaging]:
         existing: dict[str, models.Packaging] = {
             row.legacy_id: row for row in session.scalars(select(models.Packaging)).all()
@@ -213,8 +268,10 @@ class Importer:
         if data is None:
             return existing
 
+        present: set[str] = set()
         for row in _identified(data.rows, "id", result, "Упаковка"):
             key = _text(row["id"])
+            present.add(key)
             item = existing.get(key) or models.Packaging(legacy_id=key)
             item.name = _text(row["name"])
             item.full_name = _text(row["full_name"])
@@ -227,12 +284,13 @@ class Importer:
             session.add(item)
             existing[key] = item
 
+        _mark_presence(existing, present, now, result, "Упаковка")
         session.flush()
-        result.add("упаковка", len(existing))
+        result.add("упаковка", len(present))
         return existing
 
     def _import_methods(
-        self, session: Session, data: SheetData | None, result: ImportResult
+        self, session: Session, data: SheetData | None, result: ImportResult, now: datetime
     ) -> dict[str, models.CookingMethod]:
         existing: dict[str, models.CookingMethod] = {
             row.legacy_id: row for row in session.scalars(select(models.CookingMethod)).all()
@@ -240,8 +298,10 @@ class Importer:
         if data is None:
             return existing
 
+        present: set[str] = set()
         for row in _identified(data.rows, "id", result, "Способы приготовления"):
             key = _text(row["id"])
+            present.add(key)
             item = existing.get(key) or models.CookingMethod(legacy_id=key)
             item.position = _text(row["position"])
             item.method = _text(row["method"])
@@ -253,12 +313,13 @@ class Importer:
             session.add(item)
             existing[key] = item
 
+        _mark_presence(existing, present, now, result, "Способы приготовления")
         session.flush()
-        result.add("способы приготовления", len(existing))
+        result.add("способы приготовления", len(present))
         return existing
 
     def _import_dishes(
-        self, session: Session, data: SheetData | None, result: ImportResult
+        self, session: Session, data: SheetData | None, result: ImportResult, now: datetime
     ) -> dict[str, models.Dish]:
         existing: dict[str, models.Dish] = {
             row.legacy_id: row for row in session.scalars(select(models.Dish)).all()
@@ -266,8 +327,10 @@ class Importer:
         if data is None:
             return existing
 
+        present: set[str] = set()
         for row in _identified(data.rows, "id", result, "Блюда"):
             key = _text(row["id"])
+            present.add(key)
             item = existing.get(key) or models.Dish(legacy_id=key)
             item.name = _text(row["name"])
             item.category = _text(row["category"])
@@ -279,8 +342,9 @@ class Importer:
             session.add(item)
             existing[key] = item
 
+        _mark_presence(existing, present, now, result, "Блюда")
         session.flush()
-        result.add("блюда", len(existing))
+        result.add("блюда", len(present))
         return existing
 
     def _import_components(
@@ -354,14 +418,11 @@ class Importer:
         session.flush()
         result.add("строки ТТК", imported)
 
-    def _import_cards(self, session: Session, data: SheetData | None, result: ImportResult) -> None:
+    def _import_cards(
+        self, session: Session, data: SheetData | None, result: ImportResult, now: datetime
+    ) -> None:
         if data is None:
             return
-
-        index = NameIndex(
-            Entry(key=str(item.id), name=item.name, status=item.status)
-            for item in session.scalars(select(models.Ingredient)).all()
-        )
 
         # У карточек нет идентификатора в листе — ключом служит имя.
         # Подтверждённые человеком связи переносятся: переимпорт не должен
@@ -412,12 +473,11 @@ class Importer:
             card.approval_status = _text(row["approval_status"])
             _stamp(card, row)
 
-            if card.link_confirmed_at is None:
-                self._suggest_link(card, index)
-
             session.add(card)
             existing[key] = card
 
+        _mark_presence(existing, seen, now, result, "Карточки")
+        self._suggest_links(session, result)
         session.flush()
 
         by_status: dict[str, int] = {}
@@ -427,6 +487,53 @@ class Importer:
         for status, number in sorted(by_status.items()):
             result.add(f"карточки: {status}", number)
         result.add("карточки", len(seen))
+
+    def _suggest_links(self, session: Session, result: ImportResult) -> None:
+        """Подобрать пары карточкам, чью связь не подтвердил человек.
+
+        Один путь на два случая: пара зависит от обеих книг — от имени
+        карточки и от справочника ING. Поэтому подбор идёт и при переносе
+        листа карточек, и при переносе одной кухни. Карточки берутся из базы:
+        прочитался ли их лист в этом цикле, неважно.
+
+        Подтверждённые связи не трогаем — решение за человеком. Скрытые
+        карточки тоже: вернётся строка — подберём.
+        """
+        # Удалённое из справочника не предлагаем в пару карточке: шеф уже
+        # сказал, что этой позиции больше нет.
+        index = NameIndex(
+            Entry(key=str(item.id), name=item.name, status=item.status)
+            for item in session.scalars(
+                select(models.Ingredient).where(models.Ingredient.removed_at.is_(None))
+            ).all()
+        )
+        cards = session.scalars(
+            select(models.IngredientCard).where(
+                models.IngredientCard.removed_at.is_(None),
+                models.IngredientCard.link_confirmed_at.is_(None),
+            )
+        ).all()
+
+        gained = lost = changed = 0
+        for card in cards:
+            before = card.ingredient_id
+            self._suggest_link(card, index)
+            if before == card.ingredient_id:
+                continue
+            if before is None:
+                gained += 1
+            elif card.ingredient_id is None:
+                lost += 1
+            else:
+                changed += 1
+
+        for number, what in (
+            (gained, "получили пару"),
+            (lost, "потеряли пару"),
+            (changed, "сменили пару"),
+        ):
+            if number:
+                result.links.append(f"Карточки: {what} в справочнике — {number}")
 
     def _suggest_link(self, card: models.IngredientCard, index: NameIndex) -> None:
         """Предложить пару. Именно предложить — решение за человеком."""
@@ -443,6 +550,36 @@ class Importer:
         else:
             card.ingredient_id = None
             card.link_status = "orphan"
+
+
+def _mark_presence(
+    rows: Mapping[str, models.RemovedMixin],
+    present: set[str],
+    now: datetime,
+    result: ImportResult,
+    sheet: str,
+) -> None:
+    """Скрыть строки, которых больше нет в листе, и вернуть вернувшиеся.
+
+    Не стираем (решение Александра 23.09): шеф вернёт строку — вернутся и её
+    связи, включая подтверждённые на экране сверки. Сколько скрыто и вернулось —
+    в `result.presence`, а не в `warnings`: массовое исчезновение обязано быть
+    видно в note прогона, а warnings на живых листах — это ещё и десятки строк
+    «пустой id», которые вытеснили бы его при обрезке до двадцати записей.
+    """
+    hidden = restored = 0
+    for key, item in rows.items():
+        if key in present:
+            if item.removed_at is not None:
+                item.removed_at = None
+                restored += 1
+        elif item.removed_at is None:
+            item.removed_at = now
+            hidden += 1
+    if hidden:
+        result.presence.append(f"{sheet}: скрыто строк, которых больше нет в листе, — {hidden}")
+    if restored:
+        result.presence.append(f"{sheet}: вернулись в лист строки — {restored}")
 
 
 def _stamp(item: object, row: Row) -> None:

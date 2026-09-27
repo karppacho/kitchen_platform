@@ -158,6 +158,36 @@ test('блюда с таким legacy_id нет — понятное сообщ�
   expect(screen.queryByRole('button', { name: 'Повторить' })).not.toBeInTheDocument()
 })
 
+test('блюдо удалено из таблицы — своё сообщение, а не «такого нет»', async () => {
+  server.use(
+    http.get('/api/dishes/B001', () =>
+      HttpResponse.json({ detail: 'блюдо удалено из таблицы' }, { status: 410 }),
+    ),
+  )
+  narisovat()
+
+  expect(await screen.findByRole('heading', { name: 'Блюдо удалено из таблицы' })).toBeInTheDocument()
+  expect(screen.queryByText('Такого блюда нет')).not.toBeInTheDocument()
+})
+
+test('блюдо удалили, пока карточка открыта, — после перезапроса сообщение, а не прежние данные', async () => {
+  // Главный путь к 410: шеф убрал строку из листа, синхронизация сменила
+  // changed_at, строка свежести перезапросила карточку. Прежние данные в кэше
+  // есть, но это не сбой связи — «не удалось обновить, на экране прежние
+  // данные» здесь было бы неправдой: блюда на сайте больше нет.
+  const { queries } = narisovat()
+  await screen.findByText('Салат айсберг')
+  server.use(
+    http.get('/api/dishes/B001', () =>
+      HttpResponse.json({ detail: 'блюдо удалено из таблицы' }, { status: 410 }),
+    ),
+  )
+  await act(() => queries.refetchQueries())
+
+  expect(await screen.findByRole('heading', { name: 'Блюдо удалено из таблицы' })).toBeInTheDocument()
+  expect(screen.queryByText('Салат айсберг')).not.toBeInTheDocument()
+})
+
 test('состав и упаковка — одна таблица, колонки не разъезжаются', async () => {
   // Две таблицы с автоматической шириной считали колонки каждая по своим
   // данным: длинное имя контейнера растягивало первую колонку упаковки, и

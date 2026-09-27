@@ -345,6 +345,7 @@ def test_packaging_costs_per_piece_without_losses() -> None:
     )
 
     assert result.uc_rub == Decimal("42.70"), "17.70 за томаты + 25.00 за две коробки"
+    assert not any("удалена из справочника" in w for w in result.warnings)
 
 
 def test_packaging_not_in_output_weight() -> None:
@@ -376,6 +377,60 @@ def test_packaging_without_price_is_dropped_entirely() -> None:
 
     assert len(result.components) == 1
     assert any("нет цены" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# Удалено из справочника, а ТТК ссылается
+# ---------------------------------------------------------------------------
+REMOVED = "удалён из справочника"
+
+
+def test_removed_ingredient_counts_by_last_known_data_and_warns() -> None:
+    """Шеф удалил строку из ING, а ТТК на неё ещё ссылается.
+
+    Решение 23.09: считать по последним известным данным — себестоимость не
+    проваливается — и сказать об этом, чтобы шеф поправил ТТК.
+    """
+    result = calculate(dish(main(ing(removed=True), "100")))
+
+    assert result.uc_rub == Decimal("17.70"), "100 г × 177 ₽/кг — как у неудалённого"
+    assert any(f"«Томаты» {REMOVED}" in w for w in result.warnings)
+
+
+def test_present_ingredient_gets_no_removed_warning() -> None:
+    result = calculate(dish(main(ing(), "100")))
+
+    assert not any(REMOVED in w for w in result.warnings)
+
+
+def test_removed_ingredient_without_price_gets_both_warnings() -> None:
+    """Замечание об удалении добавочное: «нет цены» к той же строке никуда не девается.
+
+    Удалённый ингредиент без цены стоит 0 ₽, и шеф должен узнать оба факта:
+    ТТК ссылается на то, чего в справочнике уже нет, а сама строка занижает
+    UC. Перепиши кто-нибудь проверку удаления через `elif` или ранний
+    `return` — замечание о цене пропадёт молча, а при раннем выходе и сама
+    строка уйдёт из состава вместе со своим весом в выходе и КБЖУ.
+    """
+    result = calculate(dish(main(ing(removed=True, price_per_unit=None), "100")))
+
+    assert any(f"«Томаты» {REMOVED}" in w for w in result.warnings)
+    assert any("не заполнена цена" in w for w in result.warnings)
+    assert result.uc_rub == Decimal("0.00")
+    assert len(result.components) == 1, "строка остаётся в составе"
+
+
+def test_removed_packaging_counts_and_warns() -> None:
+    box = PackagingSpec(key="u1", name="Коробка", price_per_piece=Decimal("12.50"), removed=True)
+    result = calculate(
+        dish(
+            main(ing(), "100"),
+            Component(row_type=ROW_PACKAGING, net_weight_g=Decimal("2"), packaging=box),
+        )
+    )
+
+    assert result.uc_rub == Decimal("42.70"), "17.70 за томаты + 25.00 за две коробки"
+    assert any("«Коробка» удалена из справочника" in w for w in result.warnings)
 
 
 # ---------------------------------------------------------------------------

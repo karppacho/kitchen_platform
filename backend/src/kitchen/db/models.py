@@ -63,7 +63,18 @@ class SyncMixin:
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class Ingredient(Base, SyncMixin):
+class RemovedMixin:
+    """Отметка «строки больше нет в листе».
+
+    Удалённую шефом строку не стираем: скрываем с сайта и помним. Вернёт
+    строку — отметка снимается, и все связи, включая подтверждённые на экране
+    сверки, на месте (решение Александра 23.09.2026).
+    """
+
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class Ingredient(Base, SyncMixin, RemovedMixin):
     """Позиция справочника ING — по ней считается себестоимость."""
 
     __tablename__ = "ingredients"
@@ -109,7 +120,7 @@ class Ingredient(Base, SyncMixin):
     __table_args__ = (Index("ix_ingredients_status_name", "status", "name"),)
 
 
-class IngredientCard(Base, SyncMixin):
+class IngredientCard(Base, SyncMixin, RemovedMixin):
     """Карточка ингредиента: то, что заполняют повара.
 
     Отдельной таблицей, а не колонками в :class:`Ingredient`, потому что это
@@ -177,7 +188,7 @@ class IngredientCard(Base, SyncMixin):
     )
 
 
-class Packaging(Base, SyncMixin):
+class Packaging(Base, SyncMixin, RemovedMixin):
     """Упаковка. Отдельно от ингредиентов: несъедобна, КБЖУ не имеет,
     считается всегда штуками и в выход блюда не входит."""
 
@@ -195,7 +206,7 @@ class Packaging(Base, SyncMixin):
     comment: Mapped[str] = mapped_column(Text, default="")
 
 
-class CookingMethod(Base, SyncMixin):
+class CookingMethod(Base, SyncMixin, RemovedMixin):
     """Способ приготовления: норма впитывания масла и рекомендация в ТТК."""
 
     __tablename__ = "cooking_methods"
@@ -211,7 +222,7 @@ class CookingMethod(Base, SyncMixin):
     comment: Mapped[str] = mapped_column(Text, default="")
 
 
-class Dish(Base, SyncMixin):
+class Dish(Base, SyncMixin, RemovedMixin):
     """Блюдо."""
 
     __tablename__ = "dishes"
@@ -326,6 +337,25 @@ class SyncSheet(Base):
     run: Mapped[SyncRun] = relationship(back_populates="sheets")
 
     __table_args__ = (UniqueConstraint("run_id", "spreadsheet", "title"),)
+
+
+class SyncState(Base):
+    """Состояние синхронизации одной книги (Google-таблицы).
+
+    Строка на книгу, а не на прогон: сайт спрашивает «насколько свежи данные»
+    раз в минуту, и ответ должен быть одним чтением, а не разбором журнала.
+    Журнал событий — `sync_runs`.
+    """
+
+    __tablename__ = "sync_state"
+
+    book: Mapped[str] = mapped_column(String(32), primary_key=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    changed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str | None] = mapped_column(String(64))
+    read_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    problem: Mapped[str | None] = mapped_column(Text)
+    problem_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Profile(Base):

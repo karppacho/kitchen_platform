@@ -20,6 +20,27 @@ export function DishDetailPage() {
   const { legacyId = '' } = useParams()
   const query = useDish(legacyId)
 
+  // 410 — блюдо было, шеф убрал строку из листа «Блюда». Не «такого нет»: вернёт
+  // строку — блюдо появится снова. «Повторить» не нужно, как и у 404.
+  // Проверка стоит до estDannye: чаще всего 410 приходит перезапросом открытой
+  // карточки (строка свежести), и прежние данные в кэше показывать нельзя.
+  if (query.isError && query.error instanceof ApiError && query.error.status === 410) {
+    return (
+      <section className="kartochka">
+        <Link to="/dishes" className="nazad">
+          ← Блюда
+        </Link>
+        <div className="sostoyanie" role="alert">
+          <h1>Блюдо удалено из таблицы</h1>
+          <p className="sostoyanie-prichina">
+            Строки «{legacyId}» больше нет в листе «Блюда», поэтому на сайте блюдо скрыто. Вернут
+            строку в таблицу — блюдо появится снова.
+          </p>
+        </div>
+      </section>
+    )
+  }
+
   // 404 — не то же самое, что «не удалось получить данные»: это не сбой
   // связи или сервера, а прямой ответ «такой карточки не существует».
   // Кнопка «Повторить» здесь не нужна: тот же legacy_id вернёт тот же 404.
