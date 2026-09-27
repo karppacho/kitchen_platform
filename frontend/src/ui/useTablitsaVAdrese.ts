@@ -42,6 +42,8 @@ export function useTablitsaVAdrese<T>(kolonki: readonly OpisanieKolonki<T>[]): T
   // setSearchParams не спасает — в React Router 6 она видит параметры того же
   // рендера. Поэтому ref: запись обновляет его сразу, а адрес, сменившийся
   // снаружи (ссылка, «назад»), — до того, как успеет сработать обработчик.
+  // Держится на том, что навигация — срочное обновление: флага
+  // v7_startTransition в приложении нет; включат его — пересмотреть.
   const svezhie = useRef(params)
   useLayoutEffect(() => {
     // useSearchParams меняет объект только при смене адреса, так что рендер
@@ -52,6 +54,9 @@ export function useTablitsaVAdrese<T>(kolonki: readonly OpisanieKolonki<T>[]): T
   function izmenit(fn: (s: SostoyanieTablitsy) => SostoyanieTablitsy) {
     const prezhnie = svezhie.current
     const novye = zapisatAdres(prezhnie, fn(prochitatAdres(prezhnie, kolonki)), kolonki)
+    // Тот же адрес — не навигация: даже replace заменяет запись истории на
+    // новую — с другим key и без state, с которым пришли на экран.
+    if (novye.toString() === prezhnie.toString()) return
     svezhie.current = novye
     setParams(novye, { replace: true })
   }

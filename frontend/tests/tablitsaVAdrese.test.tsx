@@ -33,7 +33,7 @@ const KOLONKI: OpisanieKolonki<Stroka>[] = [
 ]
 
 let tablitsa: TablitsaVAdrese
-let zond: { search: string; tip: string; idti: NavigateFunction }
+let zond: { search: string; klyuch: string; tip: string; idti: NavigateFunction }
 
 function Igrushka() {
   tablitsa = useTablitsaVAdrese(KOLONKI)
@@ -41,7 +41,8 @@ function Igrushka() {
 }
 
 function Zond() {
-  zond = { search: useLocation().search, tip: useNavigationType(), idti: useNavigate() }
+  const { search, key } = useLocation()
+  zond = { search, klyuch: key, tip: useNavigationType(), idti: useNavigate() }
   return null
 }
 
@@ -96,6 +97,13 @@ test('щелчок по заголовку: по возрастанию, по у
   expect(zond.search).toBe('?sort=-name')
   act(() => tablitsa.pereklyuchitSortirovku('price'))
   expect(zond.search).toBe('?sort=price')
+})
+
+test('выбор «Без сортировки» убирает sort из адреса', () => {
+  narisovat('/?sort=-price&status=архивный')
+  act(() => tablitsa.zadatSortirovku(null))
+  expect(parametry()).toEqual([['status', 'архивный']])
+  expect(tablitsa.sostoyanie.sortirovka).toBeNull()
 })
 
 test('сортировка и выбор в одном обработчике — в адресе оба', () => {
@@ -173,6 +181,19 @@ test('запись в адрес заменяет запись истории, �
   podozhdat(300)
   expect(zond.search).toContain('search=')
   expect(zond.tip).toBe('REPLACE')
+})
+
+test('запись, не меняющая адреса, не навигирует', () => {
+  // Лишняя навигация, даже с replace, — новая запись истории со своим key и
+  // пустым state: state, с которым пришли на список, пропал бы.
+  narisovat('/?sort=name')
+  const klyuch = zond.klyuch
+  act(() => tablitsa.sbrositVsyo())
+  podozhdat(400)
+  expect(zond.klyuch).toBe(klyuch)
+  expect(zond.tip).toBe('POP')
+  act(() => tablitsa.zadatVybor('status', []))
+  expect(zond.klyuch).toBe(klyuch)
 })
 
 test('адрес, сменённый снаружи, следующая запись не затирает', () => {

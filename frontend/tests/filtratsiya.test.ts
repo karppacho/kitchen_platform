@@ -87,6 +87,16 @@ test('группы — у колонок с фильтром; значения �
   })
 })
 
+test('«Соус» и «соус» в списке галочек — в одном порядке, как бы ни шли строки', () => {
+  // Для Collator они равны, а для фильтра — разные значения. Без второго
+  // ключа их порядок зависел бы от порядка строк в ответе сервера.
+  const sKategoriey = (category: string): Blyudo => ({ id: 'B001', name: 'Соус', category, status: '', price: null })
+  const poryadok = (kategorii: string[]) =>
+    gruppa(sobratGruppy(kategorii.map(sKategoriey), KOLONKI, {}), 'category')?.varianty.map((v) => v.kod)
+  expect(poryadok(['соус', '', 'Соус'])).toEqual(['Соус', 'соус', ''])
+  expect(poryadok(['Соус', '', 'соус'])).toEqual(['Соус', 'соус', ''])
+})
+
 test('счётчики группы не зависят от её выбора, но учитывают чужие группы и поиск', () => {
   const gruppy = sobratGruppy(BLYUDA, KOLONKI, { category: ['Пицца'] })
   // Свой выбор не сужает свой список: иначе к «Пицце» не добавить «Соус».

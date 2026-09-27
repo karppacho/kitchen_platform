@@ -14,8 +14,13 @@
  * не трогает.
  */
 
-import { sravnitTekst } from './sravnenie'
-import type { OpisanieKolonki, SostoyanieTablitsy, SposobFiltra, Sortirovka } from './tablitsa'
+import {
+  sravnitZnacheniyaFiltra,
+  type OpisanieKolonki,
+  type SostoyanieTablitsy,
+  type SposobFiltra,
+  type Sortirovka,
+} from './tablitsa'
 
 export const PARAM_POISKA = 'search'
 export const PARAM_SORTIROVKI = 'sort'
@@ -110,14 +115,9 @@ function sortiruetsya<T>(kolonki: readonly OpisanieKolonki<T>[], kolonka: string
  * Коды выбора без повторов и в одном порядке. У условий — только известные
  * коды, в порядке объявления (`price=foo` отбрасывается). У списка значений
  * годится любое: значения приходят из ответа сервера, заранее их не знает
- * никто, — порядок как в списке галочек: по алфавиту, «(пусто)» последним.
+ * никто, — порядок тот же, что в списке галочек (одна функция на оба места).
  */
 function dopustimye<T>(f: SposobFiltra<T>, kody: readonly string[]): string[] {
   if (f.vid === 'usloviya') return f.usloviya.map((u) => u.kod).filter((kod) => kody.includes(kod))
-  return [...new Set(kody)].sort((a, b) => {
-    if ((a === '') !== (b === '')) return a === '' ? 1 : -1
-    // «Соус» и «соус» для Collator равны, а для фильтра — разные значения;
-    // без второго ключа их порядок зависел бы от порядка отметок.
-    return sravnitTekst(a, b) || (a < b ? -1 : a > b ? 1 : 0)
-  })
+  return [...new Set(kody)].sort(sravnitZnacheniyaFiltra)
 }

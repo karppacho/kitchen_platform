@@ -185,10 +185,18 @@ function variantyZnacheniy<T>(
     schyot: n,
     vybran: vybrano.includes(kod),
   }))
-  return varianty.sort((a, b) => {
-    if ((a.kod === '') !== (b.kod === '')) return a.kod === '' ? 1 : -1
-    return sravnitTekst(a.kod, b.kod)
-  })
+  return varianty.sort((a, b) => sravnitZnacheniyaFiltra(a.kod, b.kod))
+}
+
+/**
+ * Порядок значений фильтра — в списке галочек и в адресе: по алфавиту,
+ * «(пусто)» последним. «Соус» и «соус» для Collator равны, а для фильтра —
+ * разные значения; без второго ключа их порядок зависел бы от порядка строк
+ * в ответе или отметок в адресе.
+ */
+export function sravnitZnacheniyaFiltra(a: string, b: string): number {
+  if ((a === '') !== (b === '')) return a === '' ? 1 : -1
+  return sravnitTekst(a, b) || (a < b ? -1 : a > b ? 1 : 0)
 }
 
 /**

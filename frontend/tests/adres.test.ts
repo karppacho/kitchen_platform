@@ -100,6 +100,26 @@ test('порядок параметров не зависит от порядк�
   ])
 })
 
+test('«Соус» и «соус» — в порядке списка галочек, как бы их ни отмечали', () => {
+  // Один вид — одна ссылка: для Collator они равны, порядок решает второй ключ.
+  const ozhidaemo = [
+    ['category', 'Соус'],
+    ['category', 'соус'],
+    ['category', ''],
+  ]
+  expect([...zapisat(sostoyanie({ vybor: { category: ['соус', '', 'Соус'] } }))]).toEqual(ozhidaemo)
+  expect([...zapisat(sostoyanie({ vybor: { category: ['Соус', '', 'соус'] } }))]).toEqual(ozhidaemo)
+})
+
+test('запись не трогает прежние параметры', () => {
+  // Прежние — это параметры роутера: правка на месте поменяла бы адрес мимо
+  // навигации.
+  const prezhnie = new URLSearchParams('tab=2&search=старое&sort=name&category=Блюдо')
+  const doZapisi = prezhnie.toString()
+  zapisatAdres(prezhnie, sostoyanie({ poisk: 'соус', vybor: { category: ['Соус'], uc: ['vyshe'] } }), K)
+  expect(prezhnie.toString()).toBe(doZapisi)
+})
+
 test('чужие параметры целы', () => {
   const s = sostoyanie({ vybor: { category: ['Новое'] } })
   expect([...zapisat(s, 'tab=2&category=Старое&utm=a&sort=name&utm=b')]).toEqual([
