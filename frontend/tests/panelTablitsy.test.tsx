@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { beforeEach, expect, test, vi } from 'vitest'
@@ -251,7 +251,7 @@ test('без включённых фильтров фишек нет', () => {
   expect(spisokFishek()).not.toBeInTheDocument()
 })
 
-test('× снимает фильтр колонки; фокус — на следующую фишку, за последней — на поиск', async () => {
+test('на 1440 px × снимает фильтр колонки; фокус — на следующую фишку, фишек нет — на поиск', async () => {
   const onVybor = vi.fn()
   render(<Stend vyborNachalo={{ category: ['Соус'], price: ['net'] }} onVybor={onVybor} />)
   await userEvent.click(fishka('Категория: Соус'))
@@ -265,19 +265,49 @@ test('× снимает фильтр колонки; фокус — на сле�
   expect(poisk()).toHaveFocus()
 })
 
-test('снятая последняя фишка — фокус на поиск, даже если фишки остались перед ней', async () => {
+test.each([1440, 360])('на %i px снятая последняя фишка — фокус на предыдущую', async (shirina) => {
+  setViewport(shirina)
   render(<Stend vyborNachalo={{ category: ['Соус'], price: ['net'] }} />)
   await userEvent.click(fishka('Цена: нет'))
-  expect(fishka('Категория: Соус')).toBeInTheDocument()
-  expect(poisk()).toHaveFocus()
+  expect(screen.queryByRole('button', { name: 'Снять фильтр «Цена: нет»' })).not.toBeInTheDocument()
+  expect(fishka('Категория: Соус')).toHaveFocus()
 })
 
-test('фишки и на 360 px', async () => {
+// На телефоне фокус на поле ввода из обработчика касания открывает экранную
+// клавиатуру на полэкрана (Chrome на Android фокусирует кнопку при
+// касании). Поэтому на узком запасная цель — «Фильтры», а не поиск.
+test('на 360 px снятая единственная фишка — фокус на «Фильтры», а не на поиск', async () => {
   setViewport(360)
   render(<Stend vyborNachalo={{ price: ['est'] }} />)
   await userEvent.click(fishka('Цена: есть'))
   expect(spisokFishek()).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Фильтры' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Фильтры' })).toHaveFocus()
+})
+
+test('на 360 px «Сбросить всё» — фокус на «Фильтры», а не на поиск', async () => {
+  setViewport(360)
+  render(<Stend vvodNachalo="кетч" vyborNachalo={{ price: ['est'] }} />)
+  await userEvent.click(sbrositVsyo()!)
+  expect(sbrositVsyo()).not.toBeInTheDocument()
+  expect(poisk()).toHaveValue('')
+  expect(screen.getByRole('button', { name: 'Фильтры' })).toHaveFocus()
+})
+
+test.each([1440, 360])('на %i px фишка и «Сбросить всё» без фокуса на них фокус не трогают', (shirina) => {
+  // Касание в iOS и щелчок в macOS кнопку не фокусируют: терять нечего, и
+  // переносить фокус незачем. fireEvent.click, в отличие от userEvent,
+  // фокуса не ставит.
+  setViewport(shirina)
+  render(<Stend vvodNachalo="кетч" vyborNachalo={{ category: ['Соус'], price: ['net'] }} />)
+  expect(document.body).toHaveFocus()
+  fireEvent.click(fishka('Категория: Соус'))
+  expect(document.body).toHaveFocus()
+  fireEvent.click(fishka('Цена: нет'))
+  expect(spisokFishek()).not.toBeInTheDocument()
+  expect(document.body).toHaveFocus()
+  fireEvent.click(sbrositVsyo()!)
+  expect(sbrositVsyo()).not.toBeInTheDocument()
+  expect(document.body).toHaveFocus()
 })
 
 test('«Сбросить всё» — только при активном поиске или фильтре', async () => {
@@ -293,7 +323,7 @@ test('«Сбросить всё» — только при активном по�
   expect(sbrositVsyo()).toBeInTheDocument()
 })
 
-test('«Сбросить всё» зовёт сброс, фокус — на поиск', async () => {
+test('на 1440 px «Сбросить всё» зовёт сброс, фокус — на поиск', async () => {
   // Кнопка пропадает вместе с отбором — фокус упал бы на body.
   const onSbrositVsyo = vi.fn()
   render(<Stend vvodNachalo="кетч" vyborNachalo={{ price: ['est'] }} onSbrositVsyo={onSbrositVsyo} />)

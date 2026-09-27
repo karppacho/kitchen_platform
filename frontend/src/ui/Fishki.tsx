@@ -8,7 +8,8 @@ type Props = {
   gruppy: readonly GruppaFiltra[]
   /** Снять фильтр колонки целиком. */
   onSnyat: (kolonka: string) => void
-  /** Куда деть фокус, когда за снятой фишкой других нет, — на поиск. */
+  /** Куда деть фокус, когда снята последняя фишка: решает панель — на
+      узком экране это «Фильтры», на широком поиск. */
   fokusDalshe: () => void
 }
 
@@ -25,13 +26,14 @@ export function Fishki({ gruppy, onSnyat, fokusDalshe }: Props) {
 
   function snyat(event: MouseEvent<HTMLButtonElement>, kolonka: string, mesto: number) {
     // Снятая фишка исчезнет, и фокус с неё упал бы на body. Переносим его
-    // сразу, пока следующая на месте: фишки — по ключу колонки, и соседки
-    // переживут перерисовку. Фокуса на фишке нет (касание в iOS, щелчок в
-    // macOS) — терять нечего, и поле поиска не должно само вызвать
-    // экранную клавиатуру.
+    // сразу, пока соседки на месте: фишки — по ключу колонки, и соседки
+    // переживут перерисовку. Сначала следующая, за последней — предыдущая:
+    // фокус остаётся среди фишек, пока они есть. Фокуса на фишке нет
+    // (касание в iOS, щелчок в macOS) — терять нечего, не трогаем.
     if (event.currentTarget === document.activeElement) {
-      const sleduyushchaya = spisok.current?.querySelectorAll('button')[mesto + 1]
-      if (sleduyushchaya) sleduyushchaya.focus()
+      const knopki = spisok.current?.querySelectorAll('button')
+      const sosedka = knopki?.[mesto + 1] ?? knopki?.[mesto - 1]
+      if (sosedka) sosedka.focus()
       else fokusDalshe()
     }
     onSnyat(kolonka)

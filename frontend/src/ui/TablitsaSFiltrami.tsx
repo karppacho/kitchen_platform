@@ -22,6 +22,9 @@ type Props<T> = {
   /** Открыть строку. `adresSpiska` — `?…` или `''`: вид списка с поиском,
       ещё не ушедшим в адрес, — для возврата из карточки. */
   onOpen?: (r: T, adresSpiska: string) => void
+  /** Текст экрана, когда строк нет вовсе. Когда их отсеяли поиск и
+      фильтры, — «Ничего не найдено». */
+  empty: string
 }
 
 /**
@@ -30,7 +33,7 @@ type Props<T> = {
  * `primenit`, над таблицей — панель, в шапке — кнопки колонок. Экрану
  * остаётся описать колонки и дать строки.
  */
-export function TablitsaSFiltrami<T>({ stroki, kolonki, poiskPo, rowKey, rowClass, onOpen }: Props<T>) {
+export function TablitsaSFiltrami<T>({ stroki, kolonki, poiskPo, rowKey, rowClass, onOpen, empty }: Props<T>) {
   const tablitsa = useTablitsaVAdrese(kolonki)
   const { sostoyanie } = tablitsa
   const itog = useMemo(() => primenit(stroki, kolonki, sostoyanie, poiskPo), [stroki, kolonki, sostoyanie, poiskPo])
@@ -58,7 +61,9 @@ export function TablitsaSFiltrami<T>({ stroki, kolonki, poiskPo, rowKey, rowClas
         // только что, уходит в адрес через 300 мс, а открыть строку шеф
         // может и раньше.
         onOpen={onOpen && ((r) => onOpen(r, tablitsa.adresSeychas()))}
-        empty="Ничего не найдено"
+        // Пустой справочник — не «не найдено»: искать было не в чем, даже
+        // если поиск набран.
+        empty={itog.vsego === 0 ? empty : 'Ничего не найдено'}
         sortirovka={sostoyanie.sortirovka}
         zagolovok={(k) => (
           <ZagolovokKolonki

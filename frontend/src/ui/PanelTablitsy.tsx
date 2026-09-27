@@ -1,4 +1,4 @@
-import { useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
+import { useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject } from 'react'
 
 import { kodSortirovki, poiskIliPusto, razobratKodSortirovki } from '../domain/adres'
 import { variantySortirovki, type GruppaFiltra, type OpisanieKolonki, type Sortirovka } from '../domain/tablitsa'
@@ -45,13 +45,24 @@ export function PanelTablitsy<T>({
 }: Props<T>) {
   const wide = useWide()
   const pole = useRef<HTMLInputElement>(null)
+  const knopkaFiltrov = useRef<HTMLButtonElement>(null)
   // Поиск из одних пробелов ничего не отбирает — и сбрасывать в нём нечего.
   const estOtbor = poiskIliPusto(vvod) !== '' || gruppy.some((g) => g.aktivna)
 
+  // Куда фокус, когда исчезла кнопка отбора (последняя фишка, «Сбросить
+  // всё»), а соседок не осталось. На широком — поиск: с него начинают
+  // заново. На узком — «Фильтры»: фокус на поле ввода из обработчика
+  // касания открыл бы экранную клавиатуру на полэкрана (Chrome на Android
+  // фокусирует кнопку при касании, и сюда доходит).
+  function zapasnoyFokus() {
+    if (wide) pole.current?.focus()
+    else knopkaFiltrov.current?.focus()
+  }
+
   function sbrosit(event: MouseEvent<HTMLButtonElement>) {
-    // Кнопка пропадёт вместе с отбором — фокус с неё уходит на поиск: с
-    // него обычно и начинают заново. Как у фишек: нет фокуса — не трогаем.
-    if (event.currentTarget === document.activeElement) pole.current?.focus()
+    // Кнопка пропадёт вместе с отбором. Как у фишек: фокуса на ней нет
+    // (касание в iOS, щелчок в macOS) — терять нечего, не трогаем.
+    if (event.currentTarget === document.activeElement) zapasnoyFokus()
     onSbrositVsyo()
   }
 
@@ -75,6 +86,7 @@ export function PanelTablitsy<T>({
       </div>
       {!wide && (
         <UzkoeUpravlenie
+          knopka={knopkaFiltrov}
           kolonki={kolonki}
           sortirovka={sortirovka}
           onSortirovka={onSortirovka}
@@ -89,7 +101,7 @@ export function PanelTablitsy<T>({
           <Fishki
             gruppy={gruppy}
             onSnyat={(kolonka) => onVybor(kolonka, [])}
-            fokusDalshe={() => pole.current?.focus()}
+            fokusDalshe={zapasnoyFokus}
           />
           <button type="button" className="panel-tablitsy-sbros" onClick={sbrosit}>
             Сбросить всё
@@ -100,15 +112,18 @@ export function PanelTablitsy<T>({
   )
 }
 
-type SvoystvaUzkogo<T> = Pick<Props<T>, 'kolonki' | 'sortirovka' | 'onSortirovka' | 'gruppy' | 'onVybor'>
+type SvoystvaUzkogo<T> = Pick<Props<T>, 'kolonki' | 'sortirovka' | 'onSortirovka' | 'gruppy' | 'onVybor'> & {
+  /** Кнопка «Фильтры» — у панели: на неё же уходит фокус с исчезнувших
+      фишек и «Сбросить всё». */
+  knopka: RefObject<HTMLButtonElement>
+}
 
 /**
  * Сортировка и фильтры на узком экране. «Фильтры» раскрывают панель в
  * потоке страницы, а не поверх: на телефоне всплывающей панели негде
  * встать, а группы галочек — те же, что под значками шапки.
  */
-function UzkoeUpravlenie<T>({ kolonki, sortirovka, onSortirovka, gruppy, onVybor }: SvoystvaUzkogo<T>) {
-  const knopka = useRef<HTMLButtonElement>(null)
+function UzkoeUpravlenie<T>({ knopka, kolonki, sortirovka, onSortirovka, gruppy, onVybor }: SvoystvaUzkogo<T>) {
   const [otkryty, otkryt] = useState(false)
   const idPaneli = useId()
   const punkty = useMemo(() => variantySortirovki(kolonki), [kolonki])

@@ -66,12 +66,24 @@ function Zond() {
   return null
 }
 
-function narisovat(nachalo = '/', onOpen?: (r: Blyudo, adresSpiska: string) => void) {
+// Текст экрана для пустого списка — у каждого экрана свой.
+const PUSTO_EKRANA = 'Блюд пока нет'
+
+type Nastroyki = { onOpen?: (r: Blyudo, adresSpiska: string) => void; stroki?: Blyudo[] }
+
+function narisovat(nachalo = '/', { onOpen, stroki = BLYUDA }: Nastroyki = {}) {
   return render(
     // Флаги — явно выключенные, как в приложении: поведение то же, а
     // предупреждение о будущих флагах не печатается.
     <MemoryRouter initialEntries={[nachalo]} future={{ v7_startTransition: false, v7_relativeSplatPath: false }}>
-      <TablitsaSFiltrami stroki={BLYUDA} kolonki={KOLONKI} poiskPo={POISK_PO} rowKey={(r) => r.id} onOpen={onOpen} />
+      <TablitsaSFiltrami
+        stroki={stroki}
+        kolonki={KOLONKI}
+        poiskPo={POISK_PO}
+        rowKey={(r) => r.id}
+        onOpen={onOpen}
+        empty={PUSTO_EKRANA}
+      />
       <Zond />
     </MemoryRouter>,
   )
@@ -143,7 +155,9 @@ test('всё отфильтровано: шапка и панель на мес�
   const u = polzovatel()
   narisovat('/?category=Пицца&price=net')
   expect(poryadok()).toEqual([])
+  // Строки есть, их отсеяли: «Ничего не найдено», а не «Блюд пока нет».
   expect(screen.getByText('Ничего не найдено')).toBeInTheDocument()
+  expect(screen.queryByText(PUSTO_EKRANA)).not.toBeInTheDocument()
   expect(screen.getAllByRole('columnheader').map((th) => th.getAttribute('aria-label'))).toEqual([
     'Название',
     'Категория',
@@ -165,6 +179,7 @@ test('всё отфильтровано на 360 px: «Фильтры» на м�
   narisovat('/?category=Пицца&price=net')
   expect(poryadok()).toEqual([])
   expect(screen.getByText('Ничего не найдено')).toBeInTheDocument()
+  expect(screen.queryByText(PUSTO_EKRANA)).not.toBeInTheDocument()
   expect(screen.getByText('Найдено: 0 из 4')).toBeInTheDocument()
 
   await u.click(screen.getByRole('button', { name: 'Фильтры (2)' }))
@@ -172,6 +187,19 @@ test('всё отфильтровано на 360 px: «Фильтры» на м�
   await u.click(within(filtry).getByRole('checkbox', { name: 'нет · 0' }))
   expect(poryadok()).toEqual(['Маргарита', 'Пепперони'])
   expect(parametry()).toEqual([['category', 'Пицца']])
+})
+
+test.each([1440, 360])('на %i px пустой список — текст экрана, а не «Ничего не найдено»', (shirina) => {
+  // Ничего не искали и не отбирали — «не найдено» было бы неправдой: строк
+  // просто нет. То же, если поиск набран, — искать было не в чем.
+  setViewport(shirina)
+  narisovat('/', { stroki: [] })
+  expect(screen.getByText(PUSTO_EKRANA)).toBeInTheDocument()
+  expect(screen.queryByText('Ничего не найдено')).not.toBeInTheDocument()
+  expect(screen.getByText('Найдено: 0 из 0')).toBeInTheDocument()
+  nabrat('пе')
+  expect(screen.getByText(PUSTO_EKRANA)).toBeInTheDocument()
+  expect(screen.queryByText('Ничего не найдено')).not.toBeInTheDocument()
 })
 
 test('поиск отбирает строки сразу — по названию и по id, в адрес — после паузы', async () => {
@@ -237,6 +265,23 @@ test('«Сбросить всё» снимает поиск и фильтры, �
   expect(screen.getByText('Найдено: 4 из 4')).toBeInTheDocument()
 })
 
+test('«Сбросить всё» в паузе поиска: отложенная запись поиск не вернёт', async () => {
+  // Всё — синхронным fireEvent: набранное не успевает уйти в адрес, и сброс
+  // застаёт поиск ещё в паузе.
+  narisovat()
+  nabrat('пе')
+  fireEvent.click(screen.getByRole('button', { name: 'Фильтр: Категория' }))
+  fireEvent.click(within(panel('Категория')).getByRole('checkbox', { name: 'Пицца · 1' }))
+  expect(parametry()).toEqual([['category', 'Пицца']])
+  fireEvent.click(screen.getByRole('button', { name: 'Сбросить всё' }))
+  expect(parametry()).toEqual([])
+  await podozhdat(350)
+  expect(parametry()).toEqual([])
+  expect(poisk()).toHaveValue('')
+  expect(poryadok()).toEqual(['Маргарита', 'Кетчуп', 'Пепперони', 'Песто'])
+  expect(screen.queryByRole('list', { name: 'Активные фильтры' })).not.toBeInTheDocument()
+})
+
 /** Один и тот же вид, набранный руками: сортировка по цене по убыванию,
     категория «Соус», поиск «е». Возвращает адрес и строки. */
 async function naShirokom() {
@@ -286,7 +331,7 @@ test.each([1440, 360])('onOpen на %i px получает строку и ад�
   // Шеф набрал «пе» и сразу открыл блюдо: «← Блюда» должна вернуть и поиск.
   setViewport(shirina)
   const onOpen = vi.fn()
-  narisovat('/?sort=-price', onOpen)
+  narisovat('/?sort=-price', { onOpen })
   nabrat('пе')
   expect(adres).toBe('?sort=-price')
   // Щелчок по названию всплывает до строки таблицы или кнопки карточки.
