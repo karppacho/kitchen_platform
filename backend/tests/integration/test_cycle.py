@@ -422,6 +422,20 @@ def test_kitchen_only_change_repairs_card_links(sessions) -> None:
     assert "Карточки: потеряли пару в справочнике — 1" in note
 
 
+def test_link_note_is_not_lost_among_other_warnings(sessions) -> None:
+    """Перемена пар доходит до журнала и среди шума: в живом ING десятки строк
+    без id, на каждую — замечание, а note прогона обрезается до двадцати
+    записей. Массовая потеря пар — единственный её след в журнале."""
+    clock = Clock()
+    _cycle(sessions, clock).run()
+    clock.tick()
+    blanks = [row(specs.INGREDIENTS, name="Заготовка") for _ in range(25)]
+
+    _cycle(sessions, clock, kitchen={"ING": [*_ing_without("1"), *blanks]}).run()
+
+    assert "Карточки: потеряли пару в справочнике — 1" in _import_notes(sessions)[-1]
+
+
 def test_kitchen_only_change_keeps_confirmed_link(sessions) -> None:
     """Переподбор идёт мимо пары, подтверждённой на сверке: это решение
     человека, а не предложение кода — даже когда позиция ушла из справочника."""

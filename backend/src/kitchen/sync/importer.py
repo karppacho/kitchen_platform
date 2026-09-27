@@ -64,6 +64,10 @@ class ImportResult:
     # они забивают note прогона раньше, чем до него доедет «скрыто» — а это
     # единственный след массового удаления в журнале (см. _mark_presence).
     presence: list[str] = field(default_factory=list)
+    # Сколько карточек получили, потеряли или сменили пару в справочнике — по
+    # той же причине отдельно от warnings: массовая потеря пар (шеф убрал из
+    # ING десяток позиций) обязана дойти до журнала.
+    links: list[str] = field(default_factory=list)
     unreadable: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -145,10 +149,10 @@ class Importer:
 
         run.finished_at = datetime.now(UTC)
         run.ok = result.ok
-        # presence — первым: это самое важное замечание прогона, и обрезка не
-        # имеет права его выбросить, пока в warnings болтаются десятки строк
-        # «пустой id».
-        run.note = "; ".join([*result.presence, *result.warnings][:20])
+        # presence и links — первыми: это самые важные замечания прогона, и
+        # обрезка не имеет права их выбросить, пока в warnings болтаются
+        # десятки строк «пустой id».
+        run.note = "; ".join([*result.presence, *result.links, *result.warnings][:20])
         session.flush()
         result.run_id = run.id
         return result
@@ -203,7 +207,14 @@ class Importer:
         self._import_components(
             session, sheets.get(specs.TTK.title), dishes, ingredients, packaging, methods, result
         )
-        self._import_cards(session, sheets.get(specs.INGREDIENT_CARDS.title), result, now)
+        cards = sheets.get(specs.INGREDIENT_CARDS.title)
+        self._import_cards(session, cards, result, now)
+        if cards is None and specs.INGREDIENTS.title in sheets:
+            # Лист карточек в этом переносе не участвует, а справочник
+            # обновился: пары карточек зависят и от него. Лист карточек
+            # заполнял бот, боты лежат — ждать его правки значило бы держать
+            # на сверке снятый спор тёзок и пару к удалённой позиции.
+            self._suggest_links(session, result)
 
     # ------------------------------------------------------------------
     def _import_ingredients(
@@ -413,15 +424,6 @@ class Importer:
         if data is None:
             return
 
-        # Удалённое из справочника не предлагаем в пару карточке: шеф уже
-        # сказал, что этой позиции больше нет.
-        index = NameIndex(
-            Entry(key=str(item.id), name=item.name, status=item.status)
-            for item in session.scalars(
-                select(models.Ingredient).where(models.Ingredient.removed_at.is_(None))
-            ).all()
-        )
-
         # У карточек нет идентификатора в листе — ключом служит имя.
         # Подтверждённые человеком связи переносятся: переимпорт не должен
         # обнулять чужую работу.
@@ -471,13 +473,11 @@ class Importer:
             card.approval_status = _text(row["approval_status"])
             _stamp(card, row)
 
-            if card.link_confirmed_at is None:
-                self._suggest_link(card, index)
-
             session.add(card)
             existing[key] = card
 
         _mark_presence(existing, seen, now, result, "Карточки")
+        self._suggest_links(session, result)
         session.flush()
 
         by_status: dict[str, int] = {}
@@ -487,6 +487,53 @@ class Importer:
         for status, number in sorted(by_status.items()):
             result.add(f"карточки: {status}", number)
         result.add("карточки", len(seen))
+
+    def _suggest_links(self, session: Session, result: ImportResult) -> None:
+        """Подобрать пары карточкам, чью связь не подтвердил человек.
+
+        Один путь на два случая: пара зависит от обеих книг — от имени
+        карточки и от справочника ING. Поэтому подбор идёт и при переносе
+        листа карточек, и при переносе одной кухни. Карточки берутся из базы:
+        прочитался ли их лист в этом цикле, неважно.
+
+        Подтверждённые связи не трогаем — решение за человеком. Скрытые
+        карточки тоже: вернётся строка — подберём.
+        """
+        # Удалённое из справочника не предлагаем в пару карточке: шеф уже
+        # сказал, что этой позиции больше нет.
+        index = NameIndex(
+            Entry(key=str(item.id), name=item.name, status=item.status)
+            for item in session.scalars(
+                select(models.Ingredient).where(models.Ingredient.removed_at.is_(None))
+            ).all()
+        )
+        cards = session.scalars(
+            select(models.IngredientCard).where(
+                models.IngredientCard.removed_at.is_(None),
+                models.IngredientCard.link_confirmed_at.is_(None),
+            )
+        ).all()
+
+        gained = lost = changed = 0
+        for card in cards:
+            before = card.ingredient_id
+            self._suggest_link(card, index)
+            if before == card.ingredient_id:
+                continue
+            if before is None:
+                gained += 1
+            elif card.ingredient_id is None:
+                lost += 1
+            else:
+                changed += 1
+
+        for number, what in (
+            (gained, "получили пару"),
+            (lost, "потеряли пару"),
+            (changed, "сменили пару"),
+        ):
+            if number:
+                result.links.append(f"Карточки: {what} в справочнике — {number}")
 
     def _suggest_link(self, card: models.IngredientCard, index: NameIndex) -> None:
         """Предложить пару. Именно предложить — решение за человеком."""

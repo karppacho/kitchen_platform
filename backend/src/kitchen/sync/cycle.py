@@ -7,27 +7,38 @@
 * **Книга переносится целиком или не переносится.** Лист не прочитан или у
   него сдвинулись колонки — книга в этом цикле не трогается, старые данные
   остаются, причина уходит на сайт. Колонки читаются по позиции: сдвиг дал бы
-  цену из колонки веса — тихо и каждые пять минут.
+  цену из колонки веса — тихо и каждые пять минут. База отвергла данные книги
+  при переносе — откатывается только эта книга (своя точка сохранения), и
+  причина тоже уходит на сайт.
 * **Только изменения.** Отпечаток книги совпал с перенесённым — в базу
   пишется одна отметка «проверено».
 * **Сбой в журнал — один раз**, когда причина появилась или сменилась. Рядом
   с причиной словами шефа — исходный текст ошибки: по нему её чинят.
+* **Не ждать вечно.** Чужая блокировка или зависший запрос роняют цикл по
+  пределу, и он повторится через пять минут.
 """
 
 from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 
 from kitchen.db import models
 from kitchen.sync import specs
 from kitchen.sync.client import GspreadClient
 from kitchen.sync.importer import Importer, ImportResult, take_import_lock
-from kitchen.sync.reader import BOOK_OPEN_FAILED, BOOK_READ_FAILED, SheetsReader, sheet_label
+from kitchen.sync.reader import (
+    BOOK_OPEN_FAILED,
+    BOOK_READ_FAILED,
+    SheetsReader,
+    describe_error,
+    sheet_label,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -85,8 +96,11 @@ _NO_ANSWER = (
     "unavailable",
 )
 
-_UNKNOWN = "причина неизвестна, подробности в журнале синхронизации"
-"""Хвост причины для отказа без перевода: сам исходник — в `details`."""
+_UNKNOWN = "причина не распознана — сообщите разработчику"
+"""Хвост причины для отказа без перевода: сам исходник — в `details`.
+
+Шеф журнала синхронизации не видит — отправлять его туда незачем. Ему нужно
+одно: что делать; разработчик найдёт исходник в журнале и логе воркера."""
 
 
 def explain(title: str, error: str) -> str:
@@ -99,8 +113,8 @@ def explain(title: str, error: str) -> str:
     одну.
 
     Непереведённое — постоянной фразой: что не удалось (открыть таблицу,
-    прочитать таблицу, прочитать лист «X») и что подробности в журнале
-    синхронизации. Сырого текста исключения здесь нет никогда: причину видит
+    прочитать таблицу, прочитать лист «X») и что причину нужно передать
+    разработчику. Сырого текста исключения здесь нет никогда: причину видит
     каждый вошедший на каждом экране (спека: простыми словами), а в исходнике —
     имя класса, путь к файлу ключа, ответ сервера. Исходник цикл кладёт в
     `details` — в журнал и лог воркера, по нему и чинят. Цена: разные
@@ -141,6 +155,21 @@ def explain(title: str, error: str) -> str:
     if error.startswith(BOOK_READ_FAILED):
         return f"не удалось прочитать таблицу — {_UNKNOWN}"
     return f"не удалось прочитать лист «{title}» — {_UNKNOWN}"
+
+
+def explain_import(error: SQLAlchemyError) -> str:
+    """Причина, по которой база не приняла перенос книги, — словами для шефа.
+
+    Книга прочиталась, заголовки на месте, а база отвергла значение: доля
+    потерь «150» без знака «%» не влезает в колонку, id длиннее 32 знаков.
+    Причина в ячейке, и сбой повторяется каждые пять минут, пока её не
+    исправят, — поэтому «на данных листа». Какая ячейка — видно по исходнику в
+    журнале, его читает разработчик. Прочее (таймаут, обрыв соединения) — без
+    догадки про лист.
+    """
+    if isinstance(error, DataError | IntegrityError):
+        return "перенос в базу не удался на данных листа — сообщите разработчику"
+    return "перенос в базу не удался — сообщите разработчику"
 
 
 _SHOWN_ISSUES = 3
@@ -216,7 +245,18 @@ class BookOutcome:
 @dataclass(slots=True)
 class CycleResult:
     outcomes: dict[str, BookOutcome] = field(default_factory=dict)
-    imported: ImportResult | None = None
+    imported: dict[str, ImportResult] = field(default_factory=dict)
+    """Итоги переноса по книгам. Книга переносится в своей точке сохранения,
+    и прогон журнала у каждой свой."""
+
+
+LOCK_TIMEOUT = timedelta(seconds=60)
+"""Сколько цикл ждёт чужую блокировку. Ручной импорт идёт секунды; минута —
+с запасом, а дольше — значит, тот завис."""
+
+STATEMENT_TIMEOUT = timedelta(seconds=120)
+"""Предел одного запроса. Перенос целиком идёт секунды; запрос дольше двух
+минут — зависший."""
 
 
 def _utcnow() -> datetime:
@@ -238,6 +278,23 @@ def reader_from(settings: Settings) -> SheetsReader:
             "tastings": settings.sheets_id_tastings,
         },
     )
+
+
+def _limit_waits(session: Session, lock: timedelta, statement: timedelta) -> None:
+    """Не ждать вечно ни чужой блокировки, ни зависшего запроса.
+
+    Цикл встаёт в очередь импорта и ждёт, пока другой перенос закончит.
+    Зависни тот (ручной импорт, забытый в консоли) — воркер ждал бы вечно, а
+    смоук этого не видит: контейнер работает. Упав по пределу, цикл повторится
+    через пять минут.
+
+    Только `SET LOCAL` — на эту транзакцию: через пулер в transaction-режиме
+    сессионный SET остался бы на чужом соединении. Параметров SET не
+    принимает; значение — целые миллисекунды из `timedelta`, не текст извне.
+    """
+    for name, limit in (("lock_timeout", lock), ("statement_timeout", statement)):
+        milliseconds = int(limit / timedelta(milliseconds=1))
+        session.execute(text(f"set local {name} = '{milliseconds}ms'"))
 
 
 def _mark_checked(state: models.SyncState, now: datetime) -> None:
@@ -278,10 +335,15 @@ class SyncCycle:
         reader: SheetsReader,
         sessions: sessionmaker[Session],
         clock: Callable[[], datetime] = _utcnow,
+        *,
+        lock_timeout: timedelta = LOCK_TIMEOUT,
+        statement_timeout: timedelta = STATEMENT_TIMEOUT,
     ) -> None:
         self._reader = reader
         self._sessions = sessions
         self._clock = clock
+        self._lock_timeout = lock_timeout
+        self._statement_timeout = statement_timeout
 
     def run(self, *, force: bool = False) -> CycleResult:
         """`force` — переносить и без изменений (ручной запуск)."""
@@ -289,8 +351,10 @@ class SyncCycle:
         sheets = self._reader.read_many(Importer.SPECS)
         verdicts = {book: judge(book, sheets) for book in BOOKS}
         result = CycleResult()
+        importer = Importer(self._reader, self._sessions)
 
         with self._sessions() as session, session.begin():
+            _limit_waits(session, self._lock_timeout, self._statement_timeout)
             take_import_lock(session)
             now = self._clock()
             states = {state.book: state for state in session.scalars(select(models.SyncState))}
@@ -317,19 +381,38 @@ class SyncCycle:
                     _mark_checked(state, now)
                     result.outcomes[book] = BookOutcome("unchanged")
 
-            if to_import:
-                wanted = {sheet_label(spec) for book in to_import for spec in BOOKS[book]}
-                result.imported = Importer(self._reader, self._sessions).apply(
-                    session, {label: data for label, data in sheets.items() if label in wanted}
-                )
-                for book in to_import:
-                    state = states[book]
-                    fingerprint = verdicts[book].fingerprint
-                    if state.fingerprint != fingerprint:
-                        state.changed_at = now
-                    state.fingerprint = fingerprint
-                    state.read_started_at = read_started_at
-                    _mark_checked(state, now)
-                    result.outcomes[book] = BookOutcome("imported")
+            # В порядке BOOKS: кухня раньше карточек — пары карточек
+            # подбираются по уже обновлённому справочнику.
+            for book in to_import:
+                state = states[book]
+                wanted = {sheet_label(spec) for spec in BOOKS[book]}
+                try:
+                    # Своя точка сохранения у каждой книги. База отвергла данные
+                    # одной — откатывается только она, а другая книга, причина
+                    # и событие журнала уходят тем же коммитом. Без этого одна
+                    # ячейка шефа останавливала бы всю синхронизацию, а сайт
+                    # через 15 минут сказал бы «синхронизация не запущена».
+                    with session.begin_nested():
+                        imported = importer.apply(
+                            session,
+                            {label: data for label, data in sheets.items() if label in wanted},
+                        )
+                except SQLAlchemyError as error:
+                    # Только ошибки базы: остальное — поломка кода, её ловит
+                    # и пишет в лог цикл воркера.
+                    problem = explain_import(error)
+                    details = describe_error(error)
+                    _record_failure(session, state, problem, details, now)
+                    result.outcomes[book] = BookOutcome("failed", problem, details)
+                    continue
+
+                result.imported[book] = imported
+                fingerprint = verdicts[book].fingerprint
+                if state.fingerprint != fingerprint:
+                    state.changed_at = now
+                state.fingerprint = fingerprint
+                state.read_started_at = read_started_at
+                _mark_checked(state, now)
+                result.outcomes[book] = BookOutcome("imported")
 
         return result

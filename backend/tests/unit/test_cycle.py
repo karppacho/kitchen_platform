@@ -8,10 +8,11 @@ import pytest
 import requests
 from google.auth.exceptions import RefreshError
 from gspread.exceptions import APIError, SpreadsheetNotFound
+from sqlalchemy.exc import DataError, IntegrityError, OperationalError, SQLAlchemyError
 
 from kitchen.config import Settings
 from kitchen.sync import specs
-from kitchen.sync.cycle import BOOKS, explain, judge, reader_from
+from kitchen.sync.cycle import BOOKS, explain, explain_import, judge, reader_from
 from kitchen.sync.importer import Importer
 from kitchen.sync.reader import (
     BOOK_OPEN_FAILED,
@@ -32,7 +33,7 @@ NOT_FOUND = (
     "и доступ сервисного аккаунта"
 )
 NO_ANSWER = "Google не ответил — следующая попытка через 5 минут"
-UNKNOWN = "причина неизвестна, подробности в журнале синхронизации"
+UNKNOWN = "причина не распознана — сообщите разработчику"
 OPEN_UNKNOWN = f"не удалось открыть таблицу — {UNKNOWN}"
 READ_UNKNOWN = f"не удалось прочитать таблицу — {UNKNOWN}"
 
@@ -483,6 +484,36 @@ def test_long_raw_error_is_kept_whole_for_the_journal() -> None:
 
     assert verdict.problem == OPEN_UNKNOWN
     assert verdict.details == raw
+
+
+# ---------------------------------------------------------------------------
+# Перенос книги упал в базе — причина тоже простыми словами
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("error", "problem"),
+    [
+        (
+            DataError("UPDATE ingredients …", {}, Exception("numeric field overflow")),
+            "перенос в базу не удался на данных листа — сообщите разработчику",
+        ),
+        (
+            IntegrityError("INSERT INTO dishes …", {}, Exception("duplicate key value")),
+            "перенос в базу не удался на данных листа — сообщите разработчику",
+        ),
+        (
+            OperationalError("DELETE FROM dish_components …", {}, Exception("statement timeout")),
+            "перенос в базу не удался — сообщите разработчику",
+        ),
+    ],
+    ids=["data", "integrity", "other"],
+)
+def test_import_failure_speaks_plainly(error: SQLAlchemyError, problem: str) -> None:
+    """База отвергла значения из листа — так и говорим: чинить, скорее всего,
+    ячейку. Прочее (таймаут, обрыв) — без догадки про лист. Исходник — не
+    здесь, а в журнале."""
+    assert explain_import(error) == problem
 
 
 # ---------------------------------------------------------------------------
