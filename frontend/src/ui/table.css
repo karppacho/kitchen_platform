@@ -42,6 +42,34 @@
   color: var(--tekst);
 }
 
+/* Название с сортировкой и воронка — в ряд. Базовая линия ряда — у текста
+   кнопки сортировки (текст в ней первым), воронка — по центру строки.
+   Значки 14 px ниже строки текста 19,6 px (14px × 1.4), так что строка
+   шапки той же высоты, что с одним текстом. */
+.zagolovok {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--shag) * 2);
+}
+
+/* Воронка 14 px — мелкая цель для мыши. Поле вокруг неё расширяет цель до
+   22 px, отрицательное поле возвращает место: строка не растёт, значок
+   стоит, где стоял. */
+.tablitsa .zagolovok-filtr {
+  padding: var(--shag);
+  margin: calc(var(--shag) * -1);
+}
+
+/* Фильтр колонки включён — воронка залита акцентом: видно, какие колонки
+   сужают список, не открывая панелей. */
+.tablitsa .zagolovok-filtr--aktiven {
+  color: var(--aktsent);
+}
+
+.zagolovok-filtr--aktiven svg {
+  fill: currentColor;
+}
+
 .tablitsa .vpravo,
 .spisok .vpravo {
   text-align: right;
