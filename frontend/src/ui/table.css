@@ -22,6 +22,26 @@
   white-space: nowrap;
 }
 
+/* В заголовке — кнопки сортировки и фильтра. Выглядят как сам заголовок:
+   шапка остаётся шапкой, а не рядом кнопок; фокус с клавиатуры виден по
+   общему :focus-visible. */
+.tablitsa th button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--shag);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.tablitsa th button:hover {
+  color: var(--tekst);
+}
+
 .tablitsa .vpravo,
 .spisok .vpravo {
   text-align: right;
@@ -35,6 +55,16 @@
 
 .tablitsa tbody tr:hover {
   background: var(--fon);
+}
+
+/* Пустой результат на широком — строка во всю ширину под шапкой. Она не
+   открывается, поэтому и не подсвечивается. */
+.tablitsa tbody tr.stroka-pusto:hover {
+  background: none;
+}
+
+.tablitsa .pusto {
+  padding: calc(var(--shag) * 4) calc(var(--shag) * 2);
 }
 
 /* Себестоимость выше цены меню. Почти всегда это перепутанная единица
