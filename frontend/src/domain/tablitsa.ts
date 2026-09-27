@@ -101,6 +101,7 @@ function sravnitChisla(a: string | number, b: string | number): number {
 // Только для колонки, где числа и строки вперемешку (на деле такой нет).
 // Целые — через BigInt: String(1e21) дал бы «1e+21», а это не десятичная
 // запись. Дробных такого размера не бывает: все числа от 2^53 — целые.
+// Дробь меньше 1e-6 String() тоже пишет с «e» — она стала бы «неразбираемой».
 function desyatichnaya(x: string | number): string {
   if (typeof x === 'string') return x
   return Number.isInteger(x) ? BigInt(x).toString() : String(x)
