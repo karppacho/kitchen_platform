@@ -17,31 +17,44 @@ type Props = {
  */
 export function Galochki({ gruppa, onVybor }: Props) {
   const pole = useRef<HTMLFieldSetElement>(null)
-  const posleSbrosa = useRef(false)
+  // Место тронутой галочки (у «Сбросить» — 0), пока правка не вернулась
+  // новой группой.
+  const pravka = useRef<number | null>(null)
 
-  // «Сбросить» пропадает вместе с активностью группы, а фокус был на нём:
-  // без этого он упал бы на body, вон из панели. Ставим после перерисовки,
-  // а не сразу: вместе со сбросом уходят отмеченные значения без строк, и
-  // первая галочка до сброса могла исчезнуть.
+  // Правка из группы может убрать элемент с фокусом: снятая галочка
+  // значения без строк пропадает из списка, «Сбросить» — вместе с
+  // активностью группы, а со сбросом могут уйти и все значения. Фокус упал
+  // бы на body — вон из панели и её ловушки Tab. Ставим его на галочку,
+  // вставшую на то же место (или на последнюю), а если галочек не осталось
+  // — на саму группу. После перерисовки, а не в обработчике: что исчезнет,
+  // видно только по новой группе.
   useLayoutEffect(() => {
-    if (!posleSbrosa.current || gruppa.aktivna) return
-    posleSbrosa.current = false
-    pole.current?.querySelector('input')?.focus()
-  }, [gruppa.aktivna])
+    const mesto = pravka.current
+    const gruppaDom = pole.current
+    if (mesto === null || gruppaDom === null) return
+    pravka.current = null
+    if (gruppaDom.contains(document.activeElement)) return
+    const galochki = gruppaDom.querySelectorAll('input')
+    const tsel = galochki[Math.min(mesto, galochki.length - 1)] ?? gruppaDom
+    tsel.focus()
+  }, [gruppa])
 
-  function pereklyuchit(kod: string) {
+  function pereklyuchit(kod: string, mesto: number) {
+    pravka.current = mesto
     // Остальные отметки — как были: внутри колонки значения складываются.
     const kody = gruppa.varianty.filter((v) => (v.kod === kod ? !v.vybran : v.vybran)).map((v) => v.kod)
     onVybor(gruppa.kolonka, kody)
   }
 
   return (
-    <fieldset ref={pole} className="galochki">
+    // tabIndex -1 — только чтобы группа могла принять фокус, когда галочек
+    // в ней не осталось; в порядок Tab она не встаёт.
+    <fieldset ref={pole} className="galochki" tabIndex={-1}>
       <legend>{gruppa.zagolovok}</legend>
       {gruppa.varianty.length === 0 && <p className="galochki-net">Нет значений</p>}
-      {gruppa.varianty.map((v) => (
+      {gruppa.varianty.map((v, mesto) => (
         <label key={v.kod} className="galochki-variant">
-          <input type="checkbox" checked={v.vybran} onChange={() => pereklyuchit(v.kod)} />
+          <input type="checkbox" checked={v.vybran} onChange={() => pereklyuchit(v.kod, mesto)} />
           <span>
             <span className={v.kod === '' ? 'galochki-pusto' : undefined}>{v.podpis}</span>
             <span className="galochki-schyot"> · {v.schyot}</span>
@@ -53,7 +66,7 @@ export function Galochki({ gruppa, onVybor }: Props) {
           type="button"
           className="galochki-sbros"
           onClick={() => {
-            posleSbrosa.current = true
+            pravka.current = 0
             onVybor(gruppa.kolonka, [])
           }}
         >

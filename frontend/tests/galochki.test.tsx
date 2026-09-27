@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { expect, test } from 'vitest'
@@ -95,10 +95,19 @@ const KOLONKI: OpisanieKolonki<Blyudo>[] = [
 ]
 const BLYUDA: Blyudo[] = [{ category: 'Пицца' }, { category: 'Пицца' }, { category: 'Соус' }]
 
-function SVyborom({ nachalo }: { nachalo: string[] }) {
+function SVyborom({ nachalo, stroki = BLYUDA }: { nachalo: string[]; stroki?: Blyudo[] }) {
   const [vybrano, zadat] = useState<readonly string[]>(nachalo)
-  const [gruppa] = sobratGruppy(BLYUDA, KOLONKI, { category: vybrano })
+  const [gruppa] = sobratGruppy(stroki, KOLONKI, { category: vybrano })
   return <Galochki gruppa={gruppa!} onVybor={(_, kody) => zadat(kody)} />
+}
+
+const gruppaKategorii = () => screen.getByRole('group', { name: 'Категория' })
+
+/** Tab до галочки и пробел — как с клавиатуры. */
+async function probelom(imya: string) {
+  await userEvent.tab()
+  while (document.activeElement !== galochka(imya)) await userEvent.tab()
+  await userEvent.keyboard(' ')
 }
 
 test('отметки копятся и снимаются по одной', async () => {
@@ -122,4 +131,48 @@ test('после «Сбросить» фокус — на первой гало�
   expect(screen.queryByRole('checkbox', { name: 'Акция · 0' })).not.toBeInTheDocument()
   expect(galochka('Пицца · 2')).toHaveFocus()
   expect(screen.getAllByRole('checkbox').filter((c) => (c as HTMLInputElement).checked)).toEqual([])
+})
+
+test('снятая галочка без строк исчезает, фокус — на вставшей на её место', async () => {
+  // Строк у «Рыбы» нет (их отсеяли поиск или другая колонка): снятая, она
+  // пропадает из списка. «Соус» ещё отмечен — группа остаётся активной.
+  render(<SVyborom nachalo={['Рыба', 'Соус']} />)
+  await probelom('Рыба · 0')
+  expect(screen.queryByRole('checkbox', { name: 'Рыба · 0' })).not.toBeInTheDocument()
+  expect(galochka('Соус · 1')).toHaveFocus()
+})
+
+test('снятая последней галочка без строк — фокус на новой последней', async () => {
+  render(<SVyborom nachalo={['Суп']} />)
+  await probelom('Суп · 0')
+  expect(screen.queryByRole('checkbox', { name: 'Суп · 0' })).not.toBeInTheDocument()
+  expect(galochka('Соус · 1')).toHaveFocus()
+})
+
+test('галочек не осталось — фокус на самой группе, а не на body', async () => {
+  // Шапка видна и при 0 строках: отмечены только значения без строк.
+  render(<SVyborom nachalo={['Акция']} stroki={[]} />)
+  await userEvent.click(screen.getByRole('button', { name: 'Сбросить' }))
+  expect(within(gruppaKategorii()).getByText('Нет значений')).toBeInTheDocument()
+  expect(gruppaKategorii()).toHaveFocus()
+})
+
+test('снятая единственная галочка без строк — фокус на самой группе', async () => {
+  render(<SVyborom nachalo={['Акция']} stroki={[]} />)
+  await probelom('Акция · 0')
+  expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+  expect(gruppaKategorii()).toHaveFocus()
+})
+
+test('фокус переносится, только если потерян', async () => {
+  render(<SVyborom nachalo={['Пицца']} />)
+  // Галочка со строками после снятия остаётся — фокус на ней же.
+  await probelom('Пицца · 2')
+  expect(galochka('Пицца · 2')).not.toBeChecked()
+  expect(galochka('Пицца · 2')).toHaveFocus()
+  // Safari по щелчку мышью фокус на галочку не ставит, он остаётся где был
+  // (fireEvent.click фокус и не трогает) — туда, где щёлкнули, не прыгает.
+  fireEvent.click(galochka('Соус · 1'))
+  expect(galochka('Соус · 1')).toBeChecked()
+  expect(galochka('Пицца · 2')).toHaveFocus()
 })

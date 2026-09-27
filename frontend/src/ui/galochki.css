@@ -63,7 +63,8 @@
 
 /* Под палец строки выше: на телефоне те же галочки во встроенных «Фильтрах». */
 @media (pointer: coarse) {
-  .galochki-variant {
+  .galochki-variant,
+  .galochki-sbros {
     padding: calc(var(--shag) * 2) 0;
   }
 }
