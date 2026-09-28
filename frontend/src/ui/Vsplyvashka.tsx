@@ -14,6 +14,8 @@ import { raspolozhit, SHIRINA_PANELI } from './raspolozhenie'
 import './vsplyvashka.css'
 
 type Props = {
+  /** id диалога — на него указывает `aria-controls` значка. */
+  id: string
   /** Значок, открывший панель: под ним она стоит, щелчок по нему — не
    *  «снаружи», на него возвращается фокус. */
   yakor: RefObject<HTMLElement>
@@ -88,7 +90,7 @@ function pogasitShchelchok() {
  * События из портала всплывают по дереву React, а не DOM: панель — соседка
  * значка, а не его дитя, иначе щелчок внутри панели дошёл бы до значка.
  */
-export function Vsplyvashka({ yakor, vyravnivanie, nazvanie, onZakryt, children }: Props) {
+export function Vsplyvashka({ id, yakor, vyravnivanie, nazvanie, onZakryt, children }: Props) {
   const panel = useRef<HTMLDivElement>(null)
   const [mesto, zadatMesto] = useState<Mesto | null>(null)
 
@@ -207,6 +209,7 @@ export function Vsplyvashka({ yakor, vyravnivanie, nazvanie, onZakryt, children 
     // не на body — Escape и Tab продолжают работать.
     <div
       ref={panel}
+      id={id}
       role="dialog"
       aria-modal="true"
       aria-label={nazvanie}

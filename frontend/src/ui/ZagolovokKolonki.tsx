@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useId, useRef, useState } from 'react'
 
 import type { GruppaFiltra, Sortirovka } from '../domain/tablitsa'
 import type { Column } from './DataTable'
@@ -27,6 +27,7 @@ type Props<T> = {
 export function ZagolovokKolonki<T>({ kolonka, sortirovka, onSort, gruppa, onVybor }: Props<T>) {
   const znachok = useRef<HTMLButtonElement>(null)
   const [otkryta, otkryt] = useState(false)
+  const idPaneli = useId()
   // Стабильная: от неё зависит слушатель нажатия снаружи, а панель
   // перерисовывается на каждой галочке.
   const zakryt = useCallback(() => otkryt(false), [])
@@ -53,6 +54,9 @@ export function ZagolovokKolonki<T>({ kolonka, sortirovka, onSort, gruppa, onVyb
           aria-label={imyaZnachka(kolonka.title, gruppa)}
           aria-haspopup="dialog"
           aria-expanded={otkryta}
+          // Только открытой: закрытой панели в документе нет, ссылка вела бы
+          // в никуда. Так же у узкой кнопки «Фильтры».
+          aria-controls={otkryta ? idPaneli : undefined}
           onClick={() => otkryt(!otkryta)}
         >
           <VoronkaIcon />
@@ -62,6 +66,7 @@ export function ZagolovokKolonki<T>({ kolonka, sortirovka, onSort, gruppa, onVyb
           дереву React, и щелчок внутри панели дошёл бы до значка. */}
       {gruppa && otkryta && (
         <Vsplyvashka
+          id={idPaneli}
           yakor={znachok}
           vyravnivanie={kolonka.align ?? 'left'}
           nazvanie={`Фильтр: ${kolonka.title}`}

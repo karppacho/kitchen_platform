@@ -58,8 +58,10 @@ export function useTablitsaVAdrese<T>(kolonki: readonly OpisanieKolonki<T>[]): T
   function izmenit(fn: (s: SostoyanieTablitsy) => SostoyanieTablitsy) {
     const prezhnie = svezhie.current
     const novye = zapisatAdres(prezhnie, fn(prochitatAdres(prezhnie, kolonki)), kolonki)
-    // Тот же адрес — не навигация: даже replace заменяет запись истории на
-    // новую — с другим key и без state, с которым пришли на экран.
+    // Тот же канонический адрес — не навигация: даже replace заменяет запись
+    // истории на новую — с другим key и без state, с которым пришли на экран.
+    // Ссылка с неканоническим порядком параметров при первой записи даст
+    // одну такую замену — безвредно.
     if (novye.toString() === prezhnie.toString()) return
     svezhie.current = novye
     setParams(novye, { replace: true })

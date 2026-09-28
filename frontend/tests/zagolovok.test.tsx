@@ -183,6 +183,20 @@ test('значок сообщает, что откроет диалог, и от
   expect(znachok('Фильтр: Цена')).toHaveAttribute('aria-expanded', 'false')
 })
 
+test('открытый значок указывает на свою панель — aria-controls', async () => {
+  // Как у узкой кнопки «Фильтры»: пока панель открыта, программа чтения с
+  // экрана может перейти от значка к ней. Закрытой панели в документе нет —
+  // и ссылки на неё нет.
+  render(<Stend />)
+  expect(znachok('Фильтр: Категория')).not.toHaveAttribute('aria-controls')
+  await otkrytKategoriyu()
+  expect(panel().id).not.toBe('')
+  expect(znachok('Фильтр: Категория')).toHaveAttribute('aria-controls', panel().id)
+  expect(znachok('Фильтр: Цена')).not.toHaveAttribute('aria-controls')
+  await userEvent.keyboard('{Escape}')
+  expect(znachok('Фильтр: Категория')).not.toHaveAttribute('aria-controls')
+})
+
 test('в имени значка — сколько отмечено, вместе с отмеченным без строк', () => {
   // У «Акции» строк нет, но она отмечена — и считается.
   render(<Stend nachalo={{ category: ['Акция', 'Пицца'] }} />)

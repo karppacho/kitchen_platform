@@ -150,4 +150,11 @@
     padding-top: calc(var(--shag) * 1.5);
     padding-bottom: calc(var(--shag) * 1.5);
   }
+
+  /* Поле ввода или выбора со шрифтом мельче 16 px iOS Safari при фокусе
+     приближает, и страница уезжает вбок. С мышью приближения нет — там
+     поля остаются в 14 px, как таблица. */
+  .panel-tablitsy-pole {
+    font-size: 16px;
+  }
 }
