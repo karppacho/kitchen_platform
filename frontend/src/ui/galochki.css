@@ -1,0 +1,70 @@
+/* Галочки колонки плотные, как сама таблица: значений бывает два десятка,
+   и панель не должна вырастать выше экрана. */
+.galochki {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.galochki legend {
+  padding: 0;
+  margin-bottom: var(--shag);
+  font-weight: 600;
+  color: var(--priglushyonnyy);
+}
+
+/* Вся строка — метка: попасть по значению проще, чем по квадратику. */
+.galochki-variant {
+  display: flex;
+  align-items: flex-start;
+  gap: calc(var(--shag) * 2);
+  padding: var(--shag) 0;
+  cursor: pointer;
+}
+
+.galochki-variant input {
+  flex: none;
+  margin: calc(var(--shag) / 2) 0 0;
+  accent-color: var(--aktsent);
+}
+
+/* Значение бывает длинным — переносится, а не обрезается. */
+.galochki-variant > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.galochki-schyot {
+  color: var(--priglushyonnyy);
+  white-space: nowrap;
+}
+
+/* «(пусто)» — не значение из данных, а его отсутствие: видно по начертанию. */
+.galochki-pusto {
+  font-style: italic;
+  color: var(--priglushyonnyy);
+}
+
+.galochki-net {
+  margin: 0;
+  color: var(--priglushyonnyy);
+}
+
+.galochki-sbros {
+  margin-top: var(--shag);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--aktsent);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Под палец строки выше: на телефоне те же галочки во встроенных «Фильтрах». */
+@media (pointer: coarse) {
+  .galochki-variant,
+  .galochki-sbros {
+    padding: calc(var(--shag) * 2) 0;
+  }
+}

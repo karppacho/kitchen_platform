@@ -7,7 +7,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'vitest'
 
 import { App } from '../src/App'
-import { useDishes } from '../src/api/queries'
+import { KLYUCH_BLYUD, KLYUCH_INGREDIENTOV, useDishes } from '../src/api/queries'
 import { ApiError, api } from '../src/api/client'
 import { SessionProvider, useSession } from '../src/auth/session'
 
@@ -241,7 +241,7 @@ test('502 у запроса посреди работы сессию не сбр
       </MemoryRouter>
     </QueryClientProvider>,
   )
-  await waitFor(() => expect(queries.getQueryState(['dishes', '', ''])?.status).toBe('error'))
+  await waitFor(() => expect(queries.getQueryState(KLYUCH_BLYUD)?.status).toBe('error'))
 
   expect(screen.queryByLabelText('Почта')).not.toBeInTheDocument()
   expect(screen.getByText('Алексей')).toBeInTheDocument()
@@ -277,7 +277,7 @@ test('запрос с данными, упавший 401, не мешает по
   )
   await waitFor(() => expect(screen.getByText('Алексей')).toBeInTheDocument())
 
-  const kluch = ['dishes', '', '']
+  const kluch = KLYUCH_BLYUD
   // «Шеф смотрит блюда, данные загружены.»
   queries.setQueryData(kluch, [])
   expect(queries.getQueryState(kluch)?.data).toBeDefined()
@@ -366,8 +366,8 @@ test('после выхода кэш запросов пуст', async () => {
   )
   await screen.findByText('Алексей')
 
-  queries.setQueryData(['dishes', '', ''], [])
-  queries.setQueryData(['ingredients', '', ''], [])
+  queries.setQueryData(KLYUCH_BLYUD, [])
+  queries.setQueryData(KLYUCH_INGREDIENTOV, [])
   expect(queries.getQueryCache().getAll().length).toBeGreaterThan(0)
 
   await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
@@ -405,7 +405,7 @@ test('502 у ручки выхода не мешает выйти — форма
 
   // «Шеф до этого смотрел данные экрана» — как в соседнем тесте «после
   // выхода кэш запросов пуст».
-  queries.setQueryData(['dishes', '', ''], [])
+  queries.setQueryData(KLYUCH_BLYUD, [])
   expect(queries.getQueryCache().getAll().length).toBeGreaterThan(0)
 
   await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))
@@ -525,7 +525,7 @@ test('успешный вход снимает предупреждение о �
   )
   await act(async () => {
     await expect(
-      queries.fetchQuery({ queryKey: ['dishes', '', ''], queryFn: () => api('/dishes') }),
+      queries.fetchQuery({ queryKey: KLYUCH_BLYUD, queryFn: () => api('/dishes') }),
     ).rejects.toBeInstanceOf(ApiError)
   })
   expect(await screen.findByLabelText('Почта')).toBeInTheDocument()

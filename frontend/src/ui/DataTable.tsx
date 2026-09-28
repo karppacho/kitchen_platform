@@ -1,11 +1,11 @@
 import { useState, type ReactNode } from 'react'
 
+import type { OpisanieKolonki, Sortirovka } from '../domain/tablitsa'
 import './table.css'
 import { useWide } from './useWide'
 
-export type Column<T> = {
-  key: string
-  title: string
+/** Колонка экрана: что сортировать и фильтровать (domain) и как рисовать. */
+export type Column<T> = OpisanieKolonki<T> & {
   align?: 'left' | 'right'
   /** always — видно и на телефоне; wide — только на широком и по тапу. */
   priority: 'always' | 'wide'
@@ -19,6 +19,10 @@ type Props<T> = {
   empty: string
   rowClass?: (row: T) => string | undefined
   onOpen?: (row: T) => void
+  /** Текущая сортировка — ставит `aria-sort` на заголовок её колонки. */
+  sortirovka?: Sortirovka | null
+  /** Содержимое заголовка вместо `title` — кнопки сортировки и фильтра. */
+  zagolovok?: (k: Column<T>) => ReactNode
 }
 
 /**
@@ -29,29 +33,46 @@ type Props<T> = {
  * телефонными, и это надо было вернуть.
  */
 export function DataTable<T>(props: Props<T>) {
-  const { rows, empty } = props
   const wide = useWide()
 
-  if (rows.length === 0) {
-    return <p className="pusto">{empty}</p>
-  }
-  return wide ? <Shirokaya {...props} /> : <Uzkiy {...props} />
+  // На широком пустой результат — та же таблица с шапкой: в шапке
+  // сортировка и фильтры, и фильтр, отсеявший всё, снимают там же. На
+  // узком шапки нет, управление — над списком, так что хватает слов.
+  if (wide) return <Shirokaya {...props} />
+  if (props.rows.length === 0) return <p className="pusto">{props.empty}</p>
+  return <Uzkiy {...props} />
 }
 
-function Shirokaya<T>({ columns, rows, rowKey, rowClass, onOpen }: Props<T>) {
+function Shirokaya<T>({ columns, rows, rowKey, empty, rowClass, onOpen, sortirovka, zagolovok }: Props<T>) {
   return (
     <div className="tablitsa-obolochka">
       <table className="tablitsa">
         <thead>
           <tr>
             {columns.map((k) => (
-              <th key={k.key} className={k.align === 'right' ? 'vpravo' : undefined}>
-                {k.title}
+              <th
+                key={k.key}
+                className={k.align === 'right' ? 'vpravo' : undefined}
+                aria-sort={ariaSort(k.key, sortirovka)}
+                // Имя заголовка звучит на каждом переходе по ячейкам колонки.
+                // Из содержимого с кнопками оно вышло бы «Категория Фильтр:
+                // Категория, выбрано 2» — оставляем название, у кнопок внутри
+                // свои имена.
+                aria-label={zagolovok ? k.title : undefined}
+              >
+                {zagolovok ? zagolovok(k) : k.title}
               </th>
             ))}
           </tr>
         </thead>
         <tbody>
+          {rows.length === 0 && (
+            <tr className="stroka-pusto">
+              <td colSpan={columns.length} className="pusto">
+                {empty}
+              </td>
+            </tr>
+          )}
           {rows.map((row) => (
             <tr
               key={rowKey(row)}
@@ -77,6 +98,13 @@ function Shirokaya<T>({ columns, rows, rowKey, rowClass, onOpen }: Props<T>) {
       </table>
     </div>
   )
+}
+
+// Только у отсортированной колонки: `none` у остальных программа чтения
+// с экрана зачитывала бы у каждого заголовка, а порядок задаёт одна.
+function ariaSort(kolonka: string, s: Sortirovka | null | undefined): 'ascending' | 'descending' | undefined {
+  if (s?.kolonka !== kolonka) return undefined
+  return s.napravlenie === 'vozr' ? 'ascending' : 'descending'
 }
 
 function Uzkiy<T>({ columns, rows, rowKey, rowClass, onOpen }: Props<T>) {

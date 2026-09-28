@@ -14,6 +14,18 @@ h1 {
   color: var(--vnimanie);
 }
 
+/* Ответ справочника упёрся в предел: часть позиций могла не прийти.
+   Заметно, но цветом внимания, а не ошибки, — показанное верно, просто,
+   возможно, не всё. */
+.spravochnik-obrezan {
+  margin: 0 0 calc(var(--shag) * 3);
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border: 1px solid var(--vnimanie);
+  border-radius: var(--radius);
+  background: var(--vnimanie-fon);
+  color: var(--tekst);
+}
+
 /* Замечание не значит поломку: ноль — нейтрален, больше нуля — заметен,
    но не тревогой (не цвет ошибки). */
 .zamechaniya {

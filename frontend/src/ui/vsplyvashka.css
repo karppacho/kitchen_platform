@@ -1,0 +1,42 @@
+/* Панель фильтра колонки — в портале в body; координаты документа и ширину
+   (SHIRINA_PANELI, по ней считается прижим к краю окна) ставит Vsplyvashka. */
+.vsplyvashka {
+  position: absolute;
+  /* Поверх шапки и строк таблицы: липкие th — сами позиционированы. */
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  /* Значений бывает два десятка: список прокручивается внутри, «Готово»
+     всегда на виду. */
+  max-height: min(480px, 70vh);
+  background: var(--poverhnost);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  /* Та же поверхность, что у таблицы под ней: без тени панель читалась бы
+     частью таблицы. Цвет — от токена текста. */
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--tekst) 15%, transparent);
+}
+
+.vsplyvashka-soderzhimoe {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: calc(var(--shag) * 3);
+}
+
+.vsplyvashka-niz {
+  display: flex;
+  justify-content: flex-end;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-top: 1px solid var(--granitsa);
+}
+
+.vsplyvashka-gotovo {
+  padding: var(--shag) calc(var(--shag) * 3);
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--aktsent);
+  color: var(--poverhnost);
+  font: inherit;
+  cursor: pointer;
+}

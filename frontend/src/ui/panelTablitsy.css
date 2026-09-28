@@ -1,0 +1,160 @@
+/* Панель над таблицей. Без фильтров — одна строка, как прежний поиск со
+   статусом: плотность таблицы на 1920×1080 не страдает. */
+.panel-tablitsy {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--shag) * 2);
+  margin-bottom: calc(var(--shag) * 3);
+}
+
+.panel-tablitsy-ryad {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--shag) * 2);
+}
+
+.panel-tablitsy-pole {
+  min-width: 0;
+  padding: var(--shag) calc(var(--shag) * 2);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  color: var(--tekst);
+  font: inherit;
+}
+
+/* На широком поле во всю ширину окна было бы длиннее любого названия. */
+.panel-tablitsy-poisk {
+  flex: 1 1 200px;
+  max-width: 480px;
+}
+
+.panel-tablitsy-naideno {
+  color: var(--priglushyonnyy);
+  white-space: nowrap;
+}
+
+.panel-tablitsy-sortirovka {
+  flex: 1 1 180px;
+}
+
+.panel-tablitsy-filtry {
+  flex: none;
+  padding: var(--shag) calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  color: var(--tekst);
+  font: inherit;
+  cursor: pointer;
+}
+
+.panel-tablitsy-filtry[aria-expanded='true'] {
+  border-color: var(--aktsent);
+  color: var(--aktsent);
+}
+
+/* «Фильтры» на узком — в потоке страницы, под кнопкой. */
+.panel-tablitsy-panel {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--shag) * 3);
+  padding: calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+}
+
+.panel-tablitsy-niz {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.panel-tablitsy-gotovo {
+  padding: var(--shag) calc(var(--shag) * 3);
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--aktsent);
+  color: var(--poverhnost);
+  font: inherit;
+  cursor: pointer;
+}
+
+.fishki {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--shag) calc(var(--shag) * 2);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fishki > li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.fishka {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--shag);
+  max-width: 100%;
+  padding: calc(var(--shag) / 2) calc(var(--shag) * 2);
+  border: 1px solid var(--aktsent);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  color: var(--tekst);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fishka:hover {
+  background: var(--fon);
+}
+
+/* Отмеченных значений бывает много — переносятся, а не вылезают за экран
+   в 360 px. */
+.fishka-tekst {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.fishka-krestik {
+  flex: none;
+  color: var(--aktsent);
+}
+
+.panel-tablitsy-sbros {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--aktsent);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Под палец цели выше. */
+@media (pointer: coarse) {
+  .panel-tablitsy-pole,
+  .panel-tablitsy-filtry,
+  .panel-tablitsy-gotovo {
+    padding-top: calc(var(--shag) * 2);
+    padding-bottom: calc(var(--shag) * 2);
+  }
+
+  .fishka,
+  .panel-tablitsy-sbros {
+    padding-top: calc(var(--shag) * 1.5);
+    padding-bottom: calc(var(--shag) * 1.5);
+  }
+
+  /* Поле ввода или выбора со шрифтом мельче 16 px iOS Safari при фокусе
+     приближает, и страница уезжает вбок. С мышью приближения нет — там
+     поля остаются в 14 px, как таблица. */
+  .panel-tablitsy-pole {
+    font-size: 16px;
+  }
+}

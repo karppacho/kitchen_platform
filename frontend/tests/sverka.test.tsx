@@ -5,6 +5,7 @@ import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
 
+import { Ingredients } from '../src/pages/Ingredients'
 import { Reconciliation } from '../src/pages/Reconciliation'
 
 // Ответ настоящий, из раздела 4 ТЗ. Данные грязные — «Оснвова» с опечаткой,
@@ -167,6 +168,46 @@ test('справочник не загрузился — экран говори
   expect(await screen.findByText(/цены из справочника не загрузились/i)).toBeInTheDocument()
   // Сама сверка при этом показана: её ручка ответила.
   expect(screen.getByTestId('kartochka-7')).toBeInTheDocument()
+})
+
+test('справочник для цен сверка берёт с limit=500', async () => {
+  // Тот же запрос, что у экрана справочника: по умолчанию ручка отдаёт 200
+  // строк, и позиции за ними остались бы без цены.
+  const zaprosy: URL[] = []
+  server.use(
+    http.get('/api/ingredients', ({ request }) => {
+      zaprosy.push(new URL(request.url))
+      return HttpResponse.json(INGREDIENTY)
+    }),
+  )
+  narisovat()
+  const gruppa = await screen.findByTestId('kartochka-7')
+  expect(await within(gruppa).findByText('18,50 ₽/шт')).toBeInTheDocument()
+  expect(zaprosy.map((url) => [...url.searchParams])).toEqual([[['limit', '500']]])
+})
+
+test('сверка и экран справочника делят один запрос', async () => {
+  // Кэш общий: открыть справочник после сверки — без второй загрузки.
+  const zaprosy: URL[] = []
+  server.use(
+    http.get('/api/ingredients', ({ request }) => {
+      zaprosy.push(new URL(request.url))
+      return HttpResponse.json(INGREDIENTY)
+    }),
+  )
+  const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={queries}>
+      <MemoryRouter>
+        <Reconciliation />
+        <Ingredients />
+      </MemoryRouter>
+    </QueryClientProvider>,
+  )
+  const gruppa = await screen.findByTestId('kartochka-7')
+  expect(await within(gruppa).findByText('18,50 ₽/шт')).toBeInTheDocument()
+  expect(await screen.findByText('Найдено: 2 из 2')).toBeInTheDocument()
+  expect(zaprosy).toHaveLength(1)
 })
 
 test('позиции нет в справочнике — прочерк, а не пустота', async () => {

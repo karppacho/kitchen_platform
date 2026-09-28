@@ -57,11 +57,12 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }))
 afterEach(() => server.resetHandlers())
 afterAll(() => server.close())
 
-function narisovat() {
+/** `state` — то, с чем пришли на карточку: список кладёт туда свой адрес. */
+function narisovat(state?: unknown) {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const vid = render(
     <QueryClientProvider client={queries}>
-      <MemoryRouter initialEntries={['/dishes/B001']}>
+      <MemoryRouter initialEntries={[{ pathname: '/dishes/B001', state }]}>
         <Routes>
           <Route path="/dishes/:legacyId" element={<DishDetailPage />} />
         </Routes>
@@ -263,3 +264,41 @@ test('отказ по правам на фоновом обновлении уб
   expect(await screen.findByText('Доступа нет')).toBeInTheDocument()
   expect(screen.queryByText('Салат айсберг')).not.toBeInTheDocument()
 })
+
+// «← Блюда» стоит в трёх местах: на карточке, на «Такого блюда нет» (404) и
+// на «Блюдо удалено из таблицы» (410). Все три ведут одинаково.
+const EKRANY = [
+  { ekran: 'карточка', otvet: () => HttpResponse.json(B001) },
+  { ekran: '404', otvet: () => HttpResponse.json({ detail: 'Блюдо не найдено' }, { status: 404 }) },
+  { ekran: '410', otvet: () => HttpResponse.json({ detail: 'блюдо удалено из таблицы' }, { status: 410 }) },
+]
+
+// Что может оказаться в state: адрес списка — или что угодно ещё. State
+// живёт в истории браузера, и собирать из чужого ссылку нельзя.
+const SOSTOYANIYA = [
+  { chto: 'адрес списка', state: '?sort=-margin&uc=vyshe', kuda: '/dishes?sort=-margin&uc=vyshe' },
+  { chto: 'без state', state: undefined, kuda: '/dishes' },
+  { chto: 'пустой вид списка', state: '', kuda: '/dishes' },
+  { chto: 'число', state: 42, kuda: '/dishes' },
+  { chto: 'чужой адрес', state: 'http://example.com/?sort=-margin', kuda: '/dishes' },
+  // Начало — как у адреса списка, а в хвосте — «//evil.com»: проверку «?»
+  // он проходит, и ссылка должна остаться ссылкой на список этого сайта.
+  { chto: 'адрес с хвостом', state: '?x#//evil.com', kuda: '/dishes?x#//evil.com' },
+]
+
+test.each(EKRANY.flatMap((e) => SOSTOYANIYA.map((s) => ({ ...e, ...s }))))(
+  '«← Блюда» ($ekran), в state $chto — ведёт на $kuda',
+  async ({ otvet, state, kuda }) => {
+    // Список кладёт в state свой вид — сортировку, фильтры и поиск, — и
+    // «← Блюда» возвращает к нему, а не к списку с нуля. Карточку открыли
+    // не из списка (ссылка, новая вкладка) — просто к списку.
+    server.use(http.get('/api/dishes/B001', otvet))
+    narisovat(state)
+    const ssylka = await screen.findByRole('link', { name: '← Блюда' })
+    expect(ssylka).toHaveAttribute('href', kuda)
+    // Куда ссылка ведёт на деле: браузер разбирает href от адреса карточки.
+    const tsel = new URL(ssylka.getAttribute('href')!, 'https://sait.test/dishes/B001')
+    expect(tsel.origin).toBe('https://sait.test')
+    expect(tsel.pathname).toBe('/dishes')
+  },
+)

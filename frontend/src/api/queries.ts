@@ -7,22 +7,40 @@ export function useMe(): UseQueryResult<Me> {
   return useQuery({ queryKey: ['me'], queryFn: () => api<Me>('/me') })
 }
 
-function stroka(params: Record<string, string>): string {
-  const chistye = Object.entries(params).filter(([, v]) => v !== '')
-  return chistye.length ? `?${new URLSearchParams(chistye).toString()}` : ''
-}
+/**
+ * Справочник берётся целиком, одним ответом: поиск, сортировка и фильтры
+ * работают в браузере по всем строкам. Без явного предела ручка отдаёт 200
+ * строк, 500 — её максимум; ингредиентов сейчас около 130. Упрётся ответ в
+ * предел — экран справочника об этом скажет.
+ */
+export const LIMIT_SPRAVOCHNIKA = 500
 
-export function useIngredients(search = '', status = ''): UseQueryResult<Ingredient[]> {
+/**
+ * Поиска и фильтров в ключе нет: набор в поиске не шлёт запросов и не
+ * прячет таблицу за «Загрузкой…». Префикс `ingredients` — по нему строка
+ * свежести перезапрашивает экран; ключ один и у справочника, и у сверки —
+ * кэш общий.
+ */
+export const KLYUCH_INGREDIENTOV = ['ingredients', { limit: LIMIT_SPRAVOCHNIKA }] as const
+
+export function useIngredients(): UseQueryResult<Ingredient[]> {
   return useQuery({
-    queryKey: ['ingredients', search, status],
-    queryFn: () => api<Ingredient[]>(`/ingredients${stroka({ search, status })}`),
+    queryKey: KLYUCH_INGREDIENTOV,
+    queryFn: () => api<Ingredient[]>(`/ingredients?limit=${LIMIT_SPRAVOCHNIKA}`),
   })
 }
 
-export function useDishes(search = '', status = ''): UseQueryResult<Dish[]> {
+/**
+ * Блюда — тоже целиком, одним ответом: предела у ручки нет, блюд около 130.
+ * Поиска и статуса в ключе нет, как у справочника; префикс `dishes` — по
+ * нему строка свежести перезапрашивает экран.
+ */
+export const KLYUCH_BLYUD = ['dishes'] as const
+
+export function useDishes(): UseQueryResult<Dish[]> {
   return useQuery({
-    queryKey: ['dishes', search, status],
-    queryFn: () => api<Dish[]>(`/dishes${stroka({ search, status })}`),
+    queryKey: KLYUCH_BLYUD,
+    queryFn: () => api<Dish[]>('/dishes'),
   })
 }
 
