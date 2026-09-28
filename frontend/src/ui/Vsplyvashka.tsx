@@ -40,6 +40,40 @@ const TABUEMYE = [
 
 type Mesto = { left: number; top: number }
 
+// Сколько ждать click после нажатия. Он приходит, когда кнопку мыши или
+// палец отпустили, — обычно через десятые доли секунды; секунды хватает и
+// на медленное нажатие.
+const ZHDAT_SHCHELCHKA_MS = 1000
+
+/**
+ * Погасить click, который придёт следом за нажатием, уже закрывшим панель.
+ *
+ * Слушатель — на document, а не в эффекте панели: панель убирают из
+ * документа сразу после нажатия, до click, и очистка эффекта сняла бы его
+ * раньше времени. Гасит один click и снимается. Касание, ушедшее в
+ * прокрутку, click не присылает — тогда слушатель снимают следующее нажатие
+ * или таймер: иначе он проглотил бы чужой щелчок, пришедший позже (Enter на
+ * кнопке тоже шлёт click, без нажатия).
+ */
+function pogasitShchelchok() {
+  const taymer = window.setTimeout(snyat, ZHDAT_SHCHELCHKA_MS)
+  function pogasit(event: MouseEvent) {
+    event.stopPropagation()
+    event.preventDefault()
+    snyat()
+  }
+  function snyat() {
+    window.clearTimeout(taymer)
+    document.removeEventListener('click', pogasit, true)
+    document.removeEventListener('pointerdown', snyat, true)
+  }
+  // На погружении — раньше обработчиков React в корне приложения. Слушатель
+  // нажатия ставится во время этого же нажатия, но на нём не сработает:
+  // слушатели события берутся до обхода.
+  document.addEventListener('click', pogasit, true)
+  document.addEventListener('pointerdown', snyat, true)
+}
+
 /**
  * Всплывающая панель под значком — портал в `document.body`: внутри `th`
  * её обрезала бы прокрутка обёртки таблицы, а липкие `th` соседних колонок
@@ -121,11 +155,21 @@ export function Vsplyvashka({ yakor, vyravnivanie, nazvanie, onZakryt, children 
   // ответил бы «не внутри», и панель закрылась бы сама. Нажатие приходит
   // раньше, пока галочка на месте. На погружении — чтобы ничей
   // stopPropagation не спрятал нажатие.
+  //
+  // Панель модальная, и нажатие снаружи только закрывает её. Под шапкой
+  // почти всё место — строки таблицы, так что «щёлкнуть мимо» — чаще всего
+  // щелчок по строке, и он открыл бы карточку блюда. Его click гасим. Строка
+  // — любая `tbody tr`, а не только открывающая: дело в месте, куда
+  // щёлкают, чтобы закрыть, а погашенный щелчок по строке без действия
+  // ничего не отнимает; и таблице не нужно метить строки для панели. Кнопки
+  // шапки — воронка другой колонки, сортировка — и всё прочее срабатывают с
+  // первого нажатия: по ним щёлкают ради них самих.
   useEffect(() => {
     function nazhatie(event: PointerEvent) {
       const tsel = event.target
       if (!(tsel instanceof Node)) return
       if (panel.current?.contains(tsel) || yakor.current?.contains(tsel)) return
+      if (tsel instanceof Element && tsel.closest('tbody tr') !== null) pogasitShchelchok()
       onZakryt()
     }
     document.addEventListener('pointerdown', nazhatie, true)

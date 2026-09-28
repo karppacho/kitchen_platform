@@ -329,6 +329,44 @@ test('«Цена меню: нет» — только блюдо без цены;
   expect(screen.getByRole('button', { name: 'Снять фильтр «Цена меню: нет»' })).toBeInTheDocument()
 })
 
+test('щелчок по строке при открытой панели фильтра только закрывает её', async () => {
+  // Строки занимают почти всё место под шапкой: «щёлкнуть мимо, чтобы
+  // закрыть» — чаще всего щелчок по строке. Панель модальная, и такой
+  // щелчок не должен уводить в карточку блюда.
+  const u = userEvent.setup()
+  narisovat()
+  await poisk()
+  await u.click(screen.getByRole('button', { name: 'Фильтр: Статус' }))
+  expect(panel('Статус')).toBeInTheDocument()
+
+  await u.click(screen.getByText('Салат овощной'))
+  expect(put).toBe('/dishes')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+  // Панели нет — следующий щелчок по строке открывает карточку.
+  await u.click(screen.getByText('Салат овощной'))
+  await screen.findByRole('link', { name: '← Блюда' })
+  expect(put).toBe('/dishes/B099')
+})
+
+test('при открытой панели кнопки шапки срабатывают с первого нажатия', async () => {
+  // Гасится только щелчок по строке: воронка другой колонки и сортировка
+  // закрывают панель и делают своё одним нажатием.
+  const u = userEvent.setup()
+  narisovat()
+  await poisk()
+  await u.click(screen.getByRole('button', { name: 'Фильтр: Статус' }))
+
+  await u.click(screen.getByRole('button', { name: 'Фильтр: Категория' }))
+  expect(screen.queryByRole('dialog', { name: 'Фильтр: Статус' })).not.toBeInTheDocument()
+  expect(panel('Категория')).toBeInTheDocument()
+
+  await u.click(knopkaSortirovki('Маржа %'))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(zagolovok('Маржа %')).toHaveAttribute('aria-sort', 'ascending')
+  expect(parametry()).toEqual([['sort', 'margin']])
+})
+
 test('старая ссылка ?search=…&status=активное: тот же отбор, одним запросом без параметров', async () => {
   // Ссылку, присланную до сортировки и фильтров, шеф открывает тем же
   // экраном. Поиск и статус теперь отбираются в браузере по полному списку.

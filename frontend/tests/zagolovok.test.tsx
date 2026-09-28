@@ -61,10 +61,18 @@ type SvoystvaStenda = {
   sortirovka?: Sortirovka | null
   onSort?: (kolonka: string) => void
   onVybor?: (kolonka: string, kody: readonly string[]) => void
+  onOpen?: (r: Stroka) => void
 }
 
 /** Таблица с настоящим выбором в состоянии: группы — из `primenit`. */
-function Stend({ stroki = STROKI, nachalo = {}, sortirovka = null, onSort = () => {}, onVybor = () => {} }: SvoystvaStenda) {
+function Stend({
+  stroki = STROKI,
+  nachalo = {},
+  sortirovka = null,
+  onSort = () => {},
+  onVybor = () => {},
+  onOpen,
+}: SvoystvaStenda) {
   const [vybor, zadatVybor] = useState<Vybor>(nachalo)
   const { stroki: vidimye, gruppy } = primenit(stroki, KOLONKI, { poisk: '', sortirovka, vybor }, (r) => [r.nazvanie])
   return (
@@ -73,6 +81,7 @@ function Stend({ stroki = STROKI, nachalo = {}, sortirovka = null, onSort = () =
       rows={vidimye}
       rowKey={(r) => r.id}
       empty="Ничего не найдено"
+      onOpen={onOpen}
       sortirovka={sortirovka}
       zagolovok={(k) => (
         <ZagolovokKolonki
@@ -293,6 +302,51 @@ test('снаружи закрывает уже нажатие, до щелчка
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
 
+// Строка тела таблицы — щелчок по ней зовёт onOpen.
+const stroka = (nazvanie: string) => screen.getByRole('cell', { name: nazvanie }).closest('tr')!
+
+test('гасится один щелчок — тот, что закрыл панель', async () => {
+  // Щелчок, закрывший панель над строкой, строку не открывает (сквозной
+  // тест — в blyuda). Следующий щелчок без нажатия — Enter на кнопке,
+  // программа чтения с экрана — уже чужой и доходит.
+  const onOpen = vi.fn()
+  render(<Stend onOpen={onOpen} />)
+  await otkrytKategoriyu()
+  await userEvent.click(stroka('Кетчуп'))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(onOpen).not.toHaveBeenCalled()
+
+  fireEvent.click(stroka('Кетчуп'))
+  expect(onOpen.mock.calls).toEqual([[STROKI[0]]])
+})
+
+test('погашенный щелчок не доживает: касание без click, через секунду щелчок по строке срабатывает', () => {
+  // Касание, ушедшее в прокрутку, закрывает панель нажатием, а click
+  // браузер уже не пришлёт. Слушатель, ждущий его, не должен проглотить
+  // чужой щелчок без нажатия, пришедший позже.
+  vi.useFakeTimers()
+  const onOpen = vi.fn()
+  render(<Stend onOpen={onOpen} />)
+  fireEvent.click(znachokKategorii())
+  fireEvent.pointerDown(stroka('Кетчуп'))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+  vi.advanceTimersByTime(1000)
+  fireEvent.click(stroka('Кетчуп'))
+  expect(onOpen.mock.calls).toEqual([[STROKI[0]]])
+})
+
+test('погашенный щелчок снимается следующим нажатием: касание без click, сразу щелчок по строке срабатывает', async () => {
+  const onOpen = vi.fn()
+  render(<Stend onOpen={onOpen} />)
+  await otkrytKategoriyu()
+  fireEvent.pointerDown(stroka('Кетчуп'))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+  await userEvent.click(stroka('Маргарита'))
+  expect(onOpen.mock.calls).toEqual([[STROKI[1]]])
+})
+
 test('снятая галочка без строк исчезает, а панель остаётся открытой', async () => {
   const onVybor = vi.fn()
   render(<Stend nachalo={{ category: ['Акция', 'Соус'] }} onVybor={onVybor} />)
@@ -339,6 +393,7 @@ function podmenit(obekt: object, svoystvo: string, znachenie: number) {
 afterEach(() => {
   for (const f of vernut.splice(0).reverse()) f()
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 function zadatOkno(shirina: number, prokrutkaY: number) {
