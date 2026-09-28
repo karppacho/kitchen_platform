@@ -135,7 +135,7 @@ export function Ingredients() {
               (предел ручки), поэтому текст и говорит, к кому идти. */}
           {query.data.length >= LIMIT_SPRAVOCHNIKA && (
             <p className="spravochnik-obrezan" role="status">
-              В справочнике больше {LIMIT_SPRAVOCHNIKA} позиций, а на экране только первые{' '}
+              В справочнике {LIMIT_SPRAVOCHNIKA} или больше позиций, а на экране только первые{' '}
               {LIMIT_SPRAVOCHNIKA} — нужной позиции может не оказаться в списке. Сообщите разработчику.
             </p>
           )}

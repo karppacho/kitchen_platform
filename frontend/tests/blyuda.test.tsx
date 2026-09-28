@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useLocation, useNavigate, type NavigateFunction } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'vitest'
 
 import type { Dish, DishDetail } from '../src/api/types'
@@ -91,11 +91,14 @@ afterAll(() => server.close())
 
 let adres = ''
 let put = ''
+// Переход по истории — как «назад» браузера, а не ссылка на странице.
+let istoriya: NavigateFunction
 
 function Zond() {
   const mesto = useLocation()
   adres = mesto.search
   put = mesto.pathname
+  istoriya = useNavigate()
   return null
 }
 
@@ -271,6 +274,17 @@ test('на 360 px «Маржа %: сначала худшая» — тот же 
   expect(parametry()).toEqual([['sort', '-margin']])
 })
 
+test('на 360 px сортировка по id — «по возрастанию / по убыванию», а не по алфавиту', async () => {
+  // id блюд — номера из таблицы («B001»), и «id: от А до Я» читалось бы
+  // странно. Так же, как у справочника.
+  setViewport(360)
+  narisovat()
+  const punkty = within(await screen.findByRole('combobox', { name: 'Сортировка' }))
+    .getAllByRole('option')
+    .map((p) => p.textContent)
+  expect(punkty.filter((p) => p?.startsWith('id:'))).toEqual(['id: по возрастанию', 'id: по убыванию'])
+})
+
 test.each([
   {
     kolonka: 'UC ₽',
@@ -436,5 +450,28 @@ test('поиск, набранный без паузы, «← Блюда» то�
     ['sort', '-margin'],
   ])
   expect(zagolovok('Маржа %')).toHaveAttribute('aria-sort', 'descending')
+  expect(idStrok()).toEqual(['B099'])
+})
+
+test('поиск, набранный без паузы, возвращает и «назад» браузера', async () => {
+  // На телефоне из карточки чаще уходят кнопкой «назад», чем ссылкой
+  // «← Блюда». «Назад» ведёт к записи истории списка, а поиск попадает в
+  // неё через 300 мс — уход со страницы этот таймер гасит. Набор и щелчок —
+  // синхронным fireEvent: между ними не успеет сработать ни один таймер.
+  narisovat('/dishes?sort=-margin')
+  fireEvent.change(await poisk(), { target: { value: 'сал' } })
+  fireEvent.click(screen.getByText('Салат овощной'))
+  await screen.findByRole('link', { name: '← Блюда' })
+  expect(put).toBe('/dishes/B099')
+
+  act(() => {
+    istoriya(-1)
+  })
+  expect(await poisk()).toHaveValue('сал')
+  expect(put).toBe('/dishes')
+  expect(parametry()).toEqual([
+    ['search', 'сал'],
+    ['sort', '-margin'],
+  ])
   expect(idStrok()).toEqual(['B099'])
 })

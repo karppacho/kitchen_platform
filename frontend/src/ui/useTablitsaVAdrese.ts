@@ -23,6 +23,10 @@ export type TablitsaVAdrese = {
   /** Адрес списка с поиском, ещё не ушедшим в адрес: `?…` или `''`, как
       `location.search`. Для обработчиков событий — возврат из карточки. */
   adresSeychas: () => string
+  /** Записать в адрес поиск, ещё ждущий паузы, — сейчас, а не через 300 мс.
+      Перед уходом со списка: уход гасит таймер, а «назад» браузера вернёт
+      к этой записи истории. */
+  zapisatSeychas: () => void
 }
 
 /**
@@ -83,6 +87,7 @@ export function useTablitsaVAdrese<T>(kolonki: readonly OpisanieKolonki<T>[]): T
       const adres = zapisatAdres(p, { ...prochitatAdres(p, kolonki), poisk: vvod }, kolonki).toString()
       return adres === '' ? '' : `?${adres}`
     },
+    zapisatSeychas: () => izmenit((s) => ({ ...s, poisk: vvod })),
   }
 }
 

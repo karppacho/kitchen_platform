@@ -10,6 +10,13 @@ import { estDannye, SboyObnovleniya, Sostoyanie } from '../ui/Sostoyanie'
 import { TablitsaSFiltrami } from '../ui/TablitsaSFiltrami'
 import './pages.css'
 
+// Себестоимость выше цены меню. Одна проверка на окраску строки, подпись в
+// ячейке и фильтр «UC ₽: выше цены меню»: отобранные фильтром — ровно те,
+// что окрашены.
+function vysheTseny(r: Dish): boolean {
+  return dorozhe(r.uc_rub, r.price_menu)
+}
+
 /**
  * Колонки списка блюд. Константа модуля: от неё зависят состояние таблицы
  * из адреса и пересчёт строк (`TablitsaSFiltrami`), новый массив на каждую
@@ -69,10 +76,10 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     // нужно блюда, где она выше цены, — те же, что окрашены красным.
     filtr: {
       vid: 'usloviya',
-      usloviya: [{ kod: 'vyshe', podpis: 'выше цены меню', podhodit: (r) => dorozhe(r.uc_rub, r.price_menu) }],
+      usloviya: [{ kod: 'vyshe', podpis: 'выше цены меню', podhodit: vysheTseny }],
     },
     render: (r) =>
-      dorozhe(r.uc_rub, r.price_menu) ? (
+      vysheTseny(r) ? (
         // Подпись видимым текстом, а не title — на телефоне всплывающей
         // подсказки нет. Направляет к причине: перепутанная единица
         // измерения встречается несравнимо чаще настоящего убытка.
@@ -141,7 +148,7 @@ function klyuch(r: Dish): string {
 }
 
 function klassStroki(r: Dish): string | undefined {
-  return dorozhe(r.uc_rub, r.price_menu) ? 'stroka--ubytok' : undefined
+  return vysheTseny(r) ? 'stroka--ubytok' : undefined
 }
 
 export function Dishes() {

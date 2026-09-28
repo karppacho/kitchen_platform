@@ -225,6 +225,27 @@ test('adresSeychas — с поиском, ещё не записанным в а
   ])
 })
 
+test('zapisatSeychas — поиск в адрес сразу, заменой; тот же адрес — без навигации', () => {
+  // Перед уходом в карточку: «назад» браузера вернёт к этой записи истории,
+  // и поиск, набранный только что, должен быть уже в ней.
+  narisovat('/?sort=-price')
+  const klyuch = zond.klyuch
+  act(() => tablitsa.zapisatSeychas())
+  expect(zond.klyuch).toBe(klyuch)
+
+  act(() => tablitsa.zadatVvod('кр'))
+  act(() => tablitsa.zapisatSeychas())
+  expect(parametry()).toEqual([
+    ['search', 'кр'],
+    ['sort', '-price'],
+  ])
+  expect(zond.tip).toBe('REPLACE')
+  // Отложенная запись того же поиска ничего не меняет.
+  const posle = zond.klyuch
+  podozhdat(400)
+  expect(zond.klyuch).toBe(posle)
+})
+
 test('adresSeychas пустого состояния — пустая строка', () => {
   narisovat()
   expect(tablitsa.adresSeychas()).toBe('')

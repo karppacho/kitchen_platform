@@ -281,6 +281,9 @@ const SOSTOYANIYA = [
   { chto: 'пустой вид списка', state: '', kuda: '/dishes' },
   { chto: 'число', state: 42, kuda: '/dishes' },
   { chto: 'чужой адрес', state: 'http://example.com/?sort=-margin', kuda: '/dishes' },
+  // Начало — как у адреса списка, а в хвосте — «//evil.com»: проверку «?»
+  // он проходит, и ссылка должна остаться ссылкой на список этого сайта.
+  { chto: 'адрес с хвостом', state: '?x#//evil.com', kuda: '/dishes?x#//evil.com' },
 ]
 
 test.each(EKRANY.flatMap((e) => SOSTOYANIYA.map((s) => ({ ...e, ...s }))))(
@@ -291,6 +294,11 @@ test.each(EKRANY.flatMap((e) => SOSTOYANIYA.map((s) => ({ ...e, ...s }))))(
     // не из списка (ссылка, новая вкладка) — просто к списку.
     server.use(http.get('/api/dishes/B001', otvet))
     narisovat(state)
-    expect(await screen.findByRole('link', { name: '← Блюда' })).toHaveAttribute('href', kuda)
+    const ssylka = await screen.findByRole('link', { name: '← Блюда' })
+    expect(ssylka).toHaveAttribute('href', kuda)
+    // Куда ссылка ведёт на деле: браузер разбирает href от адреса карточки.
+    const tsel = new URL(ssylka.getAttribute('href')!, 'https://sait.test/dishes/B001')
+    expect(tsel.origin).toBe('https://sait.test')
+    expect(tsel.pathname).toBe('/dishes')
   },
 )
