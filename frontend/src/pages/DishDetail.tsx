@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useLocation, useParams } from 'react-router-dom'
 
 import { ApiError } from '../api/client'
 import { useDish } from '../api/queries'
@@ -16,9 +16,23 @@ import './pages.css'
 
 const PORT_KBJU = 0.5
 
+/**
+ * Куда ведёт «← Блюда»: к тому виду списка, из которого открыли карточку, —
+ * с его сортировкой, фильтрами и поиском. Список кладёт свой адрес (`?…`) в
+ * state навигации. Всё остальное — карточку открыли по ссылке или в новой
+ * вкладке (state нет), пустой вид списка (`''`), что-то чужое — ведёт просто
+ * к списку: state хранится в истории браузера, и адрес из него берём, только
+ * если это строка параметров, — ссылки на другой сайт из неё не собрать.
+ */
+function useAdresSpiska(): string {
+  const { state } = useLocation()
+  return typeof state === 'string' && state.startsWith('?') ? `/dishes${state}` : '/dishes'
+}
+
 export function DishDetailPage() {
   const { legacyId = '' } = useParams()
   const query = useDish(legacyId)
+  const adresSpiska = useAdresSpiska()
 
   // 410 — блюдо было, шеф убрал строку из листа «Блюда». Не «такого нет»: вернёт
   // строку — блюдо появится снова. «Повторить» не нужно, как и у 404.
@@ -27,7 +41,7 @@ export function DishDetailPage() {
   if (query.isError && query.error instanceof ApiError && query.error.status === 410) {
     return (
       <section className="kartochka">
-        <Link to="/dishes" className="nazad">
+        <Link to={adresSpiska} className="nazad">
           ← Блюда
         </Link>
         <div className="sostoyanie" role="alert">
@@ -47,7 +61,7 @@ export function DishDetailPage() {
   if (query.isError && query.error instanceof ApiError && query.error.status === 404) {
     return (
       <section className="kartochka">
-        <Link to="/dishes" className="nazad">
+        <Link to={adresSpiska} className="nazad">
           ← Блюда
         </Link>
         <div className="sostoyanie" role="alert">
@@ -70,7 +84,7 @@ export function DishDetailPage() {
 
   return (
     <section className="kartochka">
-      <Link to="/dishes" className="nazad">
+      <Link to={adresSpiska} className="nazad">
         ← Блюда
       </Link>
 

@@ -5,7 +5,7 @@ import { setupServer } from 'msw/node'
 import { StrictMode, type ReactNode } from 'react'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 
-import { useDishes } from '../src/api/queries'
+import { KLYUCH_BLYUD, useDishes } from '../src/api/queries'
 import type { SyncBook, SyncStatus } from '../src/api/types'
 import { Svezhest } from '../src/shell/Svezhest'
 
@@ -289,7 +289,7 @@ test('повтор эффекта при том же времени измене
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   })
   queries.setQueryData(['sync'], svezho())
-  queries.setQueryData(['dishes', '', ''], [])
+  queries.setQueryData(KLYUCH_BLYUD, [])
   render(
     <StrictMode>
       <QueryClientProvider client={queries}>

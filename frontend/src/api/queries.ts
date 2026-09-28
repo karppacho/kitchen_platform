@@ -7,11 +7,6 @@ export function useMe(): UseQueryResult<Me> {
   return useQuery({ queryKey: ['me'], queryFn: () => api<Me>('/me') })
 }
 
-function stroka(params: Record<string, string>): string {
-  const chistye = Object.entries(params).filter(([, v]) => v !== '')
-  return chistye.length ? `?${new URLSearchParams(chistye).toString()}` : ''
-}
-
 /**
  * Справочник берётся целиком, одним ответом: поиск, сортировка и фильтры
  * работают в браузере по всем строкам. Без явного предела ручка отдаёт 200
@@ -35,10 +30,17 @@ export function useIngredients(): UseQueryResult<Ingredient[]> {
   })
 }
 
-export function useDishes(search = '', status = ''): UseQueryResult<Dish[]> {
+/**
+ * Блюда — тоже целиком, одним ответом: предела у ручки нет, блюд около 130.
+ * Поиска и статуса в ключе нет, как у справочника; префикс `dishes` — по
+ * нему строка свежести перезапрашивает экран.
+ */
+export const KLYUCH_BLYUD = ['dishes'] as const
+
+export function useDishes(): UseQueryResult<Dish[]> {
   return useQuery({
-    queryKey: ['dishes', search, status],
-    queryFn: () => api<Dish[]>(`/dishes${stroka({ search, status })}`),
+    queryKey: KLYUCH_BLYUD,
+    queryFn: () => api<Dish[]>('/dishes'),
   })
 }
 
