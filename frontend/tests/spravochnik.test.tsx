@@ -216,6 +216,22 @@ test('на 360 px остаются имя, цена и отметка карто
 
   expect(screen.getByText('100 ₽/кг')).toBeInTheDocument()
   expect(screen.queryByText('Бакалея')).not.toBeInTheDocument()
+  // И колонки «Ед.» нет: единица и так стоит при цене («₽/кг»).
+  expect(screen.queryByText('Ед.')).not.toBeInTheDocument()
+  expect(screen.queryByText('кг')).not.toBeInTheDocument()
+})
+
+test('на 360 px сортировка по id — «по возрастанию / по убыванию», а не по алфавиту', async () => {
+  // id — номера из таблицы, и «id: от А до Я» читалось бы странно.
+  setViewport(360)
+  narisovat()
+  await poisk()
+  const punkty = within(screen.getByRole('combobox', { name: 'Сортировка' }))
+    .getAllByRole('option')
+    .map((p) => p.textContent)
+  expect(punkty).toContain('id: по возрастанию')
+  expect(punkty).toContain('id: по убыванию')
+  expect(punkty.filter((p) => p?.startsWith('id:'))).toHaveLength(2)
 })
 
 test('на 1440 px «Ед.» — сразу после «Категории»', async () => {
@@ -370,17 +386,21 @@ test.each([
   expect(screen.getByRole('button', { name: `Снять фильтр «${fishka}»` })).toBeInTheDocument()
 })
 
-test('ответ упёрся в предел 500 строк — предупреждение, что справочник мог прийти не целиком', async () => {
-  // Иначе поиск молча не нашёл бы позицию, не поместившуюся в ответ.
+test('ответ упёрся в предел 500 строк — предупреждение простыми словами и что делать', async () => {
+  // Иначе поиск молча не нашёл бы позицию, не поместившуюся в ответ, и шеф
+  // решил бы, что её нет в справочнике.
   otvet = Array.from({ length: 500 }, (_, i) => ({ ...SAHAR[0]!, id: i + 1, legacy_id: String(i + 1) }))
   narisovat()
-  expect(await screen.findByText(/Показаны первые 500 позиций/)).toBeInTheDocument()
+  expect(await screen.findByText(/только первые 500/)).toHaveTextContent(
+    'В справочнике больше 500 позиций, а на экране только первые 500 — нужной позиции может не оказаться в ' +
+      'списке. Сообщите разработчику.',
+  )
 })
 
 test('ответ меньше предела — предупреждения нет', async () => {
   narisovat()
   await poisk()
-  expect(screen.queryByText(/Показаны первые/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/только первые/)).not.toBeInTheDocument()
 })
 
 test('перезапрос по строке свежести: второй запрос, вид прежний, «Загрузки…» нет', async () => {

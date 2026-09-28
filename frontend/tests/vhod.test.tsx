@@ -7,7 +7,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'vitest'
 
 import { App } from '../src/App'
-import { useDishes } from '../src/api/queries'
+import { KLYUCH_INGREDIENTOV, useDishes } from '../src/api/queries'
 import { ApiError, api } from '../src/api/client'
 import { SessionProvider, useSession } from '../src/auth/session'
 
@@ -367,7 +367,7 @@ test('после выхода кэш запросов пуст', async () => {
   await screen.findByText('Алексей')
 
   queries.setQueryData(['dishes', '', ''], [])
-  queries.setQueryData(['ingredients', '', ''], [])
+  queries.setQueryData(KLYUCH_INGREDIENTOV, [])
   expect(queries.getQueryCache().getAll().length).toBeGreaterThan(0)
 
   await userEvent.click(screen.getByRole('button', { name: 'Выйти' }))

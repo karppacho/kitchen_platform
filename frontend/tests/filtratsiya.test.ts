@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest'
 
 import {
+  estNet,
   podhodit,
   primenit,
   sobratGruppy,
@@ -162,6 +163,21 @@ test('готовые условия видны всегда, даже с нул�
       { kod: 'net', podpis: 'нет', schyot: 0, vybran: false },
     ],
   })
+})
+
+test('estNet: «есть» и «нет» — коды est/net, «нет» — ровно обратное «есть»', () => {
+  // Одна пара на оба экрана: коды — они же в адресе (`price=net`), и
+  // разойтись между справочником и блюдами им нельзя.
+  const kolonki: OpisanieKolonki<Blyudo>[] = [
+    { key: 'price', title: 'Цена меню', filtr: estNet((r) => r.price !== null) },
+  ]
+  expect(sobratGruppy(BLYUDA, kolonki, {})[0]!.varianty).toEqual([
+    { kod: 'est', podpis: 'есть', schyot: 4, vybran: false },
+    { kod: 'net', podpis: 'нет', schyot: 1, vybran: false },
+  ])
+  // Цена «0.00» (B004) — «есть»: прочерк и ноль значат разное.
+  expect(ids(BLYUDA.filter((r) => podhodit(r, kolonki, { price: ['est'] })))).toEqual(['B002', 'B003', 'B004', 'B005'])
+  expect(ids(BLYUDA.filter((r) => podhodit(r, kolonki, { price: ['net'] })))).toEqual(['B001'])
 })
 
 test('primenit: поиск и фильтры, затем сортировка; vsego — длина входа', () => {

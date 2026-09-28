@@ -33,6 +33,22 @@ export type SostoyanieTablitsy = { poisk: string; sortirovka: Sortirovka | null;
 export type Variant = { kod: string; podpis: string; schyot: number; vybran: boolean }
 export type GruppaFiltra = { kolonka: string; zagolovok: string; varianty: Variant[]; aktivna: boolean }
 
+/**
+ * Готовые условия «есть / нет»: у цены и веса штуки это null против
+ * значения (цена «0.00» — есть: прочерк и ноль значат разное), у карточки —
+ * флаг. Одна пара на все экраны: коды `est`/`net` — они же в адресе
+ * (`price=net`), и разойтись между экранами им нельзя.
+ */
+export function estNet<T>(est: (r: T) => boolean): SposobFiltra<T> {
+  return {
+    vid: 'usloviya',
+    usloviya: [
+      { kod: 'est', podpis: 'есть', podhodit: est },
+      { kod: 'net', podpis: 'нет', podhodit: (r) => !est(r) },
+    ],
+  }
+}
+
 const PODPISI_TEKSTA = ['от А до Я', 'от Я до А'] as const
 const PODPISI_CHISLA = ['по возрастанию', 'по убыванию'] as const
 // Пустое значение фильтруется кодом '' — так же оно и пишется в адрес

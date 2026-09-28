@@ -1,24 +1,11 @@
 import { LIMIT_SPRAVOCHNIKA, useIngredients } from '../api/queries'
 import type { Ingredient } from '../api/types'
-import type { SposobFiltra } from '../domain/tablitsa'
+import { estNet } from '../domain/tablitsa'
 import type { Column } from '../ui/DataTable'
 import { Num } from '../ui/Num'
 import { estDannye, SboyObnovleniya, Sostoyanie } from '../ui/Sostoyanie'
 import { TablitsaSFiltrami } from '../ui/TablitsaSFiltrami'
 import './pages.css'
-
-// Готовые условия «есть / нет»: у цены и веса штуки это null против
-// значения (цена «0.00» — есть: прочерк и ноль значат разное), у карточки —
-// флаг.
-function estNet(est: (r: Ingredient) => boolean): SposobFiltra<Ingredient> {
-  return {
-    vid: 'usloviya',
-    usloviya: [
-      { kod: 'est', podpis: 'есть', podhodit: est },
-      { kod: 'net', podpis: 'нет', podhodit: (r) => !est(r) },
-    ],
-  }
-}
 
 // Статус — строка из таблицы шефа, а не перечисление: бывает и «архив», и
 // «архивный». К одному слову не привязываемся.
@@ -31,13 +18,14 @@ function arhivnyy(r: Ingredient): boolean {
  * из адреса и пересчёт строк (`TablitsaSFiltrami`), новый массив на каждую
  * отрисовку пересчитывал бы их каждый раз.
  */
-export const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
+const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'id',
     title: 'id',
     priority: 'wide',
-    // Текстом, но числа внутри — как числа: «12» < «123» < «1000».
-    sort: { vid: 'tekst', znachenie: (r) => r.legacy_id },
+    // Текстом, но числа внутри — как числа: «12» < «123» < «1000». id —
+    // номера, поэтому и подписи числовые, а не «от А до Я».
+    sort: { vid: 'tekst', znachenie: (r) => r.legacy_id, podpisi: ['по возрастанию', 'по убыванию'] },
     render: (r) => r.legacy_id,
   },
   {
@@ -143,12 +131,12 @@ export function Ingredients() {
           <SboyObnovleniya query={query} />
           {/* Ответ длиной в предел — почти наверняка обрезан. Молчать нельзя:
               поиск не нашёл бы позицию, не поместившуюся в ответ, и шеф
-              решил бы, что её нет в справочнике. */}
+              решил бы, что её нет в справочнике. Чинит это разработчик
+              (предел ручки), поэтому текст и говорит, к кому идти. */}
           {query.data.length >= LIMIT_SPRAVOCHNIKA && (
             <p className="spravochnik-obrezan" role="status">
-              Показаны первые {LIMIT_SPRAVOCHNIKA} позиций — больше сервер за раз не отдаёт, и часть
-              справочника могла не поместиться. Поиск, сортировка и фильтры работают только по
-              показанным.
+              В справочнике больше {LIMIT_SPRAVOCHNIKA} позиций, а на экране только первые{' '}
+              {LIMIT_SPRAVOCHNIKA} — нужной позиции может не оказаться в списке. Сообщите разработчику.
             </p>
           )}
           <TablitsaSFiltrami
