@@ -1,10 +1,12 @@
 """Защита от подделки запросов: заголовок и Origin.
 
-Браузер сам прикладывает куки к запросу, откуда бы тот ни пришёл, —
-поэтому кука не доказывает, что запрос отправила наша страница. Доказывает
-заголовок ``X-Kitchen-Csrf``: чужая страница не может его поставить, не
-спросив сервер (предварительный запрос CORS), а сервер чужим не разрешает.
-Origin — второй замок: он ловит запрос, даже если первый ослабнет.
+SameSite=Strict не даёт приложить куку совсем чужому сайту, но соседний
+поддомен (а в части браузеров и http-версия нашего адреса) для неё свой:
+его страница пошлёт нам POST с кукой шефа. Поэтому кука не доказывает, что
+запрос отправила наша страница. Доказывает заголовок ``X-Kitchen-Csrf``:
+страница с другого адреса не может его поставить, не спросив сервер
+(предварительный запрос CORS), а сервер чужим не разрешает. Origin —
+второй замок: он ловит запрос, даже если первый ослабнет.
 
 Правило касается только изменяющих запросов с кукой сессии и без
 Bearer-токена. Токен в заголовке браузер сам не приложит, поэтому
@@ -12,6 +14,8 @@ Bearer-токена. Токен в заголовке браузер сам не
 """
 
 from __future__ import annotations
+
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,7 +37,8 @@ def with_session(cors_origins: tuple[str, ...] = ("http://localhost:5173",)) -> 
 # Заголовок
 # ---------------------------------------------------------------------------
 def test_logout_with_cookie_without_header_is_rejected() -> None:
-    """Долг «подделка выхода»: картинка на чужом сайте могла выкинуть шефа."""
+    """Долг «подделка выхода»: форма на соседнем поддомене — для SameSite
+    это свой сайт, и кука уйдёт — могла одним POST выкинуть шефа."""
     reply = with_session().post("/api/auth/logout")
 
     assert reply.status_code == 403
@@ -170,6 +175,60 @@ def test_login_without_cookies_is_not_affected() -> None:
     reply = make_client(handler=gotrue()).post("/api/auth/login", json=LOGIN)
 
     assert reply.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Журнал
+# ---------------------------------------------------------------------------
+def ours(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    """Записи приложения, без чужих библиотек."""
+    return [r for r in caplog.records if r.name.startswith("kitchen.")]
+
+
+def test_rejection_without_header_is_logged_without_cookie(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Отказ виден в журнале сервера: на приёмке иначе искать причину 403
+    пришлось бы по заголовкам в браузере. Кука сессии в журнал не попадает."""
+    client = with_session()
+    token = client.cookies[auth.ACCESS_COOKIE]
+
+    with caplog.at_level(logging.WARNING, logger="kitchen.web"):
+        client.post("/api/auth/logout")
+
+    assert [r.levelno for r in ours(caplog)] == [logging.WARNING], "ровно одна строка"
+    assert "нет заголовка" in caplog.text
+    assert "/api/auth/logout" in caplog.text
+    assert token not in caplog.text
+
+
+def test_rejection_by_origin_logs_both_addresses(caplog: pytest.LogCaptureFixture) -> None:
+    """Для разбора нужны оба адреса: пришедший и тот, что сервер счёл своим."""
+    client = with_session()
+    token = client.cookies[auth.ACCESS_COOKIE]
+    headers = {
+        **CSRF,
+        "Origin": "https://evil.example",
+        "Host": "kitchen.example",
+        "X-Forwarded-Proto": "https",
+        "Authorization": "Basic c2VrcmV0OnBhcm9s",
+    }
+
+    with caplog.at_level(logging.WARNING, logger="kitchen.web"):
+        client.post("/api/auth/logout", headers=headers)
+
+    assert "чужой Origin" in caplog.text
+    assert "https://evil.example" in caplog.text
+    assert "https://kitchen.example" in caplog.text
+    assert token not in caplog.text
+    assert "c2VrcmV0OnBhcm9s" not in caplog.text, "прочие заголовки в журнал не пишутся"
+
+
+def test_passed_request_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.DEBUG, logger="kitchen.web"):
+        with_session().post("/api/auth/logout", headers=CSRF)
+
+    assert ours(caplog) == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,16 +1,18 @@
 """Защита от подделки запросов (CSRF).
 
-Браузер сам прикладывает куки к запросу, откуда бы тот ни пришёл: форма
-или картинка на чужом сайте отправит на наш адрес POST вместе с кукой
-сессии шефа. Поэтому кука сама по себе не доказывает, что запрос
-отправила наша страница. SameSite=Strict закрывает большую часть
-случаев, но это настройка браузера, а не наша проверка.
+Кука сессии стоит с SameSite=Strict, и совсем чужой сайт её к своему
+запросу не приложит. Но «сайт» для SameSite — весь домен: страница на
+соседнем поддомене, а в части браузеров и http-версия нашего же адреса,
+для неё своя, и POST оттуда придёт к нам с кукой шефа. Эти страницы нам
+не подконтрольны. Поэтому SameSite не хватает, и убирать эту защиту в
+расчёте на неё нельзя.
 
 Два замка на каждый изменяющий запрос с кукой сессии:
 
 1. Заголовок ``X-Kitchen-Csrf: 1``. Форма его поставить не может, а
-   скрипт с чужой страницы — только спросив разрешения у сервера
-   (предварительный запрос CORS), и чужим сервер не разрешает.
+   скрипт с другого адреса (соседний поддомен — тоже другой адрес) —
+   только спросив разрешения у сервера (предварительный запрос CORS), и
+   чужим сервер не разрешает.
 2. ``Origin`` — пустой, свой или из ``cors_origins``. Свой определяется
    по ``Host`` и ``X-Forwarded-Proto``, которые ставит nginx: так свой
    сайт работает и при пустом ``CORS_ORIGINS`` на сервере.
@@ -22,6 +24,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -35,6 +38,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from starlette.types import ASGIApp, Receive, Scope, Send
+
+log = logging.getLogger("kitchen.web")
 
 CSRF_HEADER = "X-Kitchen-Csrf"
 REJECTED = "Запрос отклонён — обновите страницу"
@@ -103,27 +108,51 @@ class CsrfMiddleware:
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and self.forged(HTTPConnection(scope)):
-            response = JSONResponse({"detail": REJECTED}, status_code=403)
-            await response(scope, receive, send)
-            return
+        if scope["type"] == "http":
+            request = HTTPConnection(scope)
+            reason = self.rejection_reason(request)
+            if reason is not None:
+                # Только нужное для разбора: ни кук, ни токенов, ни прочих
+                # заголовков. Путь и Origin присылает клиент — через %r, чтобы
+                # перевод строки в них не подделал строку журнала.
+                log.warning(
+                    "запрос отклонён защитой от подделки: %s %r — %s; Origin %r, свой адрес %s",
+                    scope["method"],
+                    request.url.path,
+                    reason,
+                    request.headers.get("origin"),
+                    _show(own_origin(request)),
+                )
+                response = JSONResponse({"detail": REJECTED}, status_code=403)
+                await response(scope, receive, send)
+                return
         await self.app(scope, receive, send)
 
-    def forged(self, request: HTTPConnection) -> bool:
+    def rejection_reason(self, request: HTTPConnection) -> str | None:
+        """Почему запрос отклонить; ``None`` — пропустить."""
         if request.scope["method"].upper() not in CHANGING_METHODS:
-            return False
+            return None
         if not any(name in request.cookies for name in SESSION_COOKIES):
             # Без куки подделывать нечего: вход, например, куки не требует.
-            return False
+            return None
         if _has_bearer(request.headers.get("authorization")):
-            return False
+            return None
         if request.headers.get(CSRF_HEADER) != "1":
-            return True
+            return "нет заголовка"
 
         origin = request.headers.get("origin")
         if not origin:
             # Старые браузеры и не-браузеры Origin не шлют; заголовок уже
             # проверен выше.
-            return False
+            return None
         parsed = parse_origin(origin)
-        return parsed is None or (parsed not in self.trusted and parsed != own_origin(request))
+        if parsed is None or (parsed not in self.trusted and parsed != own_origin(request)):
+            return "чужой Origin"
+        return None
+
+
+def _show(origin: Origin | None) -> str:
+    if origin is None:
+        return "не определён"
+    scheme, host, port = origin
+    return f"{scheme}://{host}:{port}"
