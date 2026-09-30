@@ -15,7 +15,9 @@
 * файл без папки или в папке не на общем диске ложится в «Мой диск»
   сервисного аккаунта, а своего места у него нет — 403
   ``storageQuotaExceeded``;
-* ``appProperties`` — не больше 124 байт на пару ключ–значение;
+* метаданные загрузки — только ``name``, ``mimeType``, ``parents``,
+  ``appProperties``; ``appProperties`` — не больше 124 байт на пару;
+* сколько байт файла клиент прочитал из ответа — :attr:`FakeDrive.served`;
 * ошибки — телом ``{"error": {"errors": [{"reason": …}], "code": …}}``;
   любой отказ (``accessNotConfigured``, ``storageQuotaExceeded``…) тест
   заказывает через :meth:`FakeDrive.fail_next`, обрыв сети — через
@@ -53,6 +55,11 @@ CHEF = "chef@example.com"
 
 _PROPERTY_LIMIT = 124
 """Байт на пару ключ–значение в appProperties — предел Google."""
+
+_UPLOAD_KEYS = frozenset({"name", "mimeType", "parents", "appProperties"})
+"""Метаданные загрузки, которые фальшивка понимает. Всё прочее (например,
+``copyRequiresWriterPermission`` или ``writersCanShare``) — AssertionError:
+фальшивка, молча принимающая незнакомое, пропустила бы и опасное."""
 
 _MESSAGES = {
     "accessNotConfigured": (
@@ -99,6 +106,8 @@ class FakeFile:
     can_add_children: bool = False
     own: bool = False
     """Создан через этот Drive — только такие видит доступ ``drive.file``."""
+    metadata: dict[str, object] = field(default_factory=dict)
+    """Метаданные, с которыми файл загрузили, — как пришли в запросе."""
 
 
 def closed_folder_permissions() -> list[dict[str, object]]:
@@ -115,6 +124,19 @@ class _Failure:
     status: int
     reason: str
     message: str
+
+
+class _Served(io.BytesIO):
+    """Тело ответа с файлом, которое считает, сколько из него прочитали."""
+
+    def __init__(self, content: bytes, drive: FakeDrive) -> None:
+        super().__init__(content)
+        self._drive = drive
+
+    def read(self, size: int | None = -1) -> bytes:
+        data = super().read(size)
+        self._drive.served += len(data)
+        return data
 
 
 class _Refusal(Exception):  # noqa: N818 — не ошибка фальшивки, а ответ Google
@@ -138,6 +160,8 @@ class FakeDrive(BaseAdapter):
         super().__init__()
         self.files: dict[str, FakeFile] = {}
         self.sent: list[Sent] = []
+        self.served = 0
+        """Сколько байт содержимого файлов клиент реально прочитал из ответов."""
         self.only_own_files = only_own_files
         self._failures: list[_Failure] = []
         self._drops: list[Exception] = []
@@ -224,7 +248,10 @@ class FakeDrive(BaseAdapter):
             status = refusal.status
             content = json.dumps({"error": error}).encode()
             content_type = "application/json; charset=UTF-8"
-        return _response(request, status, content, content_type)
+        response = _response(request, status, content, content_type)
+        if status == 200 and sent.params.get("alt") == "media":
+            response.raw = _Served(content, self)
+        return response
 
     def close(self) -> None:
         """Соединений нет — закрывать нечего."""
@@ -284,6 +311,8 @@ class FakeDrive(BaseAdapter):
             raise _Refusal(400, "badContent", "First part must be JSON metadata")
         metadata = json.loads(meta_body)
         assert isinstance(metadata, dict), "метаданные файла — JSON-объект"
+        unknown = set(metadata) - _UPLOAD_KEYS
+        assert not unknown, f"фальшивка не моделирует метаданные загрузки {sorted(unknown)}"
 
         parents = [str(p) for p in metadata.get("parents", [])]
         folders = [self._lookup(sent, p) for p in parents]
@@ -317,6 +346,7 @@ class FakeDrive(BaseAdapter):
                 content=media,
                 app_properties=properties,
                 own=True,
+                metadata=dict(metadata),
             )
         )
         return _resource(file, sent.params.get("fields"))

@@ -22,6 +22,8 @@ from google.oauth2 import service_account
 from pydantic import ValidationError
 
 from kitchen.config import Settings
+from kitchen.domain import cards
+from kitchen.sync import drive
 from kitchen.sync.drive import (
     SCOPES,
     DriveClient,
@@ -31,7 +33,16 @@ from kitchen.sync.drive import (
     explain_drive_error,
     folder_is_closed,
 )
-from tests.fake_drive import CHEF, FOLDER_ID, ROBOT, SHEET_MIME, FakeDrive, FakeFile
+from tests.fake_drive import (
+    CHEF,
+    FOLDER_ID,
+    ROBOT,
+    SHARED_DRIVE_ID,
+    SHEET_MIME,
+    UPLOAD,
+    FakeDrive,
+    FakeFile,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -80,11 +91,35 @@ def test_upload_is_multipart_with_parents_properties_and_name() -> None:
     assert sent.params["uploadType"] == "multipart"
     assert sent.headers["Content-Type"].startswith("multipart/related; boundary=")
     stored = fake.files[file_id]
+    assert set(stored.metadata) == {"name", "mimeType", "parents", "appProperties"}
     assert stored.name == NAME
     assert stored.parents == [FOLDER_ID]
     assert stored.app_properties == {"draft": "d-1", "kind": "label"}
     assert stored.mime_type == "image/jpeg"
     assert stored.content == JPEG
+
+
+def test_fake_refuses_unknown_upload_metadata() -> None:
+    """Фальшивка не принимает молча то, чего не понимает: лишний ключ в
+    метаданных загрузки (права, общий доступ) — AssertionError, а не зелёный тест."""
+    fake = FakeDrive()
+    metadata = {"name": NAME, "parents": [FOLDER_ID], "writersCanShare": True}
+    body = (
+        b"--b\r\nContent-Type: application/json\r\n\r\n"
+        + json.dumps(metadata).encode()
+        + b"\r\n--b\r\nContent-Type: image/jpeg\r\n\r\n"
+        + JPEG
+        + b"\r\n--b--\r\n"
+    )
+
+    with pytest.raises(AssertionError, match="writersCanShare"):
+        fake.session().post(
+            f"https://www.googleapis.com{UPLOAD}",
+            params={"uploadType": "multipart", "supportsAllDrives": "true"},
+            data=body,
+            headers={"Content-Type": "multipart/related; boundary=b"},
+            timeout=TIMEOUT,
+        )
 
 
 def test_never_writes_permissions() -> None:
@@ -109,7 +144,7 @@ def test_every_request_supports_all_drives() -> None:
 
     _every_call(fake)
 
-    assert len(fake.sent) == 5
+    assert len(fake.sent) == 6
     assert all(s.params.get("supportsAllDrives") == "true" for s in fake.sent)
 
 
@@ -120,37 +155,58 @@ def test_every_request_has_timeouts() -> None:
 
     _every_call(fake)
 
-    assert [s.timeout for s in fake.sent] == [TIMEOUT] * 5
+    assert [s.timeout for s in fake.sent] == [TIMEOUT] * 6
 
 
-def test_session_has_scope_and_refresh_timeout(
+class _Credentials:
+    """Учётка вместо ключа: запоминает, с каким таймаутом её просили обновить токен."""
+
+    def __init__(self) -> None:
+        self.refresh_timeouts: list[object] = []
+
+    def before_request(
+        self, request: object, method: str, url: str, headers: dict[str, str]
+    ) -> None:
+        self.refresh_timeouts.append(getattr(request, "keywords", {}).get("timeout"))
+        headers["Authorization"] = "Bearer test-token"
+
+
+def test_token_refresh_uses_the_request_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Сессия получает ровно один охват и таймаут обновления токена — как у
-    клиента таблиц."""
+    """Настоящая AuthorizedSession: токен обновляется с таймаутом самого запроса,
+    поэтому таймаут на каждом запросе закрывает и обновление. Своего таймаута
+    обновления google-auth 2.57 не применяет — его и не передаём."""
+    credentials = _Credentials()
     seen: dict[str, object] = {}
 
-    def from_file(filename: str, *, scopes: list[str]) -> str:
+    def from_file(filename: str, *, scopes: list[str]) -> _Credentials:
         seen.update(filename=filename, scopes=scopes)
-        return "учётка"
-
-    class Session(requests.Session):
-        def __init__(self, credentials: object, *, refresh_timeout: int) -> None:
-            super().__init__()
-            seen.update(credentials=credentials, refresh_timeout=refresh_timeout)
+        return credentials
 
     monkeypatch.setattr(service_account.Credentials, "from_service_account_file", from_file)
-    monkeypatch.setattr(google.auth.transport.requests, "AuthorizedSession", Session)
+    fake = FakeDrive()
 
-    session = authorized_session(tmp_path / "key.json", SCOPES["drive.file"], refresh_timeout=15)
+    def connect() -> requests.Session:
+        session = authorized_session(tmp_path / "key.json", SCOPES["drive.file"])
+        assert isinstance(session, google.auth.transport.requests.AuthorizedSession)
+        session.mount("https://", fake)
+        return session
 
-    assert isinstance(session, Session)
+    DriveClient(connect, folder_id=FOLDER_ID, timeout=TIMEOUT).metadata(FOLDER_ID)
+
     assert seen == {
         "filename": str(tmp_path / "key.json"),
         "scopes": ["https://www.googleapis.com/auth/drive.file"],
-        "credentials": "учётка",
-        "refresh_timeout": 15,
     }
+    assert credentials.refresh_timeouts == [TIMEOUT]
+    assert [s.timeout for s in fake.sent] == [TIMEOUT]
+    assert fake.sent[0].headers["Authorization"] == "Bearer test-token"
+
+
+def test_one_file_id_rule_for_domain_and_drive() -> None:
+    """Правило id файла Drive — одно: ссылка в листе и адрес запроса не расходятся."""
+    assert drive.DRIVE_FILE_ID is cards.DRIVE_FILE_ID
 
 
 def test_upload_reply_without_id_is_bad_reply(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -212,6 +268,7 @@ def test_drive_api_disabled_says_enable_it() -> None:
     assert caught.value.kind == "forbidden"
     assert caught.value.reason == "accessNotConfigured"
     assert "включите Drive API" in str(caught.value)
+    assert "Сообщите администратору" in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -232,7 +289,7 @@ def test_google_refusals_by_kind(status: int, reason: str, kind: str) -> None:
     fake.fail_next(status, reason)
 
     with pytest.raises(DriveError) as caught:
-        _client(fake).trash("fake-file-1")
+        _client(fake).metadata("fake-file-1")
 
     assert caught.value.kind == kind
     assert caught.value.status == status
@@ -323,18 +380,32 @@ def test_unreadable_key_is_forbidden_not_crash(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Скачивание и корзина
 # ---------------------------------------------------------------------------
-def test_download_is_cut_at_max_bytes() -> None:
-    """Больше ``max_bytes`` не читается: файл, подменённый в папке огромным,
-    не съест память сервера."""
+def test_download_refuses_file_over_max_bytes() -> None:
+    """Файл больше ``max_bytes`` — отказ, а не молча обрезанная картинка: битое
+    фото в прокси или мусор в распознавании без следа хуже понятной ошибки.
+    Целиком такой файл не читается — память сервера цела."""
     fake = FakeDrive()
     client = _client(fake)
-    big = b"\xff\xd8" + bytes(range(256)) * 20
-    file_id = client.upload_jpeg(big, name=NAME)
+    huge = b"\xff\xd8" + bytes(range(256)) * 4096
+    file_id = client.upload_jpeg(huge, name=NAME)
 
-    assert client.download(file_id, max_bytes=1000) == big[:1000]
-    assert client.download(file_id, max_bytes=100_000) == big
+    with pytest.raises(DriveError) as caught:
+        client.download(file_id, max_bytes=1000)
+
+    assert caught.value.kind == "too_large"
+    assert "больше допустимого" in str(caught.value)
+    assert fake.served < len(huge) // 4
     media = [s for s in fake.sent if s.params.get("alt") == "media"]
-    assert [(s.method, s.path) for s in media] == [("GET", f"/drive/v3/files/{file_id}")] * 2
+    assert [(s.method, s.path) for s in media] == [("GET", f"/drive/v3/files/{file_id}")]
+
+
+def test_download_up_to_max_bytes() -> None:
+    fake = FakeDrive()
+    client = _client(fake)
+    file_id = client.upload_jpeg(JPEG, name=NAME)
+
+    assert client.download(file_id, max_bytes=len(JPEG)) == JPEG
+    assert client.download(file_id, max_bytes=100_000) == JPEG
     with pytest.raises(ValueError, match="max_bytes"):
         client.download(file_id, max_bytes=0)
 
@@ -358,8 +429,48 @@ def test_trash_moves_to_trash_and_never_deletes() -> None:
     client.trash(file_id)
 
     assert fake.files[file_id].trashed is True
-    assert [s.method for s in fake.sent] == ["POST", "PATCH"]
+    assert [s.method for s in fake.sent] == ["POST", "GET", "PATCH"]
+    assert "parents" in fake.sent[1].params["fields"]
     assert json.loads(fake.sent[-1].body) == {"trashed": True}
+
+
+def test_trash_refuses_file_outside_photo_folder() -> None:
+    """С охватом ``drive`` платформа видит всё, что открыто сервисному аккаунту.
+    Неверный id не должен отправить в корзину чужой файл — только из папки фото."""
+    fake = FakeDrive()
+    fake.add(FakeFile("other-folder", "Другое", "application/vnd.google-apps.folder"))
+    fake.add(
+        FakeFile(
+            "chef-file",
+            "Меню.jpg",
+            "image/jpeg",
+            parents=["other-folder"],
+            drive_id=SHARED_DRIVE_ID,
+        )
+    )
+
+    with pytest.raises(DriveError) as caught:
+        _client(fake).trash("chef-file")
+
+    assert caught.value.kind == "forbidden"
+    assert "не из папки фото" in str(caught.value)
+    assert fake.files["chef-file"].trashed is False
+    assert [s.method for s in fake.sent] == ["GET"]
+
+
+def test_trash_of_missing_file_is_already_done() -> None:
+    """Файла уже нет (или его убрали между проверкой и корзиной) — цель
+    достигнута, это не ошибка."""
+    fake = FakeDrive()
+    client = _client(fake)
+
+    client.trash("gone-file")
+    assert [s.method for s in fake.sent] == ["GET"]
+
+    file_id = _upload(client)
+    fake.fail_next(404, "notFound", method="PATCH")
+    client.trash(file_id)
+    assert [s.method for s in fake.sent][-2:] == ["GET", "PATCH"]
 
 
 @pytest.mark.parametrize(
@@ -427,14 +538,29 @@ def test_drive_scope_is_narrow_by_default_and_checked() -> None:
         Settings(_env_file=None, drive_scope="drive.readonly")
 
 
+def test_folder_setting_is_an_id_not_a_link() -> None:
+    """Ссылку на папку вместо id ловит старт, понятным текстом — а не
+    трассировка при первой загрузке фото."""
+    link = "https://drive.google.com/drive/folders/abc_DEF-123?usp=sharing"
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None, drive_cards_folder_id=link)
+
+    assert "DRIVE_CARDS_FOLDER_ID" in str(caught.value)
+    assert "после /folders/" in str(caught.value)
+    assert "usp=sharing" not in str(caught.value)
+    assert Settings(_env_file=None, drive_cards_folder_id="abc_DEF-123").drive_cards_folder_id
+    assert Settings(_env_file=None, drive_cards_folder_id="").drive_cards_folder_id == ""
+
+
 def test_client_from_settings_uses_configured_scope_and_timeouts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     fake = FakeDrive()
     calls: list[tuple[object, ...]] = []
 
-    def connect(path: Path, scope: str, *, refresh_timeout: int) -> requests.Session:
-        calls.append((path, scope, refresh_timeout))
+    def connect(path: Path, scope: str) -> requests.Session:
+        calls.append((path, scope))
         return fake.session()
 
     monkeypatch.setattr("kitchen.sync.drive.authorized_session", connect)
@@ -453,5 +579,5 @@ def test_client_from_settings_uses_configured_scope_and_timeouts(
     file_id = _upload(client)
     client.trash(file_id)
 
-    assert calls == [(tmp_path / "key.json", "https://www.googleapis.com/auth/drive", 13)]
-    assert [s.timeout for s in fake.sent] == [(3, 33), (3, 33)]
+    assert calls == [(tmp_path / "key.json", "https://www.googleapis.com/auth/drive")]
+    assert [s.timeout for s in fake.sent] == [(3, 33)] * 3

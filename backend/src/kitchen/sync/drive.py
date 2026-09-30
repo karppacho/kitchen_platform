@@ -14,7 +14,11 @@ httplib2 со своим устройством таймаутов. Каждый
   существуют, и Drive отвечает 404;
 * с таймаутом ``(соединение, чтение)`` из настроек — у requests таймаута по
   умолчанию нет, и зависший запрос вешал бы ручку навсегда. Токен
-  google-auth обновляет с таймаутом того же запроса.
+  google-auth обновляет с таймаутом того же запроса (см. тест).
+
+Корзина — только для файлов из папки фото: с охватом ``drive`` платформа
+видит всё, что открыто сервисному аккаунту, и неверный id не должен
+выбросить чужой файл.
 
 Отказ Drive превращается в :class:`DriveError`: вид — для кода, текст — для
 человека, его видит повар.
@@ -23,12 +27,13 @@ httplib2 со своим устройством таймаутов. Каждый
 from __future__ import annotations
 
 import json
-import re
 import secrets
 from typing import TYPE_CHECKING, Literal
 
 import requests
 from google.auth import exceptions as google_errors
+
+from kitchen.domain.cards import DRIVE_FILE_ID
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping
@@ -58,10 +63,7 @@ INSPECT_SCOPE = "https://www.googleapis.com/auth/drive.metadata.readonly"
 API_DISABLED_REASONS = frozenset({"accessNotConfigured", "SERVICE_DISABLED"})
 """Как Drive называет выключенный в проекте Google Cloud API — по-старому и по-новому."""
 
-DriveErrorKind = Literal["quota", "forbidden", "not_found", "unavailable", "bad_reply"]
-
-_FILE_ID = re.compile(r"[A-Za-z0-9_-]+")
-"""То же правило, что у ``drive_view_url`` в domain/cards.py."""
+DriveErrorKind = Literal["quota", "forbidden", "not_found", "unavailable", "bad_reply", "too_large"]
 
 _RATE_REASONS = frozenset(
     {"userRateLimitExceeded", "rateLimitExceeded", "dailyLimitExceeded", "RATE_LIMIT_EXCEEDED"}
@@ -78,8 +80,10 @@ _QUOTA = (
 )
 _API_DISABLED = (
     "Google Drive выключен для платформы: включите Drive API в проекте Google Cloud "
-    "сервисного аккаунта."
+    "сервисного аккаунта. Сообщите администратору."
 )
+_TOO_LARGE = "Файл в Google Drive больше допустимого размера. Сообщите администратору."
+_NOT_IN_FOLDER = "Файл не из папки фото — в корзину он не отправлен. Сообщите администратору."
 _NO_RIGHTS = "Платформе не хватает прав на папку фото в Google Drive. Сообщите администратору."
 _KEY_REFUSED = "Google не принял ключ платформы. Сообщите администратору."
 _KEY_UNREADABLE = (
@@ -99,7 +103,8 @@ class DriveError(RuntimeError):
 
     ``kind`` — что делать коду: ``quota`` и ``forbidden`` — чинит
     администратор, ``unavailable`` — стоит повторить, ``not_found`` — файла
-    нет, ``bad_reply`` — ответ не разобран. Текст исключения — для человека.
+    нет, ``bad_reply`` — ответ не разобран, ``too_large`` — файл больше
+    допустимого (его подменили в папке). Текст исключения — для человека.
     ``status`` и ``reason`` — как ответил Google, для журнала и скрипта
     проверки; ``None`` — ответа не было вовсе.
     """
@@ -204,15 +209,16 @@ class DriveClient:
             )
         )
         file_id = reply.get("id")
-        if not isinstance(file_id, str) or not _FILE_ID.fullmatch(file_id):
+        if not isinstance(file_id, str) or not DRIVE_FILE_ID.fullmatch(file_id):
             raise DriveError("bad_reply", _BAD_REPLY)
         return file_id
 
     def download(self, file_id: str, *, max_bytes: int) -> bytes:
-        """Содержимое файла, но не больше ``max_bytes`` байт.
+        """Содержимое файла не больше ``max_bytes`` байт; больше — отказ ``too_large``.
 
-        Дальше ``max_bytes`` ответ не читается: файл, подменённый в папке
-        огромным, не съест память сервера — отдастся его начало.
+        Молча обрезанный файл — битая картинка у шефа или мусор в
+        распознавании без следа; понятный отказ лучше. Читается не больше
+        ``max_bytes + 1`` байт: подменённый огромным файл не съест память.
         """
         _check_id(file_id)
         if max_bytes < 1:
@@ -222,11 +228,10 @@ class DriveClient:
         size = 0
         try:
             for chunk in response.iter_content(chunk_size=_CHUNK):
-                piece: bytes = chunk[: max_bytes - size]
-                chunks.append(piece)
-                size += len(piece)
-                if size >= max_bytes:
-                    break
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > max_bytes:
+                    raise DriveError("too_large", _TOO_LARGE)
         except requests.RequestException as error:
             raise DriveError("unavailable", _UNAVAILABLE) from error
         finally:
@@ -234,20 +239,36 @@ class DriveClient:
         return b"".join(chunks)
 
     def trash(self, file_id: str) -> None:
-        """Отправить файл в корзину Drive — не удалить.
+        """Отправить файл из папки фото в корзину Drive — не удалить.
 
         Ошибочно выброшенное фото шеф достанет из корзины сам; удаление
-        навсегда платформе не нужно.
+        навсегда платформе не нужно. С охватом ``drive`` платформа видит всё,
+        что открыто сервисному аккаунту, поэтому сначала проверяется, что файл
+        лежит в папке фото: неверный id не отправит в корзину чужой файл.
+        Файла уже нет — цель достигнута, это не ошибка.
         """
         _check_id(file_id)
-        reply = _json(
-            self._send(
-                "PATCH",
-                f"{FILES_URL}/{file_id}",
-                params={"fields": "id,trashed"},
-                json_body={"trashed": True},
+        if not self.folder_id:
+            raise ValueError("Не задана папка для фото: DRIVE_CARDS_FOLDER_ID пуст")
+        try:
+            where = _json(
+                self._send("GET", f"{FILES_URL}/{file_id}", params={"fields": "id,parents"})
             )
-        )
+            parents = where.get("parents")
+            if not isinstance(parents, list) or self.folder_id not in parents:
+                raise DriveError("forbidden", _NOT_IN_FOLDER, reason="notInPhotoFolder")
+            reply = _json(
+                self._send(
+                    "PATCH",
+                    f"{FILES_URL}/{file_id}",
+                    params={"fields": "id,trashed"},
+                    json_body={"trashed": True},
+                )
+            )
+        except DriveError as error:
+            if error.kind == "not_found":
+                return
+            raise
         if reply.get("trashed") is not True:
             raise DriveError("bad_reply", _BAD_REPLY)
 
@@ -327,14 +348,15 @@ class DriveClient:
         return self._session
 
 
-def authorized_session(
-    credentials_path: Path, scope: str, *, refresh_timeout: int
-) -> requests.Session:
+def authorized_session(credentials_path: Path, scope: str) -> requests.Session:
     """Сессия сервисного аккаунта с одним охватом доступа.
 
-    Собрана как у клиента таблиц: ``refresh_timeout`` — таймаут обновления
-    токена; ``type: ignore`` — у этих вызовов google-auth нет аннотаций типов.
-    Файл ключа читается здесь, сети нет до первого запроса.
+    Файл ключа читается здесь, сети нет до первого запроса. Отдельного
+    таймаута обновления токена нет: google-auth (2.57) обновляет токен с
+    таймаутом самого запроса (``functools.partial(self._auth_request,
+    timeout=…)``), а свой ``refresh_timeout`` лишь хранит. Таймаут на каждом
+    запросе клиента закрывает и обновление — это проверяет тест.
+    ``type: ignore`` — у этих вызовов google-auth нет аннотаций типов.
     """
     from google.auth.transport.requests import AuthorizedSession
     from google.oauth2.service_account import Credentials
@@ -342,9 +364,7 @@ def authorized_session(
     credentials = Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
         str(credentials_path), scopes=[scope]
     )
-    session: requests.Session = AuthorizedSession(  # type: ignore[no-untyped-call]
-        credentials, refresh_timeout=refresh_timeout
-    )
+    session: requests.Session = AuthorizedSession(credentials)  # type: ignore[no-untyped-call]
     return session
 
 
@@ -352,9 +372,8 @@ def drive_from_settings(settings: Settings) -> DriveClient:
     """Клиент боевого Drive: охват, папка и таймауты — из настроек."""
     path = settings.google_credentials_path
     scope = SCOPES[settings.drive_scope]
-    refresh = settings.google_refresh_timeout
     return DriveClient(
-        lambda: authorized_session(path, scope, refresh_timeout=refresh),
+        lambda: authorized_session(path, scope),
         folder_id=settings.drive_cards_folder_id,
         timeout=settings.google_timeout,
     )
@@ -363,7 +382,7 @@ def drive_from_settings(settings: Settings) -> DriveClient:
 def _check_id(file_id: str) -> None:
     """Id вклеивается в адрес запроса: «abc/permissions» превратил бы корзину в
     запрос к доступам. Такой id отвергается до сети."""
-    if not _FILE_ID.fullmatch(file_id):
+    if not DRIVE_FILE_ID.fullmatch(file_id):
         raise ValueError(f"Непохоже на идентификатор файла Drive: {file_id[:80]!r}")
 
 

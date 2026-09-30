@@ -7,11 +7,14 @@
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from typing import TYPE_CHECKING
 
 import check_cards_setup
 import pytest
+import requests
 
 from kitchen.config import Settings
 from kitchen.sync.drive import INSPECT_SCOPE, SCOPES
@@ -19,8 +22,6 @@ from tests.fake_drive import FOLDER_ID, ROBOT, SHEET_MIME, FakeDrive, FakeFile
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import requests
 
 FAKE_PRIVATE_KEY = (
     "-----BEGIN PRIVATE KEY-----\nNE-NASTOYASHCHII-KLYUCH\n-----END PRIVATE KEY-----\n"
@@ -59,7 +60,7 @@ class Setup:
         self.tmp_path = tmp_path
         self.drive = _drive()
         self.by_scope: dict[str, FakeDrive] = {}
-        self.opened: list[tuple[Path, str, int]] = []
+        self.opened: list[tuple[Path, str]] = []
         self.values: dict[str, object] = {
             "google_credentials_path": _key(tmp_path / "platform.json", ROBOT),
             "drive_cards_folder_id": FOLDER_ID,
@@ -76,12 +77,13 @@ class Setup:
     def _settings(self) -> Settings:
         return Settings(_env_file=None, **self.values)
 
-    def _session(self, path: Path, scope: str, *, refresh_timeout: int) -> requests.Session:
-        self.opened.append((path, scope, refresh_timeout))
+    def _session(self, path: Path, scope: str) -> requests.Session:
+        self.opened.append((path, scope))
         return self.by_scope.get(scope, self.drive).session()
 
-    def drives(self) -> list[FakeDrive]:
-        return [self.drive, *self.by_scope.values()]
+    def scopes(self) -> list[str]:
+        """Охваты открытых сессий по порядку."""
+        return [scope for _, scope in self.opened]
 
     def run(self, capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str]:
         code = check_cards_setup.main(list(argv))
@@ -116,32 +118,103 @@ def test_all_good(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_timeouts_and_scopes(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
-    """Папку и книги смотрит охват «только чтение метаданных», пробу грузит
-    сначала узкий ``drive.file``; таймауты — из настроек."""
+    """Книги смотрит полный ``drive`` (``drive.file`` их не видит, а «только
+    чтение» могло бы занизить право редактирования), папку — «только чтение
+    сведений», пробу грузит сначала узкий ``drive.file``. Всё — только GET,
+    кроме самой пробы; таймауты — из настроек."""
     code, _ = setup.run(capsys)
 
     assert code == 0
-    scopes = [scope for _, scope, _ in setup.opened]
-    assert scopes == [INSPECT_SCOPE, SCOPES["drive.file"]]
-    assert {refresh for _, _, refresh in setup.opened} == {14}
+    assert setup.scopes() == [SCOPES["drive"], INSPECT_SCOPE, SCOPES["drive.file"]]
     assert {s.timeout for s in setup.drive.sent} == {(4, 44)}
+    probe = [f.id for f in setup.drive.files.values() if f.own]
+    writes = [s for s in setup.drive.sent if s.method != "GET"]
+    assert [s.method for s in writes] == ["POST", "PATCH"]
+    assert writes[1].path.endswith(f"/{probe[0]}")
 
 
-def test_narrow_scope_not_enough_falls_back_to_drive(
+def test_books_read_with_full_scope(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    """Если бы право редактирования читалось охватом «только чтение», а Drive
+    учитывал охват, книга кухни молча получила бы «только чтение»."""
+    readonly = _drive()
+    readonly.files["cards-book"].can_edit = False
+    setup.by_scope[INSPECT_SCOPE] = readonly
+    setup.drive.files["kitchen-book"].can_edit = True
+
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    assert "книга карточек: есть право редактирования" in out
+    assert "книга кухни: есть право редактирования" in out
+    assert not [s for s in readonly.sent if "book" in s.path]
+
+
+def test_narrow_scope_not_enough_is_an_error(
     setup: Setup, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``drive.file`` не видит папку, созданную человеком, — пробуется ``drive``,
-    и вывод говорит, какое значение выставить."""
+    """``drive.file`` не видит папку, созданную человеком: проба проходит только
+    с ``drive``. Настроен ``drive.file`` — платформа не сохранит ни одного фото,
+    это ошибка с понятным действием, а не предупреждение."""
+    setup.by_scope[SCOPES["drive.file"]] = FakeDrive(only_own_files=True)
+
+    code, out = setup.run(capsys)
+
+    assert code == 1, out
+    assert "с DRIVE_SCOPE=drive.file фото не сохранятся" in out
+    assert "выставьте DRIVE_SCOPE=drive и перезапустите api" in out
+    assert "всё в порядке" not in out
+    assert setup.scopes()[-2:] == [SCOPES["drive.file"], SCOPES["drive"]]
+    [probe] = [f for f in setup.drive.files.values() if f.own]
+    assert probe.trashed is True
+
+
+def test_full_scope_configured_and_needed(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    setup.values["drive_scope"] = "drive"
     setup.by_scope[SCOPES["drive.file"]] = FakeDrive(only_own_files=True)
 
     code, out = setup.run(capsys)
 
     assert code == 0, out
-    assert "DRIVE_SCOPE=drive" in out
-    assert "DRIVE_SCOPE=drive.file" not in out
-    assert [scope for _, scope, _ in setup.opened][-2:] == [SCOPES["drive.file"], SCOPES["drive"]]
-    [probe] = [f for f in setup.drive.files.values() if f.own]
-    assert probe.trashed is True
+    assert "DRIVE_SCOPE=drive — так и выставлено" in out
+
+
+def test_full_scope_configured_but_narrow_is_enough(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Настроено шире нужного — работать будет; предупреждение, код 0."""
+    setup.values["drive_scope"] = "drive"
+
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    assert "ВНИМАНИЕ" in out
+    assert "выставьте DRIVE_SCOPE=drive.file" in out
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        requests.exceptions.ReadTimeout("Read timed out. (read timeout=44)"),
+        requests.exceptions.ConnectionError("Connection reset by peer"),
+    ],
+)
+def test_google_not_answering_is_not_a_scope_problem(
+    setup: Setup, capsys: pytest.CaptureFixture[str], error: Exception
+) -> None:
+    """Google не ответил на загрузку — это не повод расширять охват: ошибка
+    «повторите запуск», ``drive`` не пробуется. Ответ мог потеряться уже после
+    того, как файл создан, — имя пробы напечатано, чтобы его можно было найти."""
+    narrow = _drive()
+    narrow.drop_next(error)
+    setup.by_scope[SCOPES["drive.file"]] = narrow
+
+    code, out = setup.run(capsys)
+
+    assert code == 1
+    assert "Google не ответил — повторите запуск" in out
+    assert "DRIVE_SCOPE=" not in out
+    assert setup.scopes() == [SCOPES["drive"], INSPECT_SCOPE, SCOPES["drive.file"]]
+    assert "«проверка-настройки_" in out
 
 
 def test_no_scope_works(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
@@ -154,7 +227,7 @@ def test_no_scope_works(setup: Setup, capsys: pytest.CaptureFixture[str]) -> Non
     assert code == 1
     assert "ОШИБКА" in out
     assert "DRIVE_SCOPE=" not in out
-    assert [scope for _, scope, _ in setup.opened][-2:] == [SCOPES["drive.file"], SCOPES["drive"]]
+    assert setup.scopes()[-2:] == [SCOPES["drive.file"], SCOPES["drive"]]
 
 
 def test_no_probe_into_a_folder_that_failed_checks(
@@ -225,7 +298,7 @@ def test_cannot_add_files(setup: Setup, capsys: pytest.CaptureFixture[str]) -> N
     assert code == 1
     assert "добавлять файлы нельзя" in out
     assert "Менеджер контента" in out
-    assert [scope for _, scope, _ in setup.opened][-2:] == [SCOPES["drive.file"], SCOPES["drive"]]
+    assert setup.scopes()[-2:] == [SCOPES["drive.file"], SCOPES["drive"]]
 
 
 def test_capability_hint_does_not_override_the_probe(
@@ -332,3 +405,37 @@ def test_unreadable_bot_key_is_a_warning(setup: Setup, capsys: pytest.CaptureFix
 
     assert code == 0
     assert "ключ бота не прочитан" in out
+
+
+@pytest.mark.parametrize(("email", "verdict"), [(ROBOT, "тот же аккаунт"), (BOT, "другой аккаунт")])
+def test_bot_key_from_stdin(
+    setup: Setup,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    email: str,
+    verdict: str,
+) -> None:
+    """``--bot-key -`` читает ключ бота из stdin: второй копии ключа внутри
+    контейнера класть не нужно (``exec -T api … --bot-key - < bot.json``)."""
+    key = {"client_email": email, "private_key": FAKE_PRIVATE_KEY}
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(key)))
+
+    code, out = setup.run(capsys, "--bot-key", "-")
+
+    assert code == 0
+    assert verdict in out
+    assert BOT not in out
+    assert "NE-NASTOYASHCHII-KLYUCH" not in out
+
+
+def test_folder_link_instead_of_id(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    """Ссылка вместо id — понятная ошибка настройки и код 1, без трассировки."""
+    setup.values["drive_cards_folder_id"] = "https://drive.google.com/drive/folders/abc123"
+
+    code, out = setup.run(capsys)
+
+    assert code == 1
+    assert "ОШИБКА" in out
+    assert "после /folders/" in out
+    assert "Traceback" not in out
+    assert setup.opened == []

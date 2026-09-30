@@ -9,8 +9,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from kitchen.domain.cards import DRIVE_FILE_ID
 
 
 class Settings(BaseSettings):
@@ -86,6 +88,20 @@ class Settings(BaseSettings):
     @property
     def google_timeout(self) -> tuple[int, int]:
         return (self.google_connect_timeout, self.google_read_timeout)
+
+    @field_validator("drive_cards_folder_id")
+    @classmethod
+    def check_folder_id(cls, value: str) -> str:
+        # Скопировать ссылку на папку вместо id — самая вероятная ошибка
+        # настройки. Ловится при старте понятным текстом, а не трассировкой
+        # при первой загрузке фото.
+        if value and not DRIVE_FILE_ID.fullmatch(value):
+            msg = (
+                "DRIVE_CARDS_FOLDER_ID — нужен id папки (часть ссылки после /folders/), "
+                "а не ссылка целиком"
+            )
+            raise ValueError(msg)
+        return value
 
     @model_validator(mode="after")
     def check_sync_thresholds(self) -> Self:
