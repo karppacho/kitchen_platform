@@ -99,16 +99,17 @@ def test_kitchen_book_is_closed_even_without_bots() -> None:
         specs.INGREDIENTS.check_writable("price_per_kg")
 
 
-def test_only_the_cards_book_is_open() -> None:
-    """Храповик: запись открыта одной книге.
+def test_only_the_cards_sheet_is_open() -> None:
+    """Храповик: из всех описанных листов запись открыта одному — «Лист1»
+    книги карточек.
 
-    Открыть ещё одну — осознанная правка вместе с её писателем, а не
-    побочный эффект: у кухни, конкурентов и дегустаций не открыто ничего.
+    Открыть ещё что-то — осознанная правка вместе с писателем, а не
+    побочный эффект. Проверяются все листы, а не «все книги, кроме
+    карточек»: новое описание листа в книге карточек (там есть и листы,
+    которые ведут люди) тоже обязано прийти закрытым или покраснить тест.
     """
-    for spec in (*specs.ALL_SPECS, specs.TASTING_RATINGS):
-        if spec.spreadsheet == "ingredient_cards":
-            continue
-        assert spec.writable() == (), f"{spec.spreadsheet}/{spec.title}: открыта запись"
+    open_sheets = [spec for spec in (*specs.ALL_SPECS, specs.TASTING_RATINGS) if spec.writable()]
+    assert open_sheets == [specs.INGREDIENT_CARDS]
 
 
 def test_human_column_is_never_writable() -> None:

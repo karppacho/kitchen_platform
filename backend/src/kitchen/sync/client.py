@@ -79,7 +79,7 @@ class Spreadsheet(Protocol):
         ...
 
     def values_batch_get(
-        self, ranges: list[str], params: Mapping[str, str] | None = None
+        self, ranges: list[str], params: dict[str, str] | None = None
     ) -> dict[str, object]:
         """Несколько диапазонов ОДНИМ запросом.
 
@@ -92,6 +92,11 @@ class Spreadsheet(Protocol):
         из них ``valueRenderOption``: по умолчанию ``FORMATTED_VALUE`` —
         строки, как их видит человек («12,5»); ``UNFORMATTED_VALUE`` отдаёт
         числа числами — так записанное сверяется с тем, что писали.
+
+        gspread дописывает ``ranges`` в переданный словарь — передавайте
+        свежий на каждый вызов. Словарь-константа испортится после первого
+        же чтения, неизменяемое отображение упадёт ``TypeError``; поэтому
+        здесь ``dict``, а не ``Mapping``.
         """
         ...
 
