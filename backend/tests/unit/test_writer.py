@@ -24,27 +24,31 @@ from typing import TYPE_CHECKING
 import pytest
 import requests
 
-from kitchen.db.journal import FAILED, PENDING, ROLLED_BACK, VERIFIED
+from kitchen.config import Settings
+from kitchen.db.journal import FAILED, PENDING, ROLLED_BACK, VERIFIED, UnconfirmedWrite
 from kitchen.domain.cards import APPROVED, CardDraftData, card_row, drive_view_url
 from kitchen.sync import ownership, specs
 from kitchen.sync.ownership import ForbiddenWriteError
 from kitchen.sync.reader import SheetsReader
 from kitchen.sync.writer import (
+    HOLD_LIMIT,
     SHEET_WRITE_LOCK_KEY,
     AppendResult,
     CardSheetWriter,
     DuplicateNameError,
     HeaderDriftError,
+    LockLostError,
     SheetBusyError,
     SheetUnavailableError,
     WriteNotConfirmedError,
     WriteRefusedError,
     find_free_row,
+    hold_limit,
     name_conflicts,
     row_payload,
     sheet_number,
 )
-from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
+from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet, api_error
 from tests.fake_journal import FakeJournal
 from tests.fake_sheets import header, row
 
@@ -242,7 +246,7 @@ def test_body_is_two_raw_ranges_without_q_and_r() -> None:
     assert [item["range"] for item in data] == ["'Лист1'!A6:P6", "'Лист1'!S6:V6"]
     left, right = (item["values"] for item in data)
     assert [len(line) for line in left] == [16]
-    assert right == [["", "", "", APPROVED]]
+    assert right == [[None, None, None, APPROVED]], "пустое — null: ячейку не трогать"
     assert rig.writes() == ["values_batch_update"]
     assert rig.line(6)[_index("declaration")] == "декларация"
     assert body == row_payload(_values(), 6)
@@ -251,7 +255,7 @@ def test_body_is_two_raw_ranges_without_q_and_r() -> None:
 def test_numbers_go_as_json_numbers() -> None:
     """Белки, жиры, углеводы, ккал уходят числами JSON, а не текстом «12,5»:
     текст ломает шефу сортировку и формулы. Decimal("0.1") → 0.1, целое —
-    целым, неизвестное — пустой ячейкой, а не нулём."""
+    целым, неизвестное — null (ячейка не трогается), а не нулём."""
     rig = _rig()
 
     rig.append()
@@ -260,8 +264,8 @@ def test_numbers_go_as_json_numbers() -> None:
     data = body["data"]
     assert isinstance(data, list)
     numbers = data[0]["values"][0][_index("protein") : _index("kcal") + 1]
-    assert numbers == [0.1, 12.5, 12, ""]
-    assert [type(number) for number in numbers] == [float, float, int, str]
+    assert numbers == [0.1, 12.5, 12, None]
+    assert [type(number) for number in numbers] == [float, float, int, type(None)]
     assert rig.line(6)[_index("protein") : _index("kcal") + 1] == ["0,1", "12,5", "12", ""]
 
 
@@ -425,22 +429,60 @@ def test_name_conflicts_are_exact_after_normalising() -> None:
     assert name_conflicts(cells, "  ") == ()
 
 
-@pytest.mark.parametrize("method", ["worksheet", "values_batch_get", "batch_update"])
-def test_google_failure_before_write_changes_nothing(method: str) -> None:
-    """Google не ответил до записи — в таблице ничего не изменилось, журнал
-    пуст, повару понятный текст, а не имя исключения."""
-    cells = _cards(*EXISTING)
-    rig = _rig(cells=cells, rows=len(cells))
-    rig.book.fail_next(method, applied=False)
+@pytest.mark.parametrize(
+    ("method", "error", "reason"),
+    [
+        ("worksheet", None, "Google-таблица не ответила"),
+        ("values_batch_get", None, "Google-таблица не ответила"),
+        (
+            "worksheet",
+            api_error(403, "The caller does not have permission", "PERMISSION_DENIED"),
+            "Доступ платформы к таблице закрыт",
+        ),
+        (
+            "values_batch_get",
+            api_error(400, "Unable to parse range: 'Лист1'"),
+            "Лист «Лист1» не найден — возможно, его переименовали",
+        ),
+    ],
+    ids=["open-503", "read-503", "open-403", "read-400"],
+)
+def test_google_failure_before_write_changes_nothing(
+    method: str, error: Exception | None, reason: str
+) -> None:
+    """Google отказал до записи — в таблице ничего не изменилось, журнал
+    пуст, повару понятная причина, а не имя исключения: «не ответил» и
+    «доступ закрыт» чинятся по-разному."""
+    rig = _rig()
+    rig.book.fail_next(method, applied=False, error=error)
 
     with pytest.raises(SheetUnavailableError) as caught:
         rig.append()
 
-    assert "values_batch_update" not in rig.writes()
+    assert rig.writes() == []
     assert rig.journal.records == []
     assert str(caught.value) == (
-        "Google-таблица не ответила — в таблице ничего не изменилось. Черновик сохранён, "
-        "попробуйте ещё раз."
+        f"{reason} — в таблице ничего не изменилось. Черновик сохранён, попробуйте ещё раз."
+    )
+
+
+@pytest.mark.parametrize("applied", [False, True], ids=["refused", "timeout"])
+def test_grid_growth_failure_does_not_claim_nothing_changed(applied: bool) -> None:
+    """Дописать строки в конец сетки Google мог и успеть, не ответив: говорить
+    «ничего не изменилось» нельзя. Внизу могли появиться пустые строки —
+    вреда в них нет, но и молчать о них незачем. Карточка не записана."""
+    cells = _cards(*EXISTING)
+    rig = _rig(cells=cells, rows=len(cells))
+    rig.book.fail_next("batch_update", applied=applied)
+
+    with pytest.raises(SheetUnavailableError) as caught:
+        rig.append()
+
+    assert rig.writes() == ["batch_update"]
+    assert rig.journal.records == []
+    assert str(caught.value) == (
+        "Google-таблица не ответила, когда в конец таблицы добавлялись пустые строки: они "
+        "могли добавиться, а карточка не записана. Черновик сохранён, попробуйте ещё раз."
     )
 
 
@@ -478,6 +520,50 @@ def test_busy_writers_lock_is_sheet_busy() -> None:
     assert rig.journal.lock_keys == [SHEET_WRITE_LOCK_KEY]
 
 
+def test_lost_lock_refuses_before_the_write(caplog: pytest.LogCaptureFixture) -> None:
+    """База оборвала сессию, державшую очередь писателей, пока мы читали лист:
+    второй писатель уже мог выбрать ту же строку. Прямо перед записью
+    писатель проверяет, что очередь всё ещё его, — и отказывает до записи."""
+    rig = _rig()
+    rig.journal.lock_alive = False
+
+    with caplog.at_level(logging.ERROR, logger=LOG), pytest.raises(LockLostError) as caught:
+        rig.append()
+
+    assert isinstance(caught.value, SheetBusyError), "для отправки — та же «попробуйте ещё раз»"
+    assert str(caught.value) == (
+        "Связь с базой платформы прервалась до записи — в таблице ничего не изменилось. "
+        "Черновик сохранён, попробуйте ещё раз."
+    )
+    assert rig.writes() == []
+    record = rig.journal.only()
+    assert record.status == FAILED
+    assert record.error is not None and "очередь писателей" in record.error
+    assert [r.levelno for r in caplog.records] == [logging.ERROR]
+
+
+def test_lock_is_checked_right_before_the_write() -> None:
+    rig = _rig()
+
+    rig.append()
+
+    assert rig.journal.alive_checks == 1
+    assert rig.journal.holds == [HOLD_LIMIT]
+
+
+def test_hold_limit_outlasts_the_worst_write() -> None:
+    """Сколько очередь может держаться одной записью: худший случай — около
+    одиннадцати запросов к Google, каждый до (подключение + ответ) секунд.
+    Предел — двенадцать таких и минута сверху; дольше — процесс завис."""
+    settings = Settings(google_connect_timeout=10, google_read_timeout=60)
+
+    assert hold_limit(settings) == timedelta(minutes=15)
+    assert hold_limit(Settings()) == HOLD_LIMIT
+    assert hold_limit(Settings(google_connect_timeout=5, google_read_timeout=25)) == timedelta(
+        minutes=7
+    )
+
+
 # ---------------------------------------------------------------------------
 # Удачная запись и повтор
 # ---------------------------------------------------------------------------
@@ -513,6 +599,24 @@ def test_repeated_request_key_makes_no_requests() -> None:
     assert again == AppendResult(row=first.row, journal_id=first.journal_id, already_written=True)
     assert (rig.book.requests, rig.client.opened) == (asked, opened)
     assert len(rig.journal.records) == 1
+
+
+def test_repeat_after_success_names_edits_that_were_not_written() -> None:
+    """Карточка уже записана, а повтор с тем же ключом пришёл с правкой
+    жиров: ответ — та же строка, без запросов к Google, и правка названа —
+    в таблицу она не попала."""
+    rig = _rig()
+    first = rig.append()
+    asked = rig.book.requests
+    edited = _values()
+    edited["fat"] = Decimal("13.5")
+
+    again = rig.append(edited)
+
+    assert again == AppendResult(
+        row=first.row, journal_id=first.journal_id, already_written=True, not_written=("fat",)
+    )
+    assert rig.book.requests == asked
 
 
 # ---------------------------------------------------------------------------
@@ -587,6 +691,27 @@ def test_cell_changed_after_write_clears_only_ours() -> None:
     record = rig.journal.only()
     assert record.status == ROLLED_BACK
     assert record.error is not None and "B" in record.error
+
+
+def test_empty_fields_leave_chef_cells_alone() -> None:
+    """Описание у нашей карточки пустое и уходит null — ячейка не трогается.
+    Шеф вписал описание в нашу строку за миг до записи: оно цело. Строка
+    при этом не наша целиком — его D чужая, — поэтому наши ячейки убраны,
+    а его описание осталось. Пустая строка вместо null стёрла бы его."""
+    rig = _rig()
+    rig.book.chef_edits_cell("'Лист1'!D6", "описание шефа", moment="before_write")
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.append()
+
+    assert caught.value.layout_confirmed
+    line = rig.line(6)
+    assert line[_index("description")] == "описание шефа"
+    assert [cell for i, cell in enumerate(line) if i != _index("description")] == [""] * (WIDTH - 1)
+    record = rig.journal.only()
+    assert record.status == ROLLED_BACK
+    assert record.error is not None and "D" in record.error
+    assert record.values["description"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -757,7 +882,11 @@ def test_failed_clear_is_not_confirmed(caplog: pytest.LogCaptureFixture) -> None
     ):
         rig.append()
 
-    assert str(caught.value) == UNCONFIRMED
+    assert str(caught.value) == (
+        "Google-таблица не ответила, когда из строки 6 убирались наши ячейки, — что в ней "
+        "осталось, неизвестно. Покажите шефу строку 6 (запись журнала №1). Черновик сохранён."
+    )
+    assert not caught.value.layout_confirmed
     record = rig.journal.only()
     assert record.status == FAILED
     assert record.error is not None and "очистка" in record.error
@@ -768,24 +897,75 @@ def test_failed_clear_is_not_confirmed(caplog: pytest.LogCaptureFixture) -> None
 # ---------------------------------------------------------------------------
 # Повторная отправка после сбоя
 # ---------------------------------------------------------------------------
-def test_retry_after_unconfirmed_finds_our_row_by_label_link() -> None:
+def test_retry_after_unconfirmed_finds_our_row_but_keeps_the_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Раскладка не подтвердилась, а наша строка легла. Повтор находит её по
-    имени и своей ссылке этикетки в P: это прежняя попытка — строка та же,
-    ноль запросов записи, в журнале verified с пометкой."""
+    своей ссылке этикетки в P: строка та же, ноль запросов записи. Но первая
+    попытка, возможно, затёрла чужую карточку: повар, нажавший «Отправить»
+    ещё раз, не должен увидеть голое «Записано» — в ответе прежняя попытка с
+    номером строки и журнала, в лог — ERROR ещё раз."""
     rig = _rig()
     rig.book.chef_inserts_rows("Лист1", above=5, moment="before_write")
     with pytest.raises(WriteNotConfirmedError):
         rig.append()
     writes = rig.writes()
+    caplog.clear()
 
-    result = rig.append()
+    with caplog.at_level(logging.ERROR, logger=LOG):
+        result = rig.append()
 
-    assert result == AppendResult(row=6, journal_id=2, already_written=True)
+    assert result == AppendResult(
+        row=6, journal_id=2, already_written=True, shifted=UnconfirmedWrite(id=1, row=6)
+    )
     assert rig.writes() == writes
     first, second = rig.journal.records
     assert (first.status, second.status) == (FAILED, VERIFIED)
     assert second.row == 6
-    assert second.note == "найдена прежняя попытка: строка уже в таблице"
+    assert second.note is not None
+    assert second.note.startswith("найдена прежняя попытка: строка уже в таблице")
+    assert "журнал №1" in second.note
+    [message] = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "журнал №1" in message and "строк" in message
+
+
+def test_prior_attempt_names_edits_that_were_not_written() -> None:
+    """После сбоя черновик снова открыт: повар поправил жиры и отправил ещё
+    раз. Строка прежней попытки уже лежит — писатель отвечает ею, но сверяет
+    с отправляемым: правка жиров в таблицу не попала, и это названо."""
+    rig = _rig()
+    rig.book.chef_inserts_rows("Лист1", above=5, moment="before_write")
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    edited = _values()
+    edited["fat"] = Decimal("13.5")
+
+    result = rig.append(edited)
+
+    assert (result.row, result.already_written, result.not_written) == (6, True, ("fat",))
+    assert rig.line(6)[_index("fat")] == "12,5", "в листе — первая версия"
+    found = rig.journal.records[-1]
+    assert found.values["fat"] == 13.5, "в журнале — отправленное в этот раз"
+    assert found.note is not None and "не записаны: I" in found.note
+    assert found.after is not None
+    assert found.after["rows"]["6"][_index("fat")] == "12,5"
+
+
+def test_prior_attempt_is_found_by_label_link_even_after_rename() -> None:
+    """Шеф поправил имя в строке прежней попытки. Свою строку писатель ищет по
+    ссылке этикетки во всём листе, а не только среди тёзок: второй строки нет,
+    а правка имени названа."""
+    rig = _rig()
+    rig.book.chef_inserts_rows("Лист1", above=5, moment="before_write")
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    rig.book.chef_edits_cell("'Лист1'!B6", "Соус Барбекю домашний", moment="now")
+    writes = rig.writes()
+
+    result = rig.append()
+
+    assert (result.row, result.already_written, result.not_written) == (6, True, ("name",))
+    assert rig.writes() == writes
 
 
 def test_duplicate_with_foreign_label_link_is_refused() -> None:
@@ -833,8 +1013,9 @@ def test_unknown_outcome_stays_pending_and_retry_settles_it(
         rig.append()
 
     assert str(caught.value) == (
-        "Google не ответил, и пока неизвестно, легла ли строка 6. Черновик сохранён — "
-        "отправьте ещё раз: повтор сначала проверит эту строку, второй не будет."
+        "Google-таблица не ответила: не удалось перечитать строку 6, и пока неизвестно, "
+        "легла ли она. Черновик сохранён — отправьте ещё раз: повтор сначала проверит эту "
+        "строку, второй не будет."
     )
     record = rig.journal.only()
     assert record.status == PENDING
@@ -845,6 +1026,84 @@ def test_unknown_outcome_stays_pending_and_retry_settles_it(
     assert result == AppendResult(row=6, journal_id=1, already_written=True)
     assert rig.journal.only().status == VERIFIED
     assert rig.writes() == ["values_batch_update"]
+
+
+def test_resumed_attempt_never_clears_a_landed_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Строка легла, но перечитать не удалось — запись висит pending. Прошли
+    часы: шеф поправил состав (G), согласование (V) и вписал декларацию (Q).
+    Повар отправляет ещё раз. Правило «чужая ячейка — убрать наши» — для окна
+    в секунду в том же вызове, что и запись; к строке, которой шеф с тех пор
+    пользуется, оно не применяется никогда: verified, строка та же, ни одной
+    очистки, отличия — в журнале и в ответе."""
+    rig = _rig()
+    _google_down_after_write(rig, monkeypatch, applied=True)
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    monkeypatch.undo()
+    rig.book.chef_edits_cell("'Лист1'!G6", "томаты, сахар, соль", moment="now")
+    rig.book.chef_edits_cell("'Лист1'!V6", "Отбракован", moment="now")
+    rig.book.chef_edits_cell("'Лист1'!Q6", "декларация", moment="now")
+
+    result = rig.append()
+
+    assert result == AppendResult(
+        row=6,
+        journal_id=1,
+        already_written=True,
+        not_written=("composition", "approval_status"),
+    )
+    assert "values_batch_clear" not in rig.writes()
+    line = rig.line(6)
+    assert (line[_index("composition")], line[_index("approval_status")]) == (
+        "томаты, сахар, соль",
+        "Отбракован",
+    )
+    assert line[_index("name")] == "Соус Барбекю"
+    record = rig.journal.only()
+    assert record.status == VERIFIED
+    assert record.note is not None and "G, V" in record.note
+    reader = SheetsReader(rig.client, {"ingredient_cards": "cards-id"})
+    [imported] = [item for item in reader.read(SPEC).rows if item.number == 6]
+    assert record.content_hash == imported.content_hash, "хеш — строки, какая она сейчас"
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (None, "Google-таблица не ответила"),
+        (
+            api_error(403, "The caller does not have permission", "PERMISSION_DENIED"),
+            "Доступ платформы к таблице закрыт",
+        ),
+        (
+            api_error(400, "Unable to parse range: 'Лист1'!A5:V6"),
+            "Лист «Лист1» не найден — возможно, его переименовали",
+        ),
+        (api_error(404, "Requested entity was not found.", "NOT_FOUND"), "Таблица не найдена"),
+    ],
+    ids=["503", "403", "400", "404"],
+)
+def test_failed_reread_names_the_reason(
+    monkeypatch: pytest.MonkeyPatch, error: Exception | None, reason: str
+) -> None:
+    """Перечитать после записи не удалось. Исход неизвестен — pending, но
+    причина названа: «доступ закрыт» и «лист переименован» чинятся не
+    повтором, и «Google не ответил» увёл бы искать не там."""
+    rig = _rig()
+    original = rig.book.values_batch_update
+
+    def write(body: Mapping[str, object] | None = None) -> dict[str, object]:
+        reply = original(body)
+        rig.book.fail_next("values_batch_get", applied=False, error=error)
+        return reply
+
+    monkeypatch.setattr(rig.book, "values_batch_update", write)
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.append()
+
+    assert str(caught.value).startswith(f"{reason}: не удалось перечитать строку 6")
+    assert rig.journal.only().status == PENDING
 
 
 def test_retry_writes_when_interrupted_attempt_did_not_land(
@@ -884,7 +1143,10 @@ def test_retry_refuses_when_interrupted_row_holds_someone_else(
     with pytest.raises(WriteNotConfirmedError) as caught:
         rig.append()
 
-    assert str(caught.value) == UNCONFIRMED
+    assert str(caught.value) == (
+        "Таблицу меняли, пока прежняя попытка записи оставалась незавершённой, — запись не "
+        "подтверждена. Покажите шефу строку 6 (запись журнала №1). Черновик сохранён."
+    )
     record = rig.journal.only()
     assert record.status == FAILED
     assert "sheet" in record.before
@@ -896,17 +1158,30 @@ def test_retry_refuses_when_interrupted_row_holds_someone_else(
 # Правило 9 sheets-guard: единственный писатель
 # ---------------------------------------------------------------------------
 SRC = Path(__file__).resolve().parents[2] / "src"
-_WRITE_CALL = re.compile(r"\.(?:values_batch_update|values_batch_clear|batch_update)\(")
+_WRITE_METHODS = re.compile(
+    r"\b(?:update_cells?|append_rows?|batch_clear|insert_rows?|delete_rows|values_update"
+    r"|values_append|values_clear|values_batch_update|values_batch_clear|batch_update)\b"
+)
+_PROTOCOL = {"values_batch_update", "values_batch_clear", "batch_update"}
+"""Методы записи, которые объявляет протокол таблицы в ``sync/client.py``."""
 
 
 def test_only_the_writer_writes_to_sheets() -> None:
     """Запись в таблицу — один путь: ``CardSheetWriter`` под блокировкой
-    писателей. Вызов метода записи где-то ещё — второй писатель без сверки и
-    журнала, то, от чего правило 9 и уводит."""
-    found = {
-        path.relative_to(SRC).as_posix()
-        for path in SRC.rglob("*.py")
-        if _WRITE_CALL.search(path.read_text(encoding="utf-8"))
-    }
+    писателей. Метод записи где-то ещё — второй писатель без сверки и
+    журнала, то, от чего правило 9 и уводит.
 
-    assert found == {"kitchen/sync/writer.py"}
+    Ловится и упоминание без вызова: ссылка на метод (``write =
+    book.values_update``) — та же запись. Список — однозначные методы записи
+    gspread 6.2. ``.update(`` и ``.clear(`` не ловятся: так же зовутся методы
+    словаря и множества, и храповик краснел бы на каждом ``dict.update``.
+    """
+    found: dict[str, set[str]] = {}
+    for path in SRC.rglob("*.py"):
+        names = set(_WRITE_METHODS.findall(path.read_text(encoding="utf-8")))
+        if names:
+            found[path.relative_to(SRC).as_posix()] = names
+
+    assert set(found) <= {"kitchen/sync/writer.py", "kitchen/sync/client.py"}, found
+    assert found["kitchen/sync/client.py"] == _PROTOCOL, "протокол объявляет только эти"
+    assert found["kitchen/sync/writer.py"] >= _PROTOCOL

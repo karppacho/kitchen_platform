@@ -1,9 +1,10 @@
 """Журнал записей в памяти — дублёр ``kitchen.db.journal.DbJournal``.
 
 Офлайн-тестам писателя нужна не база, а то, на что писатель опирается:
-блокировка писателей с пределом ожидания, поиск открытой записи по ключу
-запроса и одна открытая запись на ключ — как частичный уникальный индекс в
-базе. Настоящий журнал на Postgres проверяют интеграционные тесты.
+очередь писателей с пределом ожидания и проверкой, что она ещё держится;
+поиск открытой записи по ключу запроса и одна открытая запись на ключ — как
+частичный уникальный индекс в базе; завершение записи только из ``pending``.
+Настоящий журнал на Postgres проверяют интеграционные тесты.
 """
 
 from __future__ import annotations
@@ -16,10 +17,13 @@ from typing import TYPE_CHECKING
 
 from kitchen.db.journal import (
     FAILED,
+    LAYOUT_UNCONFIRMED,
     OPEN_STATUSES,
     PENDING,
+    ROLLED_BACK,
     VERIFIED,
     OpenWrite,
+    UnconfirmedWrite,
     WritersBusyError,
 )
 
@@ -51,6 +55,18 @@ class Record:
     finished: bool = False
 
 
+class FakeLock:
+    """Очередь писателей, которую держит писатель. ``alive`` тест может
+    выключить — так выглядит сессия замка, убитая базой посреди записи."""
+
+    def __init__(self, journal: FakeJournal) -> None:
+        self._journal = journal
+
+    def alive(self) -> bool:
+        self._journal.alive_checks += 1
+        return self._journal.lock_alive
+
+
 class FakeJournal:
     """Журнал в памяти. Блокировка писателей — настоящая, с пределом ожидания:
     тест может занять её сам и проверить «таблица занята»."""
@@ -59,15 +75,19 @@ class FakeJournal:
         self.records: list[Record] = []
         self.lock = threading.Lock()
         self.lock_keys: list[int] = []
+        self.holds: list[timedelta] = []
+        self.lock_alive = True
+        self.alive_checks = 0
         self._ids = itertools.count(1)
 
     @contextmanager
-    def writers_lock(self, key: int, timeout: timedelta) -> Iterator[None]:
+    def writers_lock(self, key: int, wait: timedelta, hold: timedelta) -> Iterator[FakeLock]:
         self.lock_keys.append(key)
-        if not self.lock.acquire(timeout=timeout.total_seconds()):
+        self.holds.append(hold)
+        if not self.lock.acquire(timeout=wait.total_seconds()):
             raise WritersBusyError("блокировку писателей держит другой писатель")
         try:
-            yield
+            yield FakeLock(self)
         finally:
             self.lock.release()
 
@@ -83,13 +103,31 @@ class FakeJournal:
                 )
         return None
 
+    def find_unconfirmed(self, request_key: str) -> UnconfirmedWrite | None:
+        for record in reversed(self.records):
+            if (
+                record.request_key == request_key
+                and record.status == FAILED
+                and record.note == LAYOUT_UNCONFIRMED
+            ):
+                return UnconfirmedWrite(id=record.id, row=record.row)
+        return None
+
     def start(self, write: NewWrite) -> int:
         return self._add(write, PENDING).id
 
-    def found(self, write: NewWrite, *, content_hash: str, note: str) -> int:
+    def found(
+        self,
+        write: NewWrite,
+        *,
+        content_hash: str,
+        note: str,
+        after: Mapping[str, object] | None = None,
+    ) -> int:
         record = self._add(write, VERIFIED)
         record.content_hash = content_hash
         record.note = note
+        record.after = after
         record.finished = True
         return record.id
 
@@ -105,8 +143,9 @@ class FakeJournal:
         after: Mapping[str, object] | None = None,
     ) -> None:
         record = self.get(write_id)
-        assert record.status == PENDING, f"завершить можно только pending, а не {record.status}"
-        assert status in (VERIFIED, FAILED, "rolled_back"), status
+        if record.status != PENDING:
+            raise RuntimeError(f"запись журнала №{write_id} уже завершена: {record.status}")
+        assert status in (VERIFIED, FAILED, ROLLED_BACK), status
         record.status = status
         record.content_hash = content_hash
         record.error = error
@@ -118,7 +157,8 @@ class FakeJournal:
 
     def annotate(self, write_id: int, *, error: str) -> None:
         record = self.get(write_id)
-        assert record.status == PENDING, "пометка — только у незавершённой записи"
+        if record.status != PENDING:
+            raise RuntimeError(f"запись журнала №{write_id} уже завершена: {record.status}")
         record.error = error
 
     # --- для тестов ---------------------------------------------------------

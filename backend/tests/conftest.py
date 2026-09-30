@@ -187,14 +187,16 @@ _METHODS = (
 """Вызовы Sheets API, которым тест может заказать отказ. Открытие листа —
 тоже запрос, и у писателя он первый."""
 
-_MOMENTS = ("before_write", "after_write", "after_clear")
+_MOMENTS = ("before_write", "after_write", "after_clear", "now")
 """Когда шеф успевает что-то сделать в листе.
 
 ``before_write`` — между нашим чтением листа и записью: срабатывает, когда
 приходит следующий ``values_batch_update``, до того как он что-то сделал.
 ``after_write`` — сразу после того, как запись легла, до её перечитывания
 (и до ответа: при отказе «после применения» — тоже). ``after_clear`` —
-сразу после того, как легла очистка."""
+сразу после того, как легла очистка. ``now`` — сразу, между нашими
+вызовами: так шеф правит лист часы спустя, пока прежняя попытка записи
+висит незавершённой."""
 
 
 class FakeSpreadsheet:
@@ -280,7 +282,7 @@ class FakeSpreadsheet:
         sheet, box, anchor = self._target(cell)
         assert box is not None and anchor, f"вписать можно в одну ячейку, а не в «{cell}»"
         top, left = box.top, box.left
-        self._chef.append((moment, lambda: sheet._put(top, left, value)))
+        self._order(moment, lambda: sheet._put(top, left, value))
 
     def chef_inserts_rows(self, title: str, above: int, count: int = 1, *, moment: str) -> None:
         """Шеф вставил ``count`` пустых строк над строкой ``above`` листа
@@ -297,7 +299,13 @@ class FakeSpreadsheet:
         assert count >= 1, f"вставить можно хотя бы одну строку, а не «{count}»"
         sheet = self._sheets[title]
         assert above <= sheet._grid_rows, f"строки {above} нет в сетке листа «{title}»"
-        self._chef.append((moment, lambda: sheet._insert_rows(above - 1, count)))
+        self._order(moment, lambda: sheet._insert_rows(above - 1, count))
+
+    def _order(self, moment: str, action: Callable[[], None]) -> None:
+        if moment == "now":
+            action()
+        else:
+            self._chef.append((moment, action))
 
     def chef_waiting(self) -> list[str]:
         """Окна заказанных, но ещё не сработавших правок шефа.

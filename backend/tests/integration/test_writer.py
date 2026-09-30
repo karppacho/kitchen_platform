@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -21,6 +22,7 @@ from alembic.config import Config
 from sqlalchemy import create_engine, func, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 
+from kitchen.db import journal as journal_module
 from kitchen.db import models
 from kitchen.db.journal import FAILED, PENDING, VERIFIED, DbJournal, NewWrite
 from kitchen.domain.cards import APPROVED, CardDraftData, card_row
@@ -28,12 +30,19 @@ from kitchen.sync import specs
 from kitchen.sync.cycle import BookOutcome, SyncCycle
 from kitchen.sync.importer import take_import_lock
 from kitchen.sync.reader import SheetsReader
-from kitchen.sync.writer import SHEET_WRITE_LOCK_KEY, CardSheetWriter, SheetBusyError
+from kitchen.sync.writer import (
+    SHEET_WRITE_LOCK_KEY,
+    CardSheetWriter,
+    LockLostError,
+    SheetBusyError,
+)
 from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
 from tests.fake_sheets import IDS, cards_sheet, kitchen_sheets, row, sheets_client
 from tests.integration.test_database import BACKEND, _url
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sqlalchemy.orm import Session, sessionmaker
 
 pytestmark = pytest.mark.integration
@@ -62,24 +71,62 @@ def _values(name: str = "Соус Барбекю", label: str = "lbl1") -> dict[
 class SlowSpreadsheet(FakeSpreadsheet):
     """Книга карточек, чтение листа целиком в которой идёт заметное время: за
     него второй писатель успевает встать в очередь — или, без блокировки,
-    прочитать тот же лист и выбрать ту же строку."""
+    прочитать тот же лист и выбрать ту же строку.
+
+    ``on_read`` вызывается, когда лист прочитан (до записи), ``on_reread`` —
+    когда писатель перечитывает свою строку числами (после записи)."""
+
+    def __init__(
+        self,
+        sheets: dict[str, FakeWorksheet],
+        *,
+        delay: float = 0.3,
+        on_read: Callable[[], object] | None = None,
+        on_reread: Callable[[], object] | None = None,
+    ) -> None:
+        super().__init__(sheets)
+        self._delay = delay
+        self._on_read = on_read
+        self._on_reread = on_reread
 
     def values_batch_get(
         self, ranges: list[str], params: dict[str, str] | None = None
     ) -> dict[str, object]:
         if ranges == ["'Лист1'"]:
-            time.sleep(0.3)
+            time.sleep(self._delay)
+            if self._on_read is not None:
+                self._on_read()
+        elif (params or {}).get("valueRenderOption") == "UNFORMATTED_VALUE" and self._on_reread:
+            self._on_reread()
         return super().values_batch_get(ranges, params)
 
 
-def _client(*, slow: bool = False) -> FakeSheetsClient:
+def _client(*, slow: bool = False, **options) -> FakeSheetsClient:
     """Обе книги; лист карточек — три карточки в строках 3–5."""
     client = sheets_client()
-    kind = SlowSpreadsheet if slow else FakeSpreadsheet
-    client._spreadsheets[IDS["ingredient_cards"]] = kind(
-        {"Лист1": FakeWorksheet(cards_sheet(), "Лист1")}
+    sheets = {"Лист1": FakeWorksheet(cards_sheet(), "Лист1")}
+    client._spreadsheets[IDS["ingredient_cards"]] = (
+        SlowSpreadsheet(sheets, **options) if slow or options else FakeSpreadsheet(sheets)
     )
     return client
+
+
+def _kill_lock_holder() -> None:
+    """База обрывает сессию, которая держит очередь писателей, — как по
+    `idle_in_transaction_session_timeout` или при перезапуске пулера."""
+    engine = create_engine(_url())
+    try:
+        with engine.begin() as connection:
+            killed = connection.scalar(
+                text(
+                    "select count(pg_terminate_backend(pid)) from pg_locks "
+                    "where locktype = 'advisory' and objid = :key and granted"
+                ),
+                {"key": SHEET_WRITE_LOCK_KEY},
+            )
+        assert killed == 1, "очередь писателей никто не держал"
+    finally:
+        engine.dispose()
 
 
 def _writer(
@@ -174,6 +221,110 @@ def test_writer_waits_for_writers_not_for_import(sessions) -> None:
         holder.rollback()
         holder.close()
     assert _cards_book(client).requests == asked
+
+
+def test_statement_timeout_while_waiting_is_busy_too(
+    sessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ожидание очереди может оборвать и `statement_timeout` (SQLSTATE 57014),
+    если он короче ожидания: для повара это та же «таблица занята», а не
+    сырая ошибка базы."""
+    monkeypatch.setattr(journal_module, "_STATEMENT_MARGIN", timedelta(seconds=-0.8))
+    client = _client()
+    holder = sessions()
+    holder.begin()
+    holder.execute(text("select pg_advisory_xact_lock(:key)"), {"key": SHEET_WRITE_LOCK_KEY})
+    try:
+        with pytest.raises(SheetBusyError, match="Таблица занята") as caught:
+            _writer(client, sessions, lock_timeout=timedelta(seconds=1)).append(
+                _values(), actor_id=None, request_key=KEY
+            )
+    finally:
+        holder.rollback()
+        holder.close()
+    busy = caught.value.__cause__
+    assert busy is not None and busy.__cause__ is not None
+    assert busy.__cause__.orig.sqlstate == "57014", "оборвал именно statement_timeout"
+
+
+def test_lock_outlives_short_idle_timeout_of_the_role(sessions) -> None:
+    """У роли в базе короткий `idle_in_transaction_session_timeout` (0,5 с), а
+    писатель держит очередь дольше — пока читает лист (1 с). Транзакция
+    очереди стоит без запросов, и база оборвала бы её, отпустив очередь
+    второму писателю. `SET LOCAL` поднимает предел для этой транзакции —
+    очередь устояла, второй писатель дождался и взял следующую строку."""
+    engine = create_engine(_url())
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text("alter role current_user set idle_in_transaction_session_timeout = '500ms'")
+            )
+        client = _client(delay=1.0)
+        writer = _writer(client, sessions)
+        results: list[int] = []
+        errors: list[Exception] = []
+
+        def submit(name: str, label: str, key: str) -> None:
+            try:
+                results.append(
+                    writer.append(_values(name, label), actor_id=None, request_key=key).row
+                )
+            except Exception as error:  # ошибку потока показываем в утверждении
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=submit, args=("Соус Барбекю", "lbl1", "card-draft:1")),
+            threading.Thread(target=submit, args=("Соус Сырный", "lbl2", "card-draft:2")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("alter role current_user reset idle_in_transaction_session_timeout")
+            )
+        engine.dispose()
+
+    assert errors == []
+    assert sorted(results) == [6, 7]
+
+
+def test_lost_lock_refuses_before_the_write(sessions) -> None:
+    """База оборвала сессию очереди, пока писатель читал лист: второй писатель
+    мог бы уже выбрать ту же строку. Перед записью писатель проверяет, что
+    очередь всё ещё его, — и отказывает, ничего не записав."""
+    client = _client(on_read=_kill_lock_holder)
+
+    with pytest.raises(LockLostError, match="Связь с базой платформы прервалась"):
+        _writer(client, sessions).append(_values(), actor_id=None, request_key=KEY)
+
+    assert "values_batch_update" not in [name for name, _ in _cards_book(client).calls]
+    [record] = _journal(sessions)
+    assert record.status == FAILED
+    assert record.error is not None and "очередь писателей" in record.error
+    assert _line(client, 6) == [""] * WIDTH
+
+
+def test_releasing_a_dead_lock_does_not_replace_the_result(
+    sessions, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Сессию очереди оборвали уже после записи. Запись состоялась и сверена —
+    ошибка отката при отпускании очереди уходит в лог, а не подменяет ответ
+    повару ошибкой базы."""
+    client = _client(on_reread=_kill_lock_holder)
+    # Фикстура поднимает схему alembic-ом, а его env.py зовёт fileConfig —
+    # тот выключает все уже созданные логгеры, и лог журнала тест не увидел
+    # бы. В работающем приложении alembic идёт отдельным процессом.
+    monkeypatch.setattr(journal_module.log, "disabled", False)
+
+    with caplog.at_level(logging.WARNING, logger="kitchen.db"):
+        result = _writer(client, sessions).append(_values(), actor_id=None, request_key=KEY)
+
+    assert (result.row, result.already_written) == (6, False)
+    assert _journal(sessions)[0].status == VERIFIED
+    assert any("очередь писателей" in r.getMessage() for r in caplog.records), caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +475,22 @@ def test_unknown_status_is_refused_by_database(sessions) -> None:
 
     with pytest.raises(IntegrityError):
         journal.finish(write_id, status="почти")
+
+
+def test_only_pending_write_can_be_finished(sessions) -> None:
+    """Итог записи ставится один раз: завершённую запись журнала поздний
+    вызов не перепишет — ни исход, ни причину."""
+    journal = DbJournal(sessions)
+    write_id = journal.start(_new())
+    journal.finish(write_id, status=VERIFIED, content_hash="0" * 64)
+
+    with pytest.raises(RuntimeError, match="уже завершена"):
+        journal.finish(write_id, status=FAILED, error="поверх")
+    with pytest.raises(RuntimeError, match="уже завершена"):
+        journal.annotate(write_id, error="поверх")
+
+    [record] = _journal(sessions)
+    assert (record.status, record.error) == (VERIFIED, None)
 
 
 def test_deleted_profile_keeps_the_journal(sessions) -> None:

@@ -405,6 +405,19 @@ def test_chef_acts_right_after_clear() -> None:
     assert _read(book, "'Лист1'!A2:C3") == [HEAD, ["Соусы", "Кетчуп"]]
 
 
+def test_chef_can_act_right_now() -> None:
+    """«Сейчас» — между нашими вызовами: так шеф правит лист часы спустя, пока
+    прежняя попытка записи висит незавершённой. Правка — не запрос к Google."""
+    book, _ = _book()
+
+    book.chef_edits_cell("'Лист1'!C2", "Юг", moment="now")
+    book.chef_inserts_rows("Лист1", above=2, moment="now")
+
+    assert book.chef_waiting() == []
+    assert book.requests == 0
+    assert _read(book, "'Лист1'!A2:C3") == [[], ["Соусы", "Кетчуп", "Юг"]]
+
+
 def test_chef_waits_for_his_moment() -> None:
     """Правка на окно «после записи» ждёт записи, которая легла: чтение её
     не будит, отказ до применения — тоже."""
