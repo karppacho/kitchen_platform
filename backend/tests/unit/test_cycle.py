@@ -25,6 +25,7 @@ from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
 from tests.fake_sheets import IDS, header, kitchen_sheets, row, sheets_client
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
 ACCESS = "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
@@ -338,7 +339,9 @@ def test_network_failure_is_no_answer_despite_errno() -> None:
 class BatchReadFails(FakeSpreadsheet):
     """Список листов пришёл, а пакетное чтение значений упало."""
 
-    def values_batch_get(self, ranges: list[str]) -> dict[str, object]:
+    def values_batch_get(
+        self, ranges: list[str], params: Mapping[str, str] | None = None
+    ) -> dict[str, object]:
         raise RuntimeError("что-то совсем новое")
 
 

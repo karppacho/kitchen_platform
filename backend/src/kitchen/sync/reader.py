@@ -106,8 +106,12 @@ def _cell(raw: Cells, row_index: int, column_index: int) -> str:
     return row[column_index]
 
 
-def _convert(value: str, kind: Kind) -> CellValue:
+def convert_cell(value: str, kind: Kind) -> CellValue:
     """Разобрать ячейку по её виду.
+
+    Открыта наружу ради писателя строки: записанное он сверяет, разбирая
+    перечитанные ячейки этой же функцией, — иначе запись и импорт разошлись
+    бы в мелочах вроде запятой.
 
     Пустое даёт разное в зависимости от вида, и это осознанно:
 
@@ -130,7 +134,12 @@ def _convert(value: str, kind: Kind) -> CellValue:
     return int(parsed) if parsed is not None else None
 
 
-def _hash(cells: list[str]) -> str:
+def row_hash(cells: list[str]) -> str:
+    """Хеш строки листа — тот, что импорт кладёт в ``content_hash``.
+
+    Писатель строки считает его той же функцией: хеш записанной строки
+    обязан совпасть с хешем, который потом посчитает импорт.
+    """
     # Разделитель, которого не бывает в ячейках, — иначе «a|b» и «a», «b»
     # дали бы один хеш.
     joined = "\x1f".join(cells)
@@ -257,7 +266,7 @@ class SheetsReader:
             result[sheet_label(spec)] = self._parse(spec, title, _values_of(ranges[index]))
 
     def _parse(self, spec: SheetSpec, title: str, raw: Cells) -> SheetData:
-        issues = _check_header(spec, raw)
+        issues = check_header(spec, raw)
 
         rows: list[Row] = []
         for index in range(spec.header_rows, len(raw)):
@@ -268,26 +277,30 @@ class SheetsReader:
                 continue
 
             values: dict[str, CellValue] = {
-                column.field: _convert(cell, column.kind)
+                column.field: convert_cell(cell, column.kind)
                 for column, cell in zip(spec.columns, cells, strict=True)
             }
             rows.append(
                 Row(
                     number=index + 1,
                     values=values,
-                    content_hash=_hash(cells),
+                    content_hash=row_hash(cells),
                 )
             )
 
         return SheetData(spec=spec, title=title, rows=tuple(rows), header_issues=issues)
 
 
-def _check_header(spec: SheetSpec, raw: Cells) -> tuple[str, ...]:
+def check_header(spec: SheetSpec, raw: Cells) -> tuple[str, ...]:
     """Сверить шапку с описанием.
 
     Сравнение нестрогое: регистр и лишние пробелы шеф правит регулярно, и
     падать из-за них было бы навязчиво. А вот другой текст в колонке —
     признак того, что таблица переехала.
+
+    Этой же функцией проверяет шапку писатель строки перед записью: сдвиг
+    колонок, при котором импорт не переносит книгу, обязан остановить и
+    запись.
     """
     if not raw:
         return ("лист пуст",)

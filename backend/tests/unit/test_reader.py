@@ -15,7 +15,14 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from kitchen.sync import specs
 from kitchen.sync.client import SheetNotFoundError
-from kitchen.sync.reader import SheetsReader, describe_error
+from kitchen.sync.ownership import Kind
+from kitchen.sync.reader import (
+    SheetsReader,
+    check_header,
+    convert_cell,
+    describe_error,
+    row_hash,
+)
 from tests.conftest import ExplodingSpreadsheet, FakeSheetsClient
 
 IDS = {
@@ -229,6 +236,20 @@ def test_content_hash_tracks_values_not_formatting(make_client) -> None:
 
     assert a == b
     assert a != c, "хвостовой пробел — тоже правка, и синхронизация обязана её увидеть"
+
+
+def test_writer_shares_reader_rules(make_client) -> None:
+    """Шапку, ячейки и хеш строки писатель проверяет теми же функциями, что
+    импорт. Иначе запись и перенос разошлись бы в мелочах — запятая, пробел,
+    — и хеш записанной строки не совпал бы с хешем, который посчитает импорт."""
+    raw = [ING_HEADER, _ing_row(id="1", name="Томаты", price_per_kg="177,5")]
+
+    assert check_header(specs.INGREDIENTS, raw) == ()
+    assert check_header(specs.INGREDIENTS, [ING_HEADER[1:]]), "сдвиг шапки обязан быть виден"
+    assert convert_cell(" 177,5 ", Kind.DECIMAL) == Decimal("177.5")
+
+    data = _reader(make_client({"kitchen-id": {"ING": raw}})).read(specs.INGREDIENTS)
+    assert data.rows[0].content_hash == row_hash(raw[1])
 
 
 def test_merged_two_row_header_is_understood(make_client) -> None:

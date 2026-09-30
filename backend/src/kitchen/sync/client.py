@@ -8,6 +8,11 @@
 другая реализация.
 
 Единственная реализация, ходящая в сеть, — :class:`GspreadClient`.
+
+Методы протоколов названы и устроены как у gspread 6.2 — это его
+низкоуровневые вызовы Sheets API, тела запросов и ответы идут как есть.
+Своей обёртки над ними нет: настоящая таблица gspread подходит под
+протокол без переходника.
 """
 
 from __future__ import annotations
@@ -15,9 +20,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
-# Значения из листа всегда приезжают строками: gspread не типизирует ячейки.
+# Значения листа, как их видит человек (FORMATTED_VALUE, по умолчанию), —
+# всегда строки: gspread не типизирует ячейки. Числами числа приезжают только
+# при UNFORMATTED_VALUE, и разбирать такой ответ — дело вызывающего.
 Cells = list[list[str]]
 
 
@@ -28,6 +36,25 @@ class Worksheet(Protocol):
     @property
     def title(self) -> str:
         """Имя листа, как его видит человек."""
+        ...
+
+    @property
+    def id(self) -> int:
+        """Числовой идентификатор листа (sheetId).
+
+        По нему, а не по имени, адресуются изменения структуры в
+        :meth:`Spreadsheet.batch_update` — например, ``appendDimension``.
+        """
+        ...
+
+    @property
+    def row_count(self) -> int:
+        """Сколько строк в сетке листа — всего, а не заполненных.
+
+        Это снимок на момент открытия листа: после ``appendDimension``
+        gspread его не обновляет, свежее число даёт только заново открытый
+        лист.
+        """
         ...
 
     def get_all_values(self) -> Cells:
@@ -51,12 +78,60 @@ class Spreadsheet(Protocol):
         """Все листы таблицы. Один запрос вместо попытки открыть каждый."""
         ...
 
-    def values_batch_get(self, ranges: list[str]) -> dict[str, object]:
+    def values_batch_get(
+        self, ranges: list[str], params: Mapping[str, str] | None = None
+    ) -> dict[str, object]:
         """Несколько диапазонов ОДНИМ запросом.
 
         Ради этого метода всё и затевалось: квота Google — 60 запросов в
         минуту на пользователя, и чтение по листу за раз её выбирает.
         Возвращает ответ Sheets API как есть: ``{"valueRanges": [...]}``.
+
+        Диапазоны — в нотации A1 с именем листа в кавычках:
+        ``'Лист1'!A6:P6``. ``params`` — параметры запроса как есть. Главный
+        из них ``valueRenderOption``: по умолчанию ``FORMATTED_VALUE`` —
+        строки, как их видит человек («12,5»); ``UNFORMATTED_VALUE`` отдаёт
+        числа числами — так записанное сверяется с тем, что писали.
+        """
+        ...
+
+    def values_batch_update(self, body: Mapping[str, object]) -> dict[str, object]:
+        """Записать несколько диапазонов ОДНИМ запросом (``values.batchUpdate``).
+
+        Тело — как у Sheets API: ``valueInputOption`` и ``data`` со списком
+        ``{"range": …, "values": [[…]]}``. Ошибка в одном диапазоне (неверный
+        адрес, край сетки, значений больше, чем ячеек) отклоняет весь
+        запрос — не ложится ни один.
+
+        ``RAW`` кладёт значения как есть: строка остаётся строкой, даже
+        если начинается с «=». ``USER_ENTERED`` разбирает их, как будто их
+        набрал человек: «=…» становится формулой, «12,5» — числом. Текст с
+        этикетки пишется только ``RAW``.
+
+        Тело уходит через ``json.dumps``: ``Decimal`` в нём — ``TypeError``
+        ещё до отправки.
+        """
+        ...
+
+    def values_batch_clear(
+        self,
+        params: Mapping[str, str] | None = None,
+        body: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Очистить значения диапазонов (``values.batchClear``).
+
+        Тело — ``{"ranges": [...]}``. Строки остаются на месте: очистка, а не
+        удаление, не сдвигает раскладку и номера строк. Порядок параметров —
+        как у gspread, поэтому ``body`` передают по имени.
+        """
+        ...
+
+    def batch_update(self, body: Mapping[str, object]) -> dict[str, object]:
+        """Изменить структуру таблицы (``spreadsheets.batchUpdate``).
+
+        Нужен один вид запроса — ``appendDimension``: дописать строки в конец
+        сетки, когда свободная строка лежит за её краем. Иначе запись
+        значений падает с «exceeds grid limits».
         """
         ...
 
