@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     google_connect_timeout: int = 10
     google_read_timeout: int = 60
     google_refresh_timeout: int = 15
+
+    # Фото карточек ингредиентов — только в закрытой папке на общем диске.
+    # Пусто — загрузка фото не настроена.
+    drive_cards_folder_id: str = ""
+    # Охват доступа к Drive. «drive.file» — только файлы, созданные самой
+    # платформой; «drive» — всё, что открыто сервисному аккаунту. Какого
+    # хватает, показывает scripts/check_cards_setup.py; по умолчанию узкий.
+    drive_scope: Literal["drive", "drive.file"] = "drive.file"
 
     # Синхронизация «лист → база»: воркер раз в столько секунд читает книги.
     # Не чаще раза в минуту: меньшее число — почти наверняка минуты вместо
