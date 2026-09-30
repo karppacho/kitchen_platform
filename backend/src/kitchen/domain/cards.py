@@ -484,7 +484,14 @@ MOSCOW = timezone(timedelta(hours=3), "MSK")
 образах её может не оказаться, а время в имени файла от неё не зависит.
 """
 
-_DRIVE_FILE_ID = re.compile(r"[A-Za-z0-9_-]+")
+DRIVE_FILE_ID = re.compile(r"[A-Za-z0-9_-]+")
+"""Как выглядит id файла или папки Drive — проверять ``fullmatch``.
+
+Одно правило на всех: из id собираются и ссылка в листе, и адрес запроса к
+Drive, и в настройках хранится id папки. «../», «/», «?» внутри дали бы
+ссылку или запрос не туда.
+"""
+
 _NOT_NAME_CHARS = re.compile(r"[^\w\s-]")
 _FILE_NAME_PART_LIMIT = 80
 
@@ -495,7 +502,7 @@ def drive_view_url(file_id: str) -> str:
     Идентификатор проверяется: из него собирается адрес, и «../» или «?»
     внутри дали бы ссылку не на тот файл.
     """
-    if not _DRIVE_FILE_ID.fullmatch(file_id):
+    if not DRIVE_FILE_ID.fullmatch(file_id):
         raise ValueError(f"Непохоже на идентификатор файла Drive: «{file_id}»")
     return f"https://drive.google.com/file/d/{file_id}/view"
 
