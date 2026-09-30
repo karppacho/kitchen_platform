@@ -67,6 +67,11 @@ _RLO = "\N{RIGHT-TO-LEFT OVERRIDE}"
         ("ккал 250", _D("250")),
         (_D("12.5"), _D("12.5")),
         (7, _D("7")),
+        # Хвостовые нули — не лишняя точность: база хранит три знака.
+        ("12,5000", _D("12.5")),
+        # Потолок — 10 000: кДж чистого жира (~3770) ещё проходит разбор,
+        # чтобы проверка правдоподобия назвала его кДж, а не «не числом».
+        ("9999,999", _D("9999.999")),
     ],
 )
 def test_parse_nutrient(raw: object, expected: Decimal) -> None:
@@ -102,6 +107,18 @@ def test_no_data_is_none(raw: object) -> None:
         ("1e5", "не число"),
         ("1046 кДж", "кДж"),
         ("5 %", "процент"),
+        # «30/125 ккал/кДж»: число прямо перед «ккал» — это кДж. Какое из пары
+        # к какой единице, код не угадывает.
+        ("30/125 ккал/кДж", "два числа"),
+        ("250/1046 ккал/кДж", "два числа"),
+        ("1046/250 кДж/ккал", "два числа"),
+        # Пробел внутри числа не склеивает цифры: разрядов у КБЖУ на 100 г нет.
+        ("5 2", "не число"),
+        ("12 5 г", "не число"),
+        ("1 046 ккал", "не число"),
+        # База хранит три знака после запятой — четвёртый молча пропал бы.
+        ("12,3456", "знаков"),
+        ("10000", "большое"),
     ],
 )
 def test_unclear_nutrient_is_refused(raw: str, hint: str) -> None:
@@ -110,6 +127,12 @@ def test_unclear_nutrient_is_refused(raw: str, hint: str) -> None:
         parse_nutrient(raw)
     # Повар должен узнать свою запись в сообщении.
     assert raw.strip() in str(error.value)
+
+
+def test_huge_decimal_is_refused() -> None:
+    """10¹⁰ не влезает в колонку базы — вместо ошибки 500 повар видит замечание."""
+    with pytest.raises(NutrientUnclearError, match="большое"):
+        parse_nutrient(_D("1E+10"))
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +163,20 @@ def test_kcal_over_nine_hundred_hints_at_kilojoules() -> None:
     warnings = check_nutrients(None, None, None, _D("1046"))
     assert len(warnings) == 1
     assert "кДж" in warnings[0]
+
+
+def test_one_kcal_mistake_is_one_warning() -> None:
+    """кДж в колонке ккал — одна ошибка: без второго замечания про расчёт по БЖУ."""
+    warnings = check_nutrients(_D("10"), _D("5"), _D("20"), _D("1046"))
+    assert len(warnings) == 1
+    assert "кДж" in warnings[0]
+
+
+def test_one_gram_mistake_is_one_warning() -> None:
+    """Белки 120 вместо 12,0 — одна ошибка, хотя и ккал с ними не сходятся."""
+    warnings = check_nutrients(_D("120"), _D("1"), _D("5"), _D("80"))
+    assert len(warnings) == 1
+    assert "Белки" in warnings[0]
 
 
 def test_sum_over_hundred_is_a_warning() -> None:
@@ -191,6 +228,20 @@ def test_clean_text_squashes_spaces_and_invisible_characters() -> None:
     assert clean_text("name", f"  Соус{_ZWSP}  Барбекю\t ") == "Соус Барбекю"
     assert clean_text("name", f"Соус{_RLO}Барбекю\x00") == "СоусБарбекю"
     assert clean_text("name", None) == ""
+
+
+def test_clean_text_turns_odd_spaces_into_spaces() -> None:
+    """Вертикальная табуляция, перевод страницы, NEL разделяют слова — не склеивают."""
+    raw = "Соус" + chr(0x0B) + "Барбекю" + chr(0x0C) + "острый" + chr(0x85) + "сладкий"
+    assert clean_text("name", raw) == "Соус Барбекю острый сладкий"
+
+
+def test_clean_text_drops_characters_the_database_refuses() -> None:
+    """Одиночный суррогат не записать в Postgres (ошибка 500); личные и
+    неназначенные символы — мусор, а не текст этикетки."""
+    lone_surrogate, private_use, unassigned = chr(0xD800), chr(0xE000), chr(0xFFFF)
+    raw = f"Соус{lone_surrogate}Бар{private_use}бекю{unassigned}"
+    assert clean_text("name", raw) == "СоусБарбекю"
 
 
 def test_clean_text_keeps_lines_only_in_description() -> None:
@@ -281,6 +332,13 @@ def test_card_row_leaves_unknown_numbers_empty() -> None:
     row = card_row(replace(_draft(), protein=None, kcal=None))
     assert row["protein"] == ""
     assert row["kcal"] == ""
+
+
+@pytest.mark.parametrize("approval", ["", "да", "Нет", "Отбракован "])
+def test_card_row_refuses_unknown_approval(approval: str) -> None:
+    """Запись в общий лист почти не отменить: в V идёт только «Да» или «Отбракован»."""
+    with pytest.raises(ValueError, match="Согласован"):
+        card_row(replace(_draft(), approval=approval))
 
 
 def test_card_row_cleans_text() -> None:
@@ -451,6 +509,25 @@ def test_unclear_numbers_become_warnings() -> None:
     assert values["carbs"] == _D("30")
     assert any("Белки" in w and "<0,5" in w for w in warnings)
     assert any("Жиры" in w and "10-12" in w for w in warnings)
+
+
+def test_kcal_and_kilojoules_pair_is_not_taken_for_kcal() -> None:
+    """«30/125 ккал/кДж» у овощей: 125 — это кДж, и проверка «> 900» его не
+    поймает, а сверка с БЖУ пропускается, раз жиры «<0,5»."""
+    values, warnings = label_fields_from_extraction(
+        _extraction(proteins="1,5", fats="<0,5", carbohydrates="5", kcal="30/125 ккал/кДж")
+    )
+    assert values["kcal"] is None
+    assert any("Ккал" in w and "30/125 ккал/кДж" in w for w in warnings)
+    assert any("Жиры" in w for w in warnings)
+
+
+def test_per_hundred_millilitres_is_noted() -> None:
+    """На 100 мл — не пересчитываем (плотность неизвестна), но и не молчим."""
+    values, warnings = label_fields_from_extraction(_extraction(nutrition_basis="на 100 мл"))
+    assert values["protein"] == _D("1.2")
+    assert len(warnings) == 1
+    assert "100 мл" in warnings[0]
 
 
 def test_nutrient_checks_reach_warnings() -> None:

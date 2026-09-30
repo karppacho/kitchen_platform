@@ -57,8 +57,11 @@ _ISO = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
 _NUMERIC = re.compile(r"(?<!\d)(\d{1,2})\s*[./-]\s*(\d{1,2})\s*[./-]\s*(\d{4}|\d{2})(?!\d)")
 _WORDS = re.compile(r"(?<!\d)(\d{1,2})\s+([а-я]+)\.?\s*(\d{4}|\d{2})(?!\d)")
 
-# Признаки того, что в периоде уже есть условия хранения.
-_HAS_CONDITIONS = re.compile(r"°|\bпри\b|температур", re.IGNORECASE)
+# Признак температуры: «°», «t -18», «при +4», «температуре». Одно «при» —
+# ещё не температура: «при условии герметичности» её не содержит.
+_HAS_TEMPERATURE = re.compile(
+    r"°|\b[tт]\s*[+\-−–]?\s*\d|температур|\bпри\s*[+\-−–]?\s*\d", re.IGNORECASE
+)
 _STARTS_WITH_PRI = re.compile(r"при\b", re.IGNORECASE)
 # «t +2..+6°C», «-18°C», «+4» — продолжение фразы «при …».
 _STARTS_WITH_TEMPERATURE = re.compile(r"(?:[tт]\s*)?[+\-−–]?\s*\d", re.IGNORECASE)
@@ -70,27 +73,23 @@ def parse_label_date(raw: str | None) -> date | None:
     Понимает «15.06.2025», «15.06.25» (год двумя цифрами — 20ГГ, как у бота),
     «15/06/2025», «2025-06-15», «15 июня 2025 г.», «15 июн. 2025».
     Несуществующая дата («29.02.2025») — None, а не ближайшая похожая.
+    Больше одной даты в строке («15.06.2025-15.06.2026») — тоже None:
+    какая из них нужна, код не угадывает.
     """
     if not raw:
         return None
     text = raw.lower().replace("ё", "е")
 
-    match = _ISO.search(text)
-    if match:
-        return _date(match.group(1), match.group(2), match.group(3))
-
-    match = _NUMERIC.search(text)
-    if match:
-        return _date(match.group(3), match.group(2), match.group(1))
-
-    match = _WORDS.search(text)
-    if match:
+    found: list[date | None] = []
+    found.extend(_date(m.group(1), m.group(2), m.group(3)) for m in _ISO.finditer(text))
+    found.extend(_date(m.group(3), m.group(2), m.group(1)) for m in _NUMERIC.finditer(text))
+    for match in _WORDS.finditer(text):
         month = _MONTHS.get(match.group(2)[:3])
-        if month is None:
-            return None
-        return _date(match.group(3), str(month), match.group(1))
+        # «15 числа 2025» — не дата: слово не месяц.
+        if month is not None:
+            found.append(_date(match.group(3), str(month), match.group(1)))
 
-    return None
+    return found[0] if len(found) == 1 else None
 
 
 def _date(year: str, month: str, day: str) -> date | None:
@@ -222,16 +221,20 @@ def _with_conditions(text: str, conditions: str) -> str:
 
 
 def _already_has_conditions(period: str, conditions: str) -> bool:
-    """Есть ли в периоде условия хранения — те же или какие-то свои.
+    """Уже ли сказано в периоде то, что говорят условия хранения.
 
     Период с этикетки нередко уже содержит температуру: «12 месяцев при
     -18 °C». Дописать к нему «при t -18°C» — повтор, который повар будет
-    стирать руками.
+    стирать руками. Поэтому условия не дописываются, если тот же текст в
+    периоде уже есть или температура есть и там, и там. Всё остальное
+    дописывается: температура из условий не должна теряться из-за
+    постороннего «при» («6 месяцев при условии герметичности»), а «в сухом
+    месте» — из-за температуры в периоде.
     """
-    if _HAS_CONDITIONS.search(period):
-        return True
     wanted = _key(conditions).removeprefix("при")
-    return bool(wanted) and wanted in _key(period)
+    if wanted and wanted in _key(period):
+        return True
+    return bool(_HAS_TEMPERATURE.search(conditions)) and bool(_HAS_TEMPERATURE.search(period))
 
 
 def _key(text: str) -> str:

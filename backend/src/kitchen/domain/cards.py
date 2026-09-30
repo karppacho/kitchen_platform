@@ -148,8 +148,10 @@ _MULTILINE_FIELDS = frozenset({"description"})
 def clean_text(field: str, raw: object) -> str:
     """Текст поля в том виде, в каком он уйдёт в лист.
 
-    Убирает управляющие и невидимые символы (нулевой ширины, смену
-    направления письма — ими подделывают видимый текст), схлопывает
+    Любой пробельный символ (табуляция, перевод страницы, NEL…) становится
+    пробелом — слова не склеиваются. Убирает управляющие и невидимые
+    символы (нулевой ширины, смену направления письма — ими подделывают
+    видимый текст) и то, что не является текстом вовсе. Схлопывает
     пробелы, обрезает по лимиту поля. Переносы строк остаются только в
     описании. Неизвестное поле — KeyError: опечатка в имени не должна
     тихо пропускать текст без лимита.
@@ -157,22 +159,30 @@ def clean_text(field: str, raw: object) -> str:
     limit = TEXT_LIMITS[field]
     if raw is None:
         return ""
-    text = unicodedata.normalize("NFC", str(raw))
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = "".join(char for char in text if char == "\n" or not _invisible(char))
+    text = str(raw).replace("\r\n", "\n").replace("\r", "\n")
+    text = unicodedata.normalize("NFC", "".join(_clean_char(char) for char in text))
     lines = [" ".join(line.split()) for line in text.split("\n")]
     separator = "\n" if field in _MULTILINE_FIELDS else " "
     text = separator.join(line for line in lines if line)
     return text[:limit].strip()
 
 
-def _invisible(char: str) -> bool:
-    # Cc — управляющие (\x00, \x07, \t…), Cf — невидимые форматирующие
-    # (U+200B нулевой ширины, U+202E смена направления, U+FEFF метка
-    # порядка байтов). Табуляция превращается в пробел, а не склеивает слова.
-    if char == "\t":
-        return False
-    return unicodedata.category(char) in ("Cc", "Cf")
+_DROPPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})
+"""Что выбрасывается из текста.
+
+Cc — управляющие (U+0000, U+0007…), Cf — невидимые форматирующие (U+200B
+нулевой ширины, U+202E смена направления, U+FEFF метка порядка байтов),
+Cs — одиночные суррогаты (их не принимает Postgres: запись упала бы
+ошибкой 500), Co — символы для личного использования, Cn — неназначенные.
+"""
+
+
+def _clean_char(char: str) -> str:
+    if char == "\n":
+        return char
+    if char.isspace():
+        return " "
+    return "" if unicodedata.category(char) in _DROPPED_CATEGORIES else char
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +202,25 @@ _KCAL_WORD = re.compile(r"ккал|kcal")
 _KILOJOULES = re.compile(r"кдж|kj")
 _BOUND = re.compile(r"[<>≤≥]|\b(?:менее|более|меньше|больше|до|от|около|примерно|max|min)\b")
 _RANGE = re.compile(r"\d\s*(?:[-–—]|\.\.\.?|…)\s*\d")
+# «30/125 ккал/кДж»: число прямо перед «ккал» здесь — кДж. Какое число из
+# пары к какой единице, зависит от порядка единиц, и его код не угадывает.
+_NUMBER_PAIR = re.compile(r"\d\s*/\s*\d")
 _GRAMS_SUFFIX = re.compile(r"\s*(?:г|гр|g|грамм\w*)\.?$")
-_PLAIN_NUMBER = re.compile(r"\d[\d\s]*(?:[.,]\d+)?")
+# Без разрядных пробелов: у КБЖУ на 100 г их не бывает, а «5 2» или
+# «12 5 г» — это две цифры, прочитанные отдельно, а не 52 и 125.
+_PLAIN_NUMBER = re.compile(r"\d+(?:[.,]\d+)?")
+
+_NUTRIENT_CEILING = Decimal("10000")
+"""С этого числа значение на 100 г не бывает ни в каких единицах.
+
+Самое большое правдоподобное — кДж чистого жира, около 3770. Оно ещё
+проходит разбор, чтобы проверка правдоподобия назвала его кДж. Всё, что
+от 10 000, — склеенные цифры или чужое число (штрихкод, масса нетто);
+к тому же колонка базы Numeric(12,3) на огромных числах переполнилась бы
+ошибкой 500.
+"""
+_NUTRIENT_STEP = Decimal("0.001")
+"""База хранит три знака после запятой; четвёртый округлился бы молча."""
 
 
 def parse_nutrient(raw: object) -> Decimal | None:
@@ -201,8 +228,10 @@ def parse_nutrient(raw: object) -> Decimal | None:
 
     «12,5 г» → 12.5, «250 ккал / 1046 кДж» → 250. Пусто и «н/д» — None:
     нет данных, а не ноль. То, что не одно точное число («<0,5», «10-12»,
-    «5 %», только кДж), — :class:`NutrientUnclearError`: подставить
-    границу или середину диапазона значило бы выдумать число.
+    «5 %», только кДж, пара «30/125 ккал/кДж», «5 2»), — и то, что база
+    сохранила бы не так, как написано (больше трёх знаков после запятой,
+    от 10 000), — :class:`NutrientUnclearError`: подставить границу,
+    середину диапазона или одно число из пары значило бы выдумать число.
     """
     if raw is None:
         return None
@@ -221,6 +250,11 @@ def parse_nutrient(raw: object) -> Decimal | None:
         raise NutrientUnclearError(f"«{written}» — не точное число, впишите значение сами")
     if _RANGE.search(text):
         raise NutrientUnclearError(f"«{written}» — диапазон, а нужно одно число")
+    if _NUMBER_PAIR.search(text):
+        raise NutrientUnclearError(
+            f"«{written}» — два числа через «/»: не понять, какое из них нужно; "
+            "впишите значение сами"
+        )
 
     if _KCAL_WORD.search(text):
         match = _KCAL_NUMBER.search(text)
@@ -232,6 +266,15 @@ def parse_nutrient(raw: object) -> Decimal | None:
     value = parse_decimal(number) if _PLAIN_NUMBER.fullmatch(number) else None
     if value is None:
         raise NutrientUnclearError(f"«{written}» — не число")
+    if value >= _NUTRIENT_CEILING:
+        raise NutrientUnclearError(
+            f"«{written}» — слишком большое число для значения на 100 г, проверьте его"
+        )
+    if value.quantize(_NUTRIENT_STEP) != value:
+        raise NutrientUnclearError(
+            f"«{written}» — больше трёх знаков после запятой, так на этикетке не пишут; "
+            "проверьте число"
+        )
     return value
 
 
@@ -261,6 +304,11 @@ def check_nutrients(
     * 4·Б + 9·Ж + 4·У расходится с ккал больше чем на max(20 ккал, 20 %
       указанного). Допуск широкий: клетчатка, спирты и округление на
       этикетке дают свою разницу.
+
+    Одна ошибка — одно замечание. Сумма проверяется, только если ни одно из
+    Б, Ж, У не вышло за 100 г само; сверка с ккал — только если ничего
+    другого не нашлось: белки 120 вместо 12,0 или кДж в колонке ккал
+    разошлись бы и с расчётом, и повар прочёл бы об одной ошибке дважды.
     """
     warnings: list[str] = []
     grams = {"protein": protein, "fat": fat, "carbs": carbs}
@@ -271,8 +319,6 @@ def check_nutrients(
                 f"{FIELD_TITLES[field]} — {_human(value)} г на 100 г, больше 100 г: "
                 "так не бывает, проверьте число."
             )
-    # Сумма — отдельное замечание, только если ни одно число само по себе
-    # не вышло за 100 г: иначе повар прочтёт об одной ошибке дважды.
     single_over = bool(warnings)
     if kcal is not None and kcal > _KCAL_LIMIT:
         warnings.append(
@@ -287,7 +333,13 @@ def check_nutrients(
             "больше 100 г: проверьте числа."
         )
 
-    if protein is not None and fat is not None and carbs is not None and kcal is not None:
+    if (
+        not warnings
+        and protein is not None
+        and fat is not None
+        and carbs is not None
+        and kcal is not None
+    ):
         estimated = (
             _KCAL_PER_GRAM["protein"] * protein
             + _KCAL_PER_GRAM["fat"] * fat
@@ -373,8 +425,15 @@ def card_row(draft: CardDraftData) -> dict[str, str | Decimal]:
 
     Q и R сюда не входят никогда. Неизвестное число — пустая ячейка, а не
     ноль: «0 г белка» — это утверждение. Проверку полноты делает
-    :func:`missing_for_submit` до вызова.
+    :func:`missing_for_submit` до вызова, но V «Согласован» проверяется и
+    здесь: строку в общем листе почти не отменить, и в V не должно попасть
+    ничего, кроме «Да» или «Отбракован» (иначе — ValueError).
     """
+    if draft.approval not in APPROVALS:
+        raise ValueError(
+            f"«Согласован» — только «{APPROVED}» или «{REJECTED}», "
+            f"а в черновике «{draft.approval}»: строка для листа не собрана"
+        )
     return {
         "category": clean_text("category", draft.category),
         "name": clean_text("name", draft.name),
@@ -496,7 +555,8 @@ _EXTRACTION_NUTRIENTS = {
     "carbohydrates": "carbs",
     "kcal": "kcal",
 }
-_PER_HUNDRED = re.compile(r"(?<!\d)100\s*(?:г|гр|грамм\w*|g|мл|ml|миллилитр\w*)\.?(?!\w)")
+_PER_HUNDRED_GRAMS = re.compile(r"(?<!\d)100\s*(?:г|гр|грамм\w*|g)\.?(?!\w)")
+_PER_HUNDRED_MILLILITRES = re.compile(r"(?<!\d)100\s*(?:мл|ml|миллилитр\w*)\.?(?!\w)")
 
 
 def label_fields_from_extraction(
@@ -519,15 +579,25 @@ def label_fields_from_extraction(
             warnings.append(f"{FIELD_TITLES[field]}: {error}")
 
     basis = " ".join(_text_or_empty(extraction.get("nutrition_basis")).split())
-    per_hundred = not basis or bool(_PER_HUNDRED.search(basis.lower()))
-    if not per_hundred:
-        if any(value is not None for value in nutrients.values()):
+    per_grams = not basis or bool(_PER_HUNDRED_GRAMS.search(basis.lower()))
+    per_millilitres = not per_grams and bool(_PER_HUNDRED_MILLILITRES.search(basis.lower()))
+    has_numbers = any(value is not None for value in nutrients.values())
+    if not per_grams and not per_millilitres:
+        if has_numbers:
             warnings.append(
                 f"Пищевая ценность на этикетке указана «{basis}», а в карточку нужна "
                 "на 100 г — впишите белки, жиры, углеводы и ккал сами."
             )
         nutrients = dict.fromkeys(NUTRIENT_FIELDS)
     else:
+        # На 100 мл числа переносятся как есть: без плотности на 100 г их не
+        # пересчитать, а для соусов и молока разница невелика. Но молчать
+        # нельзя — колонка в таблице подписана «на 100 г».
+        if per_millilitres and has_numbers:
+            warnings.append(
+                "Пищевая ценность на этикетке — на 100 мл, а колонка в таблице — "
+                "на 100 г; числа перенесены как есть, проверьте."
+            )
         warnings.extend(
             check_nutrients(
                 nutrients["protein"], nutrients["fat"], nutrients["carbs"], nutrients["kcal"]

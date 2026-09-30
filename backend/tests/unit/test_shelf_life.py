@@ -143,6 +143,14 @@ def test_unreadable_best_before_is_kept_as_written() -> None:
     assert "06.2026" in warnings[0]
 
 
+def test_two_dates_in_best_before_are_not_guessed() -> None:
+    """«15.06.2025-15.06.2026» в поле «годен до» — не «Годен до 15.06.2025»."""
+    text, warnings = describe_shelf_life(None, None, "15.06.2025-15.06.2026", None)
+    assert text == "Годен до 15.06.2025-15.06.2026"
+    assert len(warnings) == 1
+    assert "15.06.2025-15.06.2026" in warnings[0]
+
+
 def test_only_manufactured_is_a_warning() -> None:
     text, warnings = describe_shelf_life(None, "15.06.2025", None, "при t -18°C")
     assert text == ""
@@ -181,6 +189,17 @@ def test_conditions_are_not_duplicated() -> None:
     assert text == "12 месяцев при -18 °C"
 
 
+def test_temperature_is_not_lost_behind_other_pri() -> None:
+    """«при условии герметичности» — не температура: -18 °C должно остаться."""
+    text, _ = describe_shelf_life("6 месяцев при условии герметичности", None, None, "при t -18°C")
+    assert text == "6 месяцев при условии герметичности при t -18°C"
+
+
+def test_other_conditions_are_kept_next_to_temperature() -> None:
+    text, _ = describe_shelf_life("12 месяцев при -18 °C", None, None, "в сухом месте")
+    assert text == "12 месяцев при -18 °C, в сухом месте"
+
+
 def test_period_whitespace_is_squashed() -> None:
     text, _ = describe_shelf_life("  12   месяцев ", None, None, None)
     assert text == "12 месяцев"
@@ -215,7 +234,20 @@ def test_parse_label_date(raw: str, expected: date) -> None:
 
 @pytest.mark.parametrize(
     "raw",
-    [None, "", "вчера", "06.2026", "32.01.2025", "29.02.2025", "15 чего-то 2025", "15 числа 2025"],
+    [
+        None,
+        "",
+        "вчера",
+        "06.2026",
+        "32.01.2025",
+        "29.02.2025",
+        "15 чего-то 2025",
+        "15 числа 2025",
+        # Больше одной даты — какую из них брать, код не угадывает.
+        "15.06.2025-15.06.2026",
+        "15.06.2025 / 2025-06-20",
+        "1 июня 2025 – 1 июня 2026",
+    ],
 )
 def test_parse_label_date_refuses(raw: str | None) -> None:
     assert parse_label_date(raw) is None
