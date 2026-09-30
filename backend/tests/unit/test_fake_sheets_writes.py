@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import inspect
 from decimal import Decimal
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 import gspread
@@ -171,6 +172,38 @@ def test_raw_numbers_read_back_by_render_option() -> None:
     assert sheet.get_all_values()[2] == ["12,5", "130", "0,1"]
 
 
+@pytest.mark.parametrize("text", ["12.5", "5%", "01.02.2026", "1 030"])
+def test_user_entered_refuses_what_google_would_guess(text: str) -> None:
+    """Русский Google сделал бы из «12.5» дату, из «5%» — долю, из «1 030» —
+    число. Фальшивка таких догадок не моделирует и честно падает, а не
+    оставляет текст, которого в жизни не будет. Запрос не ложится целиком."""
+    book, _ = _book()
+
+    with pytest.raises(AssertionError, match="USER_ENTERED"):
+        _write(book, ("'Лист1'!A3:B3", ["Соус", text]), option="USER_ENTERED")
+
+    assert _read(book, "'Лист1'!A3:B3") == []
+
+
+def test_batch_get_writes_ranges_into_callers_params() -> None:
+    """gspread 6.2 дописывает ranges прямо в переданный словарь. Словарь-
+    константа испортится после первого вызова, неизменяемое отображение
+    упадёт TypeError — фальшивка ведёт себя так же."""
+    book, _ = _book()
+    params = {"valueRenderOption": "UNFORMATTED_VALUE"}
+
+    book.values_batch_get(["'Лист1'!A2:B2"], params)
+
+    assert params["ranges"] == ["'Лист1'!A2:B2"]
+    # Протокол и не обещает не трогать словарь: в нём dict, а не Mapping.
+    annotation = inspect.signature(protocol.Spreadsheet.values_batch_get).parameters["params"]
+    assert str(annotation.annotation) == "dict[str, str] | None"
+    with pytest.raises(TypeError):
+        book.values_batch_get(
+            ["'Лист1'!A2"], MappingProxyType({"valueRenderOption": "FORMATTED_VALUE"})
+        )
+
+
 def test_decimal_never_reaches_google() -> None:
     """requests кодирует тело через json.dumps, а тот Decimal не знает: запрос
     падает до отправки. Превратить Decimal в число JSON писатель обязан сам."""
@@ -232,9 +265,12 @@ def test_row_count_is_a_snapshot_like_gspread() -> None:
     opened = book.worksheet("Лист1")
 
     _grow(book, opened.id, 3)
+    reopened = book.worksheet("Лист1")
+    _write(book, ("'Лист1'!A5", ["x"]))
 
-    assert opened.row_count == 2
-    assert book.worksheet("Лист1").row_count == 5
+    assert reopened.row_count == 5
+    assert opened.row_count == 2, "старый объект-лист держит прежнее число и после нового открытия"
+    assert opened.get_all_values()[4] == ["x"], "ячейки у открытых листов общие"
 
 
 def test_append_dimension_to_unknown_sheet_is_refused() -> None:
@@ -284,6 +320,21 @@ def test_failure_after_apply_keeps_the_write() -> None:
         _write(book, ("'Лист1'!A3", ["x"]))
 
     assert _read(book, "'Лист1'!A3:A3") == [["x"]]
+
+
+@pytest.mark.parametrize("method", ["worksheet", "worksheets"])
+def test_opening_a_sheet_can_fail_too(method: str) -> None:
+    """Открыть лист — первый запрос писателя, и Google может отказать уже на
+    нём. Отказ одноразовый."""
+    book, _ = _book()
+    book.fail_next(method, applied=False)
+    open_sheet = (lambda: book.worksheet("Лист1")) if method == "worksheet" else book.worksheets
+
+    with pytest.raises(APIError) as caught:
+        open_sheet()
+    assert caught.value.code == 503
+
+    open_sheet()
 
 
 def test_failure_carries_the_given_error() -> None:

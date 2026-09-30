@@ -212,6 +212,159 @@ test('login 401 не запускает продление', async () => {
   expect(prodleniya).toHaveBeenCalledTimes(0)
 })
 
+test.each(['POST', 'PUT', 'PATCH', 'DELETE'])(
+  '%s несёт заголовок против подделки запросов',
+  async (metod) => {
+    // Без него сервер отвечает на изменяющий запрос с кукой сессии 403.
+    let zagolovok: string | null = null
+    server.use(
+      http.all('/api/primer', ({ request }) => {
+        zagolovok = request.headers.get('X-Kitchen-Csrf')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+
+    await api('/primer', { method: metod })
+
+    expect(zagolovok).toBe('1')
+  },
+)
+
+test('GET заголовка против подделки не несёт', async () => {
+  let zagolovok: string | null = 'ещё не спрашивали'
+  server.use(
+    http.get('/api/dishes', ({ request }) => {
+      zagolovok = request.headers.get('X-Kitchen-Csrf')
+      return HttpResponse.json([])
+    }),
+  )
+
+  await api('/dishes')
+
+  expect(zagolovok).toBeNull()
+})
+
+test('вход несёт и заголовок против подделки, и свой Content-Type', async () => {
+  // В браузере может лежать просроченная кука сессии — тогда вход без
+  // заголовка сервер отклонил бы. А свой Content-Type вызывающего не должен
+  // потеряться при добавлении нашего заголовка.
+  let zagolovki: Headers | null = null
+  server.use(
+    http.post('/api/auth/login', ({ request }) => {
+      zagolovki = request.headers
+      return HttpResponse.json({ email: 'chef@example.com' })
+    }),
+  )
+
+  await api('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'chef@example.com', password: 'пароль' }),
+  })
+
+  expect(zagolovki!.get('X-Kitchen-Csrf')).toBe('1')
+  expect(zagolovki!.get('Content-Type')).toBe('application/json')
+})
+
+test('продление несёт заголовок против подделки запросов', async () => {
+  // Продление едет с кукой продления — без заголовка сервер ответил бы 403,
+  // и каждый истёкший доступ выкидывал бы человека на форму входа.
+  let dano = false
+  let zagolovok: string | null = null
+  server.use(
+    http.get('/api/dishes', () =>
+      dano ? HttpResponse.json([]) : new HttpResponse(null, { status: 401 }),
+    ),
+    http.post('/api/auth/refresh', ({ request }) => {
+      zagolovok = request.headers.get('X-Kitchen-Csrf')
+      dano = true
+      return HttpResponse.json({})
+    }),
+  )
+
+  await api('/dishes')
+
+  expect(zagolovok).toBe('1')
+})
+
+test('повтор после продления тоже несёт заголовок против подделки', async () => {
+  // PATCH → 401 → продление → повтор. Без заголовка на повторе сервер
+  // ответил бы 403, и правка терялась бы ровно тогда, когда истёк доступ.
+  let dano = false
+  const zagolovki: (string | null)[] = []
+  server.use(
+    http.patch('/api/primer', ({ request }) => {
+      zagolovki.push(request.headers.get('X-Kitchen-Csrf'))
+      return new HttpResponse(null, { status: dano ? 204 : 401 })
+    }),
+    http.post('/api/auth/refresh', () => {
+      dano = true
+      return HttpResponse.json({})
+    }),
+  )
+
+  await api('/primer', { method: 'PATCH' })
+
+  expect(zagolovki).toEqual(['1', '1'])
+})
+
+const OTKAZ_ZASHCHITY = 'Запрос отклонён — обновите страницу'
+
+test('отказ защиты на самом запросе доходит до экрана текстом сервера', async () => {
+  const prodleniya = vi.fn()
+  server.use(
+    http.patch('/api/primer', () =>
+      HttpResponse.json({ detail: OTKAZ_ZASHCHITY }, { status: 403 }),
+    ),
+    http.post('/api/auth/refresh', () => {
+      prodleniya()
+      return HttpResponse.json({})
+    }),
+  )
+
+  await expect(api('/primer', { method: 'PATCH' })).rejects.toMatchObject({
+    status: 403,
+    message: OTKAZ_ZASHCHITY,
+  })
+  expect(prodleniya).not.toHaveBeenCalled()
+})
+
+test('отказ защиты на продлении показывает «обновите страницу», а не «не удалось»', async () => {
+  // Так бывает на вкладке, открытой со старым кодом до выкладки: продление
+  // уходит без заголовка. «Не удалось получить данные» не подсказало бы,
+  // что делать, — а сделать нужно ровно одно: обновить страницу.
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () =>
+      HttpResponse.json({ detail: OTKAZ_ZASHCHITY }, { status: 403 }),
+    ),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 403, message: OTKAZ_ZASHCHITY })
+})
+
+test('403 продления без тела — тоже «обновите страницу»', async () => {
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () => new HttpResponse(null, { status: 403 })),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 403, message: OTKAZ_ZASHCHITY })
+})
+
+test('403 продления со своим текстом показывает текст сервера', async () => {
+  // Продление отвечает 403 и когда учётку отключили. «Обновите страницу»
+  // тут отправило бы человека по кругу — нужен текст сервера.
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () =>
+      HttpResponse.json({ detail: 'доступ отключён' }, { status: 403 }),
+    ),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 403, message: 'доступ отключён' })
+})
+
 test('200 с нечитаемым телом даёт ApiError, а не голый SyntaxError', async () => {
   // Экраны различают ошибки по ApiError.status. Необработанный SyntaxError
   // для них вообще не ошибка API — упадёт мимо любого catch на этот тип.

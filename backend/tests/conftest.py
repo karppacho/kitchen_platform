@@ -74,8 +74,9 @@ class FakeWorksheet:
     Сетка листа конечна, как у настоящего: ``row_count`` строк (по умолчанию
     не меньше 1000 — столько у нового листа Google) и ``col_count`` колонок
     (не меньше 26, A–Z). За её краем Google не пишет и не читает.
-    ``row_count`` — снимок на момент открытия листа, как в gspread: после
-    ``appendDimension`` свежее число даёт только новое открытие.
+    ``row_count`` — снимок, как в gspread: у этого объекта — на момент
+    создания, у листа из ``worksheet()``/``worksheets()`` — на момент
+    открытия (см. :class:`OpenedWorksheet`).
     """
 
     def __init__(
@@ -101,10 +102,9 @@ class FakeWorksheet:
         self.reads += 1
         return [_trim([_formatted(cell) for cell in row]) for row in self._cells]
 
-    def _open(self) -> FakeWorksheet:
-        """Лист открыли заново: gspread перечитал свойства, row_count свежий."""
-        self.row_count = self._grid_rows
-        return self
+    def _open(self) -> OpenedWorksheet:
+        """Лист открыли заново: новый объект со свежим снимком свойств."""
+        return OpenedWorksheet(self)
 
     def _read(self, box: _Box | None, render: Callable[[Cell], object]) -> list[list[object]]:
         """Значения прямоугольника (или всего листа) так, как их отдаёт Google:
@@ -137,6 +137,26 @@ class FakeWorksheet:
                     line[c] = ""
 
 
+class OpenedWorksheet:
+    """Лист, как его отдаёт gspread при открытии.
+
+    Каждое открытие — новый объект со своим снимком свойств (``title``,
+    ``row_count``), а ячейки и сетка общие с исходным листом. Поэтому у
+    ранее открытого листа число строк не меняется ни от ``appendDimension``,
+    ни от нового открытия — как у объекта gspread, который держит свойства,
+    прочитанные при открытии.
+    """
+
+    def __init__(self, sheet: FakeWorksheet) -> None:
+        self._sheet = sheet
+        self.title = sheet.title
+        self.id = sheet.id
+        self.row_count = sheet._grid_rows
+
+    def get_all_values(self) -> Cells:
+        return self._sheet.get_all_values()
+
+
 @dataclass(frozen=True, slots=True)
 class _Failure:
     """Заказанный тестом отказ одного вызова."""
@@ -147,8 +167,16 @@ class _Failure:
     error: Exception
 
 
-_METHODS = ("values_batch_get", "values_batch_update", "values_batch_clear", "batch_update")
-"""Вызовы Sheets API, которым тест может заказать отказ."""
+_METHODS = (
+    "worksheet",
+    "worksheets",
+    "values_batch_get",
+    "values_batch_update",
+    "values_batch_clear",
+    "batch_update",
+)
+"""Вызовы Sheets API, которым тест может заказать отказ. Открытие листа —
+тоже запрос, и у писателя он первый."""
 
 
 class FakeSpreadsheet:
@@ -167,8 +195,16 @@ class FakeSpreadsheet:
     * диапазон без кавычек вокруг имени листа — отказ всегда: Google простое
       имя понял бы, но «Расчётка меню» с пробелом — уже нет;
     * формулы не вычисляются — читаются как «#ERROR!»;
-    * лист русский: FORMATTED_VALUE пишет числа с запятой, USER_ENTERED
-      понимает целые и числа с запятой, а даты и проценты — нет;
+    * лист русский, но формата колонок фальшивка не знает: FORMATTED_VALUE
+      пишет число как есть, с запятой («12,5»), а в жизни колонка с форматом
+      покажет «12,50», округлит или разобьёт разряды («1 030»);
+    * USER_ENTERED понимает целые и числа с запятой; то, что Google
+      угадал бы как дату, процент, дробь с точкой или число с пробелами
+      («12.5», «5%», «01.02.2026», «1 030»), — AssertionError, а не текст;
+    * ``updatedRange`` в ответе записи повторяет запрошенный диапазон, а не
+      нормализует его, как Google;
+    * ``get_all_values`` оставляет пустые строки в конце листа (пакетное
+      чтение их, как и Google, отрезает);
     * диапазоны — только ``'Лист'``, ``'Лист'!A1`` и ``'Лист'!A1:B2``; всё
       прочее — AssertionError, чтобы непонятное не проходило молча.
     """
@@ -191,7 +227,8 @@ class FakeSpreadsheet:
         ``applied=False`` — Google отказал, ничего не сделав (по умолчанию
         503). ``applied=True`` — Google сделал своё, а ответ потерялся по
         дороге (по умолчанию таймаут чтения): исключение есть, а изменение
-        в листе уже лежит.
+        в листе уже лежит. Уронить можно и открытие листа — ``worksheet``,
+        ``worksheets``.
         """
         assert method in _METHODS, f"фальшивка не умеет отказывать в «{method}»"
         if error is None:
@@ -213,27 +250,40 @@ class FakeSpreadsheet:
         self._tampers.append((cell, value))
 
     # --- Sheets API ---------------------------------------------------------
-    def worksheet(self, title: str) -> FakeWorksheet:
-        self._sent("worksheet", title)
-        try:
-            return self._sheets[title]._open()
-        except KeyError:
-            raise WorksheetNotFound(title) from None
+    def worksheet(self, title: str) -> OpenedWorksheet:
+        failure = self._sent("worksheet", title)
+        sheet = self._sheets.get(title)
+        if sheet is None:
+            raise WorksheetNotFound(title)
+        opened = sheet._open()
+        if failure is not None:
+            raise failure.error
+        return opened
 
-    def worksheets(self) -> list[FakeWorksheet]:
-        self._sent("worksheets", None)
-        return [sheet._open() for sheet in self._sheets.values()]
+    def worksheets(self) -> list[OpenedWorksheet]:
+        failure = self._sent("worksheets", None)
+        opened = [sheet._open() for sheet in self._sheets.values()]
+        if failure is not None:
+            raise failure.error
+        return opened
 
     def values_batch_get(
-        self, ranges: list[str], params: Mapping[str, str] | None = None
+        self, ranges: list[str], params: dict[str, str] | None = None
     ) -> dict[str, object]:
         """Дублёр `values.batchGet`.
 
         Воспроизводит особенности настоящего ответа: диапазоны приходят В ТОМ
         ЖЕ ПОРЯДКЕ, что и запрос; хвостовые пустые ячейки и пустые строки в
         конце не приезжают, а у пустого диапазона ключа `values` нет вовсе.
+
+        И особенность gspread 6.2: ``ranges`` он дописывает прямо в
+        переданный словарь ``params`` — словарь вызывающего меняется,
+        неизменяемое отображение падает ``TypeError``.
         """
-        options = dict(params or {})
+        if params is None:
+            params = {}
+        params["ranges"] = ranges  # как в gspread 6.2, http_client.values_batch_get
+        options = {key: value for key, value in params.items() if key != "ranges"}
         failure = self._sent("values_batch_get", {"ranges": list(ranges), "params": options})
         render = _renderer(options)
         blocks: list[dict[str, object]] = []
@@ -511,6 +561,10 @@ def _over_the_wire(body: object) -> dict[str, object]:
 
 
 _RU_NUMBER = re.compile(r"-?\d+(?:,\d+)?")
+_GUESSED = re.compile(r"\s*[-+]?\d[\d.,/: -]*%?\s*")
+"""Похоже на число, дату или процент, но не целое и не число с запятой:
+«12.5», «5%», «01.02.2026», «1 030». Что из этого сделает Google в русском
+листе, фальшивка не моделирует."""
 
 
 def _from_input(value: object, option: str) -> Cell:
@@ -530,6 +584,11 @@ def _from_input(value: object, option: str) -> Cell:
         return Formula(value)
     if _RU_NUMBER.fullmatch(value):
         return float(value.replace(",", ".")) if "," in value else int(value)
+    if _GUESSED.fullmatch(value):
+        raise AssertionError(
+            f"фальшивка не знает, во что USER_ENTERED превратит «{value}»: "
+            f"Google в русском листе угадал бы дату, процент или число"
+        )
     return value
 
 

@@ -25,13 +25,20 @@ from kitchen.config import Settings
 from kitchen.db import models
 from kitchen.db.recipes import load_recipes
 from kitchen.domain.costs import calculate
-from kitchen.web.auth import CurrentUserDep, SessionDep, get_settings
+from kitchen.web.auth import CurrentUser, CurrentUserDep, SessionDep, get_settings, require
 from kitchen.web.sync_status import BookRow, SyncStatus, build_sync_status
 
 if TYPE_CHECKING:
     from kitchen.domain.recipe import DishCost
 
 router = APIRouter(prefix="/api")
+
+# Справочник, блюда и сверка несут цены и маржу. Повару (`cook`) они не
+# положены: он заводит карточки ингредиентов и больше ничего не видит.
+# Спрятать раздел в меню мало — ручку можно открыть и по адресу, поэтому
+# отказ живёт здесь. `/me` и `/sync` открыты всем вошедшим: строка
+# свежести данных висит и над экраном повара.
+PricesViewerDep = Annotated[CurrentUser, Depends(require("chef", "developer", "commerce"))]
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +159,7 @@ def me(user: CurrentUserDep) -> Me:
 @router.get("/ingredients", response_model=list[IngredientRow])
 def ingredients(
     session: SessionDep,
-    user: CurrentUserDep,
+    user: PricesViewerDep,
     search: Annotated[str, Query(description="часть имени")] = "",
     status_filter: Annotated[str, Query(alias="status")] = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
@@ -205,7 +212,7 @@ def ingredients(
 @router.get("/dishes", response_model=list[DishRow])
 def dishes(
     session: SessionDep,
-    user: CurrentUserDep,
+    user: PricesViewerDep,
     search: Annotated[str, Query(description="часть названия")] = "",
     status_filter: Annotated[str, Query(alias="status")] = "",
 ) -> list[DishRow]:
@@ -238,7 +245,7 @@ def dishes(
 def dish_detail(
     legacy_id: str,
     session: SessionDep,
-    user: CurrentUserDep,
+    user: PricesViewerDep,
 ) -> DishDetail:
     """Блюдо с разбивкой по составу и всеми замечаниями.
 
@@ -290,7 +297,7 @@ def dish_detail(
 @router.get("/reconciliation", response_model=ReconciliationSummary)
 def reconciliation(
     session: SessionDep,
-    user: CurrentUserDep,
+    user: PricesViewerDep,
 ) -> ReconciliationSummary:
     """Карточки, по которым решение принимает человек.
 
