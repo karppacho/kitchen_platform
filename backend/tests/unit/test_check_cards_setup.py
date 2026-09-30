@@ -7,18 +7,24 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
+import re
+import struct
 import sys
 from typing import TYPE_CHECKING
 
 import check_cards_setup
+import httpx
 import pytest
 import requests
 
 from kitchen.config import Settings
-from kitchen.sync.drive import INSPECT_SCOPE, SCOPES
+from kitchen.llm.polza import PolzaClient, polza_from_settings
+from kitchen.sync.drive import INSPECT_SCOPE, SCOPES, DriveClient
 from tests.fake_drive import FOLDER_ID, ROBOT, SHEET_MIME, FakeDrive, FakeFile
+from tests.fake_polza import BASE_URL, KEY, MODEL, Answer, FakePolza, ok, refusal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,7 +36,7 @@ BOT = "old-bot@example.iam.gserviceaccount.com"
 """Не подстрока адреса платформы: иначе «адреса бота нет в выводе» не проверить."""
 
 
-def _key(path: Path, email: str) -> Path:
+def _key(path: Path, email: str, encoding: str = "utf-8") -> Path:
     path.write_text(
         json.dumps(
             {
@@ -40,7 +46,7 @@ def _key(path: Path, email: str) -> Path:
                 "private_key": FAKE_PRIVATE_KEY,
             }
         ),
-        encoding="utf-8",
+        encoding=encoding,
     )
     return path
 
@@ -70,9 +76,14 @@ class Setup:
             "google_connect_timeout": 4,
             "google_read_timeout": 44,
             "google_refresh_timeout": 14,
+            "polza_api_key": KEY,
+            "polza_base_url": BASE_URL,
+            "llm_vision_model": MODEL,
         }
+        self.polza = FakePolza(ok('{"ok": true}'))
         monkeypatch.setattr(check_cards_setup, "load_settings", self._settings)
         monkeypatch.setattr(check_cards_setup, "authorized_session", self._session)
+        monkeypatch.setattr(check_cards_setup, "polza_from_settings", self._polza)
 
     def _settings(self) -> Settings:
         return Settings(_env_file=None, **self.values)
@@ -80,6 +91,10 @@ class Setup:
     def _session(self, path: Path, scope: str) -> requests.Session:
         self.opened.append((path, scope))
         return self.by_scope.get(scope, self.drive).session()
+
+    def _polza(self, settings: Settings) -> PolzaClient | None:
+        """Тот же клиент, что в бою, только вместо сети — фальшивый polza.ai."""
+        return polza_from_settings(settings, transport=self.polza.transport())
 
     def scopes(self) -> list[str]:
         """Охваты открытых сессий по порядку."""
@@ -379,10 +394,39 @@ def test_trash_refused_names_the_leftover(setup: Setup, capsys: pytest.CaptureFi
     code, out = setup.run(capsys)
 
     assert code == 1
-    assert "Менеджер контента" in out
+    warnings = _lines(out, "ВНИМАНИЕ", "корзина не удалась")
+    assert warnings
+    assert all("Менеджер контента" in line for line in warnings)
     leftovers = [f for f in setup.drive.files.values() if f.own and not f.trashed]
     assert leftovers
     assert all(f.name in out for f in leftovers)
+
+
+def test_trash_outside_photo_folder_has_no_role_hint(
+    setup: Setup, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пробный файл пропал из папки фото до корзины — клиент его не выбросит.
+    Роль тут ни при чём: подсказка «нужна роль „Менеджер контента“» увела бы
+    администратора чинить не то."""
+    trash = DriveClient.trash
+
+    def moved_away_then_trash(client: DriveClient, file_id: str) -> None:
+        setup.drive.files[file_id].parents = ["chuzhaya-papka"]
+        trash(client, file_id)
+
+    monkeypatch.setattr(DriveClient, "trash", moved_away_then_trash)
+
+    code, out = setup.run(capsys)
+
+    assert code == 1
+    refusals = _lines(out, "корзина не удалась")
+    assert refusals
+    assert all("не из папки фото" in line for line in refusals)
+    assert not any("Менеджер контента" in line for line in refusals)
+
+
+def _lines(out: str, *parts: str) -> list[str]:
+    return [line for line in out.splitlines() if all(part in line for part in parts)]
 
 
 @pytest.mark.parametrize(("email", "verdict"), [(ROBOT, "тот же аккаунт"), (BOT, "другой аккаунт")])
@@ -439,3 +483,129 @@ def test_folder_link_instead_of_id(setup: Setup, capsys: pytest.CaptureFixture[s
     assert "после /folders/" in out
     assert "Traceback" not in out
     assert setup.opened == []
+
+
+# ---------------------------------------------------------------------------
+# Ключ не в UTF-8: Блокнот сохраняет «Юникод» как UTF-16
+# ---------------------------------------------------------------------------
+def test_platform_key_not_in_utf8(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    """Ключ пересохранили Блокнотом в UTF-16 — понятная строка и код 1, а не
+    трассировка ``UnicodeDecodeError``."""
+    _key(setup.tmp_path / "platform.json", ROBOT, encoding="utf-16")
+
+    code, out = setup.run(capsys)
+
+    assert code == 1
+    assert "GOOGLE_CREDENTIALS_PATH" in out
+    assert "UTF-8" in out
+    assert setup.opened == []
+
+
+def test_bot_key_not_in_utf8(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    bot_key = _key(setup.tmp_path / "bot.json", BOT, encoding="utf-16")
+
+    code, out = setup.run(capsys, "--bot-key", str(bot_key))
+
+    assert code == 0
+    assert "ключ бота не прочитан" in out
+    assert "UTF-8" in out
+
+
+def test_bot_key_from_stdin_not_in_utf8(
+    setup: Setup, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = json.dumps({"client_email": BOT, "private_key": FAKE_PRIVATE_KEY}).encode("utf-16")
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8"))
+
+    code, out = setup.run(capsys, "--bot-key", "-")
+
+    assert code == 0
+    assert "ключ бота не прочитан" in out
+    assert "UTF-8" in out
+
+
+# ---------------------------------------------------------------------------
+# --llm: пробный вызов модели распознавания
+# ---------------------------------------------------------------------------
+def _jpeg_size(jpeg: bytes) -> tuple[int, int]:
+    """Высота и ширина из заголовка SOF0."""
+    start = jpeg.index(b"\xff\xc0")
+    height, width = struct.unpack(">HH", jpeg[start + 5 : start + 9])
+    return height, width
+
+
+def test_llm_probe(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    """Пробный вызов тем же клиентом и той же моделью, что распознают этикетки:
+    напечатаны адрес, модель, цена в рублях и время; ключ — нет. Картинка —
+    маленький сгенерированный JPEG, не фото."""
+    code, out = setup.run(capsys, "--llm")
+
+    assert code == 0, out
+    assert BASE_URL in out
+    assert MODEL in out
+    assert "0,0123 ₽" in out
+    assert re.search(r"\d+,\d с\b", out)
+    assert KEY not in out
+    [body] = setup.polza.bodies()
+    assert body["model"] == MODEL
+    [image] = [p for p in body["messages"][1]["content"] if p["type"] == "image_url"]
+    jpeg = base64.b64decode(image["image_url"]["url"].removeprefix("data:image/jpeg;base64,"))
+    assert jpeg.startswith(b"\xff\xd8\xff")
+    assert jpeg.endswith(b"\xff\xd9")
+    assert len(jpeg) < 1024
+    height, width = _jpeg_size(jpeg)
+    assert min(height, width) > 10, "картинку меньше 11 пикселей модели Qwen не принимают"
+
+
+def test_no_llm_call_without_the_flag(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = setup.run(capsys)
+
+    assert code == 0
+    assert setup.polza.requests == []
+    assert "polza" not in out.lower()
+
+
+@pytest.mark.parametrize(
+    ("answer", "text"),
+    [
+        (refusal(401), "ключ не принят"),
+        (refusal(403), "ключ не принят"),
+        (refusal(402), "нет денег на счёте"),
+        (refusal(404), "модель не найдена"),
+        (httpx.ConnectError, "нет связи"),
+        (httpx.ReadTimeout, "нет связи"),
+    ],
+)
+def test_llm_probe_failure_is_explained(
+    setup: Setup, capsys: pytest.CaptureFixture[str], answer: Answer, text: str
+) -> None:
+    setup.polza = FakePolza(answer)
+
+    code, out = setup.run(capsys, "--llm")
+
+    assert code == 1
+    assert text in out
+    assert "ОШИБКА" in out
+    assert KEY not in out
+
+
+def test_llm_probe_without_key(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    setup.values["polza_api_key"] = ""
+
+    code, out = setup.run(capsys, "--llm")
+
+    assert code == 1
+    assert "POLZA_API_KEY" in out
+    assert setup.polza.requests == []
+
+
+def test_llm_probe_without_price_still_passes(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Вызов прошёл, а цену polza.ai не прислал — проба пройдена, об этом сказано."""
+    setup.polza = FakePolza(ok('{"ok": true}', usage=None))
+
+    code, out = setup.run(capsys, "--llm")
+
+    assert code == 0, out
+    assert "цену не сообщил" in out

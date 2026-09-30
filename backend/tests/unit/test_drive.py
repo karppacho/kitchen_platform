@@ -383,7 +383,8 @@ def test_unreadable_key_is_forbidden_not_crash(tmp_path: Path) -> None:
 def test_download_refuses_file_over_max_bytes() -> None:
     """Файл больше ``max_bytes`` — отказ, а не молча обрезанная картинка: битое
     фото в прокси или мусор в распознавании без следа хуже понятной ошибки.
-    Целиком такой файл не читается — память сервера цела."""
+    Целиком такой файл не читается — память сервера цела: прочитано не больше
+    ``max_bytes`` и ещё одного куска в 64 КБ, на котором предел перейдён."""
     fake = FakeDrive()
     client = _client(fake)
     huge = b"\xff\xd8" + bytes(range(256)) * 4096
@@ -394,7 +395,7 @@ def test_download_refuses_file_over_max_bytes() -> None:
 
     assert caught.value.kind == "too_large"
     assert "больше допустимого" in str(caught.value)
-    assert fake.served < len(huge) // 4
+    assert fake.served <= 1000 + 64 * 1024
     media = [s for s in fake.sent if s.params.get("alt") == "media"]
     assert [(s.method, s.path) for s in media] == [("GET", f"/drive/v3/files/{file_id}")]
 

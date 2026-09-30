@@ -75,7 +75,17 @@ class Settings(BaseSettings):
     polza_api_key: SecretStr = SecretStr("")
     polza_base_url: str = "https://api.polza.ai/v1"
     llm_model: str = "gpt-4o-mini"
+    # Суточный потолок расходов на модель — на всех вместе; сутки — по Москве.
     llm_daily_budget_rub: int = 300
+    # Распознавание этикеток: своя модель, умеющая читать фото. Та же, что у
+    # бота карточек, — на ней промпт и проверялся.
+    llm_vision_model: str = "qwen/qwen3.6-plus"
+    # Сколько ждать ответа модели. Повтор при таймауте один, и вместе с ним
+    # выходит не дольше, чем nginx держит запрос распознавания (180 с).
+    llm_vision_timeout_seconds: int = Field(default=60, ge=5, le=85)
+    # Этикеток на одного повара в сутки. Защита бюджета от зацикленной
+    # кнопки, а не норма работы: столько новых ингредиентов за день не бывает.
+    llm_label_calls_per_user_daily: int = Field(default=40, ge=1)
 
     # --- Приложение ---------------------------------------------------------
     app_env: str = "development"
