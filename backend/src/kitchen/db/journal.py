@@ -84,6 +84,18 @@ class OpenWrite:
     status: str
     before: dict[str, object]
     values: dict[str, object]
+    """Что эта попытка отправила в лист."""
+    after: dict[str, object] | None = None
+    """Строка, какой её перечитали при завершении, — у ``verified``."""
+
+
+@dataclass(frozen=True, slots=True)
+class SentWrite:
+    """Попытка, ушедшая в лист без подтверждения, — с тем, что она отправила."""
+
+    id: int
+    row: int
+    values: dict[str, object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,24 +107,44 @@ class UnconfirmedWrite:
     row: int
 
 
+_HELD = text(
+    "select 1 from pg_locks where locktype = 'advisory' "
+    "and classid = cast(:high as oid) and objid = cast(:low as oid) and objsubid = 1 "
+    "and pid = pg_backend_pid() and granted"
+)
+"""Наш ли замок: строка `pg_locks` этого соединения с этим ключом.
+
+Ключ bigint Postgres показывает двумя половинами: старшие 32 бита — в
+`classid`, младшие — в `objid`, `objsubid` = 1 (документация Postgres, «View
+pg_locks», advisory locks). Пара int4-ключей легла бы с `objsubid` = 2 — не
+наш случай."""
+
+
 class HeldLock:
     """Очередь писателей, которую держит писатель, — транзакция в базе."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, key: int) -> None:
         self._session = session
+        self._key = key
 
     def alive(self) -> bool:
-        """Держится ли очередь: транзакция жива, соединение не оборвано.
+        """Держит ли это соединение замок очереди прямо сейчас.
 
         Очередь держится, пока открыта транзакция, взявшая блокировку. Её
         может оборвать база (`idle_in_transaction_session_timeout`, перезапуск
         пулера) — и второй писатель тогда уже вправе выбрать ту же строку.
-        Писатель спрашивает об этом прямо перед записью в лист.
+        Проверяется сам замок, а не только соединение: живое соединение без
+        нашей строки в `pg_locks` — очередь уже не наша. Писатель спрашивает
+        об этом прямо перед записью в лист.
         """
+        high, low = self._key >> 32, self._key & 0xFFFFFFFF
         try:
-            self._session.execute(text("select 1"))
+            held = self._session.execute(_HELD, {"high": high, "low": low}).first()
         except SQLAlchemyError as error:
             log.error("очередь писателей потеряна: %s", _first_line(error))
+            return False
+        if held is None:
+            log.error("очередь писателей потеряна: замка %s у соединения нет", self._key)
             return False
         return True
 
@@ -168,14 +200,23 @@ class DbJournal:
                         f"очередь писателей занята дольше {wait.total_seconds():g} с"
                     ) from error
                 raise
-            yield HeldLock(session)
+            yield HeldLock(session, key)
         finally:
+            # Раздельно: упал откат — соединение всё равно закрывается, и
+            # сессия замка не остаётся висеть.
             try:
                 session.rollback()
+            except SQLAlchemyError as error:
+                log.warning(
+                    "очередь писателей: откатить транзакцию замка не удалось — %s",
+                    _first_line(error),
+                )
+            try:
                 session.close()
             except SQLAlchemyError as error:
                 log.warning(
-                    "очередь писателей: отпустить блокировку не удалось — %s", _first_line(error)
+                    "очередь писателей: закрыть соединение замка не удалось — %s",
+                    _first_line(error),
                 )
 
     def find_open(self, request_key: str) -> OpenWrite | None:
@@ -195,23 +236,30 @@ class DbJournal:
                 status=write.status,
                 before=dict(write.before),
                 values=dict(write.values),
+                after=dict(write.after) if write.after is not None else None,
             )
 
-    def find_unconfirmed(self, request_key: str) -> UnconfirmedWrite | None:
-        """Последняя попытка этой отправки, раскладку которой не подтвердили."""
+    def unconfirmed_attempts(self, request_key: str) -> tuple[SentWrite, ...]:
+        """Попытки этой отправки, ушедшие в лист без подтверждения раскладки, —
+        новые первыми, с тем, что каждая отправила.
+
+        Самая новая — то, что повар покажет шефу. А по отправке писатель
+        узнаёт, какая из них легла в найденную строку: что на самом деле
+        записано, отличает правки повара от правок шефа."""
         query = (
-            select(models.SheetWrite.id, models.SheetWrite.row)
+            select(models.SheetWrite.id, models.SheetWrite.row, models.SheetWrite.values)
             .where(
                 models.SheetWrite.request_key == request_key,
                 models.SheetWrite.status == FAILED,
                 models.SheetWrite.note == LAYOUT_UNCONFIRMED,
             )
             .order_by(models.SheetWrite.id.desc())
-            .limit(1)
         )
         with self._sessions() as session:
-            found = session.execute(query).first()
-        return None if found is None else UnconfirmedWrite(id=found.id, row=found.row)
+            found = session.execute(query).all()
+        return tuple(
+            SentWrite(id=write_id, row=row, values=dict(values)) for write_id, row, values in found
+        )
 
     def start(self, write: NewWrite) -> int:
         """Завести запись ``pending`` — своим коммитом, до записи в лист."""

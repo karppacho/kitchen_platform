@@ -53,6 +53,7 @@ from kitchen.db.journal import (
     VERIFIED,
     NewWrite,
     OpenWrite,
+    SentWrite,
     UnconfirmedWrite,
     WritersBusyError,
 )
@@ -267,7 +268,7 @@ class SheetJournal(Protocol):
 
     def find_open(self, request_key: str) -> OpenWrite | None: ...
 
-    def find_unconfirmed(self, request_key: str) -> UnconfirmedWrite | None: ...
+    def unconfirmed_attempts(self, request_key: str) -> tuple[SentWrite, ...]: ...
 
     def start(self, write: NewWrite) -> int: ...
 
@@ -305,9 +306,13 @@ class AppendResult:
     already_written: bool
     """Карточка легла раньше — повтором отправки или прерванной попыткой."""
     not_written: tuple[str, ...] = ()
-    """Поля карточки (имена, как в ``card_row``), которые в листе не такие, как
-    в этой отправке. Бывает только при ``already_written``: в листе — первая
-    версия, правки после неё не попали. Пусто — в листе ровно отправленное."""
+    """Правки повара, не попавшие в лист, — имена полей, как в ``card_row``.
+
+    Бывает только при ``already_written``: карточка легла раньше, в листе —
+    та версия. Поле здесь, если в этой отправке оно не такое, как в легшей
+    попытке (что на самом деле записано), **и** не такое, как сейчас в
+    листе. Правки шефа в строке после записи сюда не попадают — они только
+    в журнале: повару о них говорить незачем."""
     shifted: UnconfirmedWrite | None = None
     """Прежняя попытка этой же отправки, раскладку которой не подтвердили:
     таблицу меняли в окне записи, и чужая карточка могла пострадать. Строку
@@ -629,23 +634,22 @@ class CardSheetWriter:
         actor_id: uuid.UUID | None,
         request_key: str,
     ) -> AppendResult:
-        shifted = self._journal.find_unconfirmed(request_key)
+        attempts = self._journal.unconfirmed_attempts(request_key)
+        shifted = UnconfirmedWrite(attempts[0].id, attempts[0].row) if attempts else None
         prior = self._journal.find_open(request_key)
         if prior is not None and prior.status == VERIFIED:
-            # Уже записано: ответ без запросов к Google. Правки, пришедшие
-            # после той записи, в лист не попали — называем их.
-            differing = tuple(
-                c.field
-                for c in _WRITTEN
-                if not _same(sent[c.field], _as_cell(prior.values.get(c.field)))
-            )
-            return AppendResult(prior.row, prior.id, True, differing, shifted)
+            # Уже записано: ответ без запросов к Google — тот же, что дал
+            # первый повтор. В values записи — что на самом деле записано, в
+            # after — строка, какой её видели тогда.
+            landed = _sent_from(prior.values, prior.id)
+            cooks = _cook_edits(sent, landed, _after_cells(prior, landed))
+            return AppendResult(prior.row, prior.id, True, cooks, shifted)
 
         book = _google("открыть таблицу", lambda: self._client.open(self._spreadsheet_id))
         if prior is not None:
-            resumed = self._resume(book, prior, sent)
+            resumed = self._resume(book, prior, sent, shifted)
             if resumed is not None:
-                return replace(resumed, shifted=shifted)
+                return resumed
 
         sheet = _google("открыть лист", lambda: book.worksheet(SPEC.title))
         raw = _google("прочитать лист", lambda: _whole_sheet(book))
@@ -670,7 +674,7 @@ class CardSheetWriter:
                 before={"rows": {str(ours[0]): _snapshot(raw, ours[0])}},
                 values=dict(sent),
             )
-            return self._found(book, raw, write, sent, shifted)
+            return self._found(book, raw, write, sent, attempts, shifted)
         name = str(sent[_B.field])
         conflicts = name_conflicts(raw, name)
         if conflicts:
@@ -729,7 +733,7 @@ class CardSheetWriter:
             # Исход неясен: Google мог записать и не ответить. Решает
             # перечитывание, а не повтор записи.
             failure = error
-        return replace(self._settle(book, attempt, failure), shifted=shifted)
+        return self._settle(book, attempt, failure, shifted)
 
     def _found(
         self,
@@ -737,34 +741,56 @@ class CardSheetWriter:
         raw: Cells,
         write: NewWrite,
         sent: Mapping[str, SentValue],
+        attempts: Sequence[SentWrite],
         shifted: UnconfirmedWrite | None,
     ) -> AppendResult:
         """Строка с нашей ссылкой этикетки уже в листе — прежняя попытка.
 
-        Писать не надо. Но строку сверяем с этой отправкой: после сбоя
-        черновик снова открыт, повар мог его поправить, а шеф — строку. Что
-        разошлось, в лист не записано, — это в ответе и в журнале.
+        Писать не надо. Но строку сверяем: после сбоя черновик снова открыт,
+        повар мог его поправить, а шеф — строку. Что записано на самом деле —
+        отправка легшей попытки: последней неподтверждённой попытки этой
+        отправки с той же ссылкой этикетки (журнал). Правки повара, не
+        попавшие в лист, — в ответе; правки шефа — только в журнале. Запись
+        журнала хранит в ``values`` записанное, а не нынешнюю отправку: иначе
+        следующий повтор коротким путём сверял бы с тем, чего в листе нет.
         """
         row = write.row
         cells = _google("перечитать строку прежней попытки", lambda: _row_values(book, row))
-        differing = _differing(sent, cells)
+        label = sent[_P.field]
+        landing = next((a for a in attempts if a.values.get(_P.field) == label), None)
+        if landing is not None:
+            landed = _sent_from(landing.values, landing.id)
+            chefs = _differing(landed, cells)
+        else:
+            # Отправки легшей попытки в журнале нет (журнал чистили, строку
+            # писали с другим ключом): за записанное принята строка, какая она
+            # сейчас. Правку шефа тогда от записанного не отличить — повару
+            # называется всё, чем эта отправка отличается от листа.
+            landed = _cells_as_sent(cells)
+            chefs = ()
+        cooks = _cook_edits(sent, landed, cells)
         line = _snapshot(raw, row)
-        note = PRIOR_ATTEMPT
-        if differing:
-            note += f"; отправлено иначе, чем в листе, — в лист не записаны: {_letters(differing)}"
-        if shifted is not None:
-            note += (
-                f"; раскладка прежней попытки не подтверждена — журнал №{shifted.id}, "
-                f"строка {shifted.row}"
-            )
+        note = _joined(
+            PRIOR_ATTEMPT,
+            _chef_note(chefs),
+            f"в лист не записаны правки повара: {_letters(_columns(cooks))}" if cooks else "",
+            "за записанное принята строка листа: отправки попытки в журнале нет"
+            if landing is None
+            else "",
+            _shifted_note(shifted),
+        )
         journal_id = self._journal.found(
-            write,
+            replace(write, values=dict(landed)),
             content_hash=row_hash(line[:_WIDTH]),
             note=note,
-            after={"rows": {str(row): line[:_WIDTH]}, "values": cells},
+            after={
+                "rows": {str(row): line[:_WIDTH]},
+                "values": cells,
+                "not_written": {field: sent[field] for field in cooks},
+            },
         )
         log.info("«%s»: строка %s — прежняя попытка, журнал №%s", SPEC.title, row, journal_id)
-        return AppendResult(row, journal_id, True, tuple(c.field for c in differing), shifted)
+        return AppendResult(row, journal_id, True, cooks, shifted)
 
     def _reread(self, book: Spreadsheet, attempt: _Attempt, cause: str) -> _Reread:
         """Перечитать строки N−1 и N. Не вышло — исход неизвестен: журнал
@@ -802,7 +828,11 @@ class CardSheetWriter:
         )
 
     def _settle(
-        self, book: Spreadsheet, attempt: _Attempt, failure: Exception | None
+        self,
+        book: Spreadsheet,
+        attempt: _Attempt,
+        failure: Exception | None,
+        shifted: UnconfirmedWrite | None,
     ) -> AppendResult:
         """Исход записи в этом же вызове — в окне в секунду после неё."""
         cause = "запись ушла" if failure is None else f"запись упала: {describe_error(failure)}"
@@ -812,9 +842,12 @@ class CardSheetWriter:
             strangers = _differing(attempt.sent, seen.values)
             if strangers:
                 self._roll_back(book, attempt, seen, strangers)
-            note = None if failure is None else f"{cause}, но строка перечитана — легла"
-            self._finish_verified(attempt, seen, note)
-            return AppendResult(row, attempt.journal_id, already_written=False)
+            note = _joined(
+                "" if failure is None else f"{cause}, но строка перечитана — легла",
+                _shifted_note(shifted),
+            )
+            self._finish_verified(attempt, seen, note or None, {})
+            return AppendResult(row, attempt.journal_id, False, (), shifted)
         if failure is not None and seen.untouched:
             self._journal.finish(
                 attempt.journal_id,
@@ -839,7 +872,11 @@ class CardSheetWriter:
         )
 
     def _resume(
-        self, book: Spreadsheet, prior: OpenWrite, sent: Mapping[str, SentValue]
+        self,
+        book: Spreadsheet,
+        prior: OpenWrite,
+        sent: Mapping[str, SentValue],
+        shifted: UnconfirmedWrite | None,
     ) -> AppendResult | None:
         """Прежняя попытка с этим ключом прервалась посреди записи.
 
@@ -847,27 +884,29 @@ class CardSheetWriter:
         трогаем**: прошли, может быть, часы, и шеф ею уже пользуется —
         правило «чужая ячейка — убрать наши» годится только для окна в
         секунду в том же вызове, что и запись. Что в строке иначе, чем
-        отправляла та попытка, — в журнал; что иначе, чем в этой отправке, —
-        в ответ. Не легла и лист на месте — попытка ``failed``, пишем заново
-        (``None``). Иначе — отказ.
+        отправляла та попытка (правки шефа), — в журнал; правки повара, не
+        попавшие в лист, — в ответ. Не легла и лист на месте — попытка
+        ``failed``, пишем заново (``None``). Иначе — отказ.
         """
         attempt = _Attempt(
             row=prior.row,
             journal_id=prior.id,
             before=prior.before,
-            sent=_sent_from_journal(prior),
+            sent=_sent_from(prior.values, prior.id),
         )
         cause = "прежняя попытка прервалась, исход неизвестен"
         seen = self._reread(book, attempt, cause)
         row = attempt.row
         if seen.layout_confirmed:
-            changed = _differing(attempt.sent, seen.values)
-            note = f"{cause}; строка перечитана — легла"
-            if changed:
-                note += f"; с тех пор в листе иначе: {_letters(changed)}"
-            self._finish_verified(attempt, seen, note)
-            differing = tuple(c.field for c in _differing(sent, seen.values))
-            return AppendResult(row, attempt.journal_id, True, differing)
+            cooks = _cook_edits(sent, attempt.sent, seen.values)
+            note = _joined(
+                f"{cause}; строка перечитана — легла",
+                _chef_note(_differing(attempt.sent, seen.values)),
+                f"в лист не записаны правки повара: {_letters(_columns(cooks))}" if cooks else "",
+                _shifted_note(shifted),
+            )
+            self._finish_verified(attempt, seen, note, {field: sent[field] for field in cooks})
+            return AppendResult(row, attempt.journal_id, True, cooks, shifted)
         if seen.untouched:
             self._journal.finish(
                 attempt.journal_id,
@@ -884,16 +923,29 @@ class CardSheetWriter:
             _resumed_unconfirmed_text(row, attempt.journal_id),
         )
 
-    def _finish_verified(self, attempt: _Attempt, seen: _Reread, note: str | None) -> None:
+    def _finish_verified(
+        self,
+        attempt: _Attempt,
+        seen: _Reread,
+        note: str | None,
+        not_written: Mapping[str, SentValue],
+    ) -> None:
         """Запись состоялась: хеш — ``row_hash`` строки A–V, как её видит шеф,
-        вместе с Q и R, — ровно как хеширует импорт."""
+        вместе с Q и R, — ровно как хеширует импорт. ``values`` записи — то,
+        что эта попытка отправила, то есть записанное; в ``after`` —
+        перечитанная строка (и числами), по ней короткий путь по ключу
+        отвечает на повтор, не спрашивая Google."""
         self._journal.finish(
             attempt.journal_id,
             status=VERIFIED,
             content_hash=row_hash(seen.formatted),
             note=note,
             before=attempt.rows_only(),
-            after={"rows": seen.rows(attempt.row)},
+            after={
+                "rows": seen.rows(attempt.row),
+                "values": seen.values,
+                "not_written": dict(not_written),
+            },
         )
 
     def _roll_back(
@@ -1029,18 +1081,84 @@ def _as_cell(value: object) -> object:
     return "" if value is None else value
 
 
-def _sent_from_journal(prior: OpenWrite) -> dict[str, SentValue]:
-    """Отправленное прежней попыткой — из журнала: сверять надо с ним, а не
-    с черновиком, который могли поправить между попытками."""
+def _sent_from(values: Mapping[str, object], journal_id: int) -> dict[str, SentValue]:
+    """Отправленное попыткой — из журнала: сверять надо с ним, а не с
+    черновиком, который могли поправить между попытками."""
     sent: dict[str, SentValue] = {}
     for field in FIELDS:
-        value = prior.values.get(field)
+        value = values.get(field)
         if value is not None and (
             isinstance(value, bool) or not isinstance(value, str | int | float)
         ):
-            raise ValueError(f"в журнале №{prior.id} у поля {field} не значение ячейки: {value!r}")
+            raise ValueError(
+                f"в журнале №{journal_id} у поля {field} не значение ячейки: {value!r}"
+            )
         sent[field] = value
     return sent
+
+
+def _cells_as_sent(cells: Sequence[object]) -> dict[str, SentValue]:
+    """Строка листа как отправка: пустая ячейка — null."""
+    sent: dict[str, SentValue] = {}
+    for column in _WRITTEN:
+        cell = cells[column.index]
+        if cell == "" or cell is None:
+            sent[column.field] = None
+        elif isinstance(cell, str | int | float) and not isinstance(cell, bool):
+            sent[column.field] = cell
+        else:
+            sent[column.field] = str(cell)
+    return sent
+
+
+def _after_cells(prior: OpenWrite, landed: Mapping[str, SentValue]) -> list[object]:
+    """Строка, какой её перечитали при завершении записи (числами).
+
+    Нет её в журнале — строкой считается записанное."""
+    after = prior.after or {}
+    cells = after.get("values")
+    if isinstance(cells, list) and len(cells) >= _WIDTH:
+        return list(cells)
+    line: list[object] = [""] * _WIDTH
+    for column in _WRITTEN:
+        line[column.index] = _as_cell(landed[column.field])
+    return line
+
+
+def _cook_edits(
+    sent: Mapping[str, SentValue], landed: Mapping[str, SentValue], cells: Sequence[object]
+) -> tuple[str, ...]:
+    """Правки повара, не попавшие в лист: поле этой отправки не такое, как в
+    записанном (``landed``), и не такое, как сейчас в листе (``cells``).
+
+    Второе условие — чтобы не звать правкой то, что уже в листе: повар и шеф
+    могли поправить поле одинаково. Отличие листа от записанного при
+    совпадении с отправкой — правка шефа, повару о ней не говорят.
+    """
+    return tuple(
+        c.field
+        for c in _WRITTEN
+        if not _same(sent[c.field], _as_cell(landed[c.field]))
+        and not _same(sent[c.field], cells[c.index])
+    )
+
+
+def _columns(fields: Sequence[str]) -> tuple[Column, ...]:
+    return tuple(SPEC.column(field) for field in fields)
+
+
+def _chef_note(changed: Sequence[Column]) -> str:
+    return f"с тех пор в листе иначе: {_letters(changed)}" if changed else ""
+
+
+def _shifted_note(shifted: UnconfirmedWrite | None) -> str:
+    if shifted is None:
+        return ""
+    return f"раскладка прежней попытки не подтверждена — журнал №{shifted.id}, строка {shifted.row}"
+
+
+def _joined(*parts: str) -> str:
+    return "; ".join(part for part in parts if part)
 
 
 def _google[T](what: str, call: Callable[[], T], template: str = _NOTHING_CHANGED) -> T:

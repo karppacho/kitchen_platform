@@ -35,7 +35,11 @@ from kitchen.db.base import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Не глушить уже созданные логгеры. По умолчанию fileConfig выключает все
+    # логгеры, не упомянутые в alembic.ini, — и когда миграции идут внутри
+    # процесса (интеграционные тесты поднимают схему перед каждым тестом),
+    # замолкает весь kitchen.*: журнал записей, писатель, цикл.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 config.set_main_option("sqlalchemy.url", load_settings().database_url_direct)
 

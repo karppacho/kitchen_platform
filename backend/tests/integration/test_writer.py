@@ -24,7 +24,15 @@ from sqlalchemy.exc import IntegrityError
 
 from kitchen.db import journal as journal_module
 from kitchen.db import models
-from kitchen.db.journal import FAILED, PENDING, VERIFIED, DbJournal, NewWrite
+from kitchen.db.journal import (
+    FAILED,
+    LAYOUT_UNCONFIRMED,
+    PENDING,
+    VERIFIED,
+    DbJournal,
+    HeldLock,
+    NewWrite,
+)
 from kitchen.domain.cards import APPROVED, CardDraftData, card_row
 from kitchen.sync import specs
 from kitchen.sync.cycle import BookOutcome, SyncCycle
@@ -35,6 +43,7 @@ from kitchen.sync.writer import (
     CardSheetWriter,
     LockLostError,
     SheetBusyError,
+    WriteNotConfirmedError,
 )
 from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
 from tests.fake_sheets import IDS, cards_sheet, kitchen_sheets, row, sheets_client
@@ -308,16 +317,12 @@ def test_lost_lock_refuses_before_the_write(sessions) -> None:
 
 
 def test_releasing_a_dead_lock_does_not_replace_the_result(
-    sessions, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+    sessions, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Сессию очереди оборвали уже после записи. Запись состоялась и сверена —
     ошибка отката при отпускании очереди уходит в лог, а не подменяет ответ
     повару ошибкой базы."""
     client = _client(on_reread=_kill_lock_holder)
-    # Фикстура поднимает схему alembic-ом, а его env.py зовёт fileConfig —
-    # тот выключает все уже созданные логгеры, и лог журнала тест не увидел
-    # бы. В работающем приложении alembic идёт отдельным процессом.
-    monkeypatch.setattr(journal_module.log, "disabled", False)
 
     with caplog.at_level(logging.WARNING, logger="kitchen.db"):
         result = _writer(client, sessions).append(_values(), actor_id=None, request_key=KEY)
@@ -449,6 +454,79 @@ def _new(key: str = KEY, actor: uuid.UUID | None = None) -> NewWrite:
         before={"rows": {"5": ["a"], "6": [""]}},
         values={"name": "Соус", "fat": 12.5},
     )
+
+
+def test_lock_alive_checks_the_lock_itself(sessions) -> None:
+    """Живость очереди — это наша строка в `pg_locks`, а не просто живое
+    соединение. Ключ bigint Postgres раскладывает на две половины: старшую — в
+    `classid`, младшую — в `objid`, `objsubid` = 1. Ключ с той же младшей
+    половиной, но другой старшей, — чужой замок."""
+    key = (5 << 32) | 7
+    with sessions() as session:
+        session.begin()
+        session.execute(text("select pg_advisory_xact_lock(:key)"), {"key": key})
+
+        assert HeldLock(session, key).alive()
+        assert not HeldLock(session, key + 1).alive(), "другая младшая половина"
+        assert not HeldLock(session, (6 << 32) | 7).alive(), "другая старшая половина"
+        assert not HeldLock(session, 7).alive(), "ключ без старшей половины"
+        session.rollback()
+
+    journal = DbJournal(sessions)
+    with journal.writers_lock(key, timedelta(seconds=1), timedelta(minutes=1)) as lock:
+        assert lock.alive()
+
+
+def test_unconfirmed_attempts_on_postgres(sessions) -> None:
+    """Неподтверждённые попытки отправки — с их отправкой, новые первыми;
+    прочие неудачи и чужие ключи — мимо."""
+    journal = DbJournal(sessions)
+    first = journal.start(_new())
+    journal.finish(first, status=FAILED, error="сдвиг", note=LAYOUT_UNCONFIRMED)
+    plain = journal.start(_new())
+    journal.finish(plain, status=FAILED, error="не легла")
+    second = journal.start(
+        NewWrite(
+            book="ingredient_cards",
+            sheet="Лист1",
+            row=7,
+            request_key=KEY,
+            actor_id=None,
+            before={"rows": {}},
+            values={"name": "Соус", "fat": 13.5},
+        )
+    )
+    journal.finish(second, status=FAILED, error="сдвиг", note=LAYOUT_UNCONFIRMED)
+    other = journal.start(_new("card-draft:2"))
+    journal.finish(other, status=FAILED, error="сдвиг", note=LAYOUT_UNCONFIRMED)
+
+    attempts = journal.unconfirmed_attempts(KEY)
+
+    assert [(a.id, a.row) for a in attempts] == [(second, 7), (first, 6)]
+    assert attempts[0].values == {"name": "Соус", "fat": 13.5}
+    assert journal.unconfirmed_attempts("card-draft:3") == ()
+
+
+def test_unwritten_edit_is_named_on_every_repeat_on_postgres(sessions) -> None:
+    """Три нажатия через настоящий журнал: короткий путь по ключу берёт из базы
+    то, что на самом деле записано (`values`), и фактическую строку (`after`)."""
+    client = _client()
+    book = _cards_book(client)
+    book.chef_inserts_rows("Лист1", above=5, moment="before_write")
+    writer = _writer(client, sessions)
+    with pytest.raises(WriteNotConfirmedError):
+        writer.append(_values(), actor_id=None, request_key=KEY)
+    edited = _values()
+    edited["fat"] = Decimal("13.5")
+
+    second = writer.append(edited, actor_id=None, request_key=KEY)
+    third = writer.append(edited, actor_id=None, request_key=KEY)
+
+    assert second.not_written == ("fat",)
+    assert third == second
+    found = _journal(sessions)[-1]
+    assert found.values["fat"] == 12.5
+    assert found.after is not None and found.after["not_written"] == {"fat": 13.5}
 
 
 def test_one_open_write_per_request_key(sessions) -> None:

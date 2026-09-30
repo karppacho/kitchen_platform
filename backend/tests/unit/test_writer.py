@@ -25,12 +25,20 @@ import pytest
 import requests
 
 from kitchen.config import Settings
-from kitchen.db.journal import FAILED, PENDING, ROLLED_BACK, VERIFIED, UnconfirmedWrite
+from kitchen.db.journal import (
+    FAILED,
+    PENDING,
+    ROLLED_BACK,
+    VERIFIED,
+    NewWrite,
+    UnconfirmedWrite,
+)
 from kitchen.domain.cards import APPROVED, CardDraftData, card_row, drive_view_url
 from kitchen.sync import ownership, specs
 from kitchen.sync.ownership import ForbiddenWriteError
 from kitchen.sync.reader import SheetsReader
 from kitchen.sync.writer import (
+    FIELDS,
     HOLD_LIMIT,
     SHEET_WRITE_LOCK_KEY,
     AppendResult,
@@ -444,8 +452,18 @@ def test_name_conflicts_are_exact_after_normalising() -> None:
             api_error(400, "Unable to parse range: 'Лист1'"),
             "Лист «Лист1» не найден — возможно, его переименовали",
         ),
+        (
+            "values_batch_get",
+            api_error(429, "Quota exceeded for quota metric 'Read requests'", "RESOURCE_EXHAUSTED"),
+            "Google ограничил число запросов",
+        ),
+        (
+            "worksheet",
+            ConnectionError(111, "Connection refused"),
+            "Google-таблица не ответила",
+        ),
     ],
-    ids=["open-503", "read-503", "open-403", "read-400"],
+    ids=["open-503", "read-503", "open-403", "read-400", "read-429", "open-errno"],
 )
 def test_google_failure_before_write_changes_nothing(
     method: str, error: Exception | None, reason: str
@@ -929,32 +947,109 @@ def test_retry_after_unconfirmed_finds_our_row_but_keeps_the_warning(
     assert "журнал №1" in message and "строк" in message
 
 
-def test_prior_attempt_names_edits_that_were_not_written() -> None:
-    """После сбоя черновик снова открыт: повар поправил жиры и отправил ещё
-    раз. Строка прежней попытки уже лежит — писатель отвечает ею, но сверяет
-    с отправляемым: правка жиров в таблицу не попала, и это названо."""
+def test_unwritten_edit_is_named_on_every_repeat() -> None:
+    """Три нажатия. Первое — раскладка не подтверждена, строка легла. Второе и
+    третье — с правкой жиров, а в листе первая версия. Правку называют оба
+    ответа: третье нажатие идёт коротким путём по ключу и сверяет с тем, что
+    на самом деле записано, а не с тем, что прислало второе. Повтор после
+    обрыва мобильной сети — штатный случай."""
     rig = _rig()
     rig.book.chef_inserts_rows("Лист1", above=5, moment="before_write")
     with pytest.raises(WriteNotConfirmedError):
         rig.append()
+    writes = rig.writes()
+    edited = _values()
+    edited["fat"] = Decimal("13.5")
+
+    second = rig.append(edited)
+    third = rig.append(edited)
+
+    assert (second.row, second.already_written, second.not_written) == (6, True, ("fat",))
+    assert third == second
+    assert rig.writes() == writes
+    assert rig.line(6)[_index("fat")] == "12,5", "в листе — первая версия"
+    found = rig.journal.records[-1]
+    assert found.values["fat"] == 12.5, "в values — то, что на самом деле записано"
+    assert found.after is not None
+    assert found.after["not_written"] == {"fat": 13.5}
+    assert found.after["rows"]["6"][_index("fat")] == "12,5"
+    assert found.note is not None and "в лист не записаны правки повара: I" in found.note
+
+
+def test_chef_edit_after_the_attempt_is_not_blamed_on_the_cook() -> None:
+    """Шеф поправил состав в строке прежней попытки, повар ничего не менял.
+    Повару сказать нечего — правка шефа только в журнале: иначе экран велел
+    бы повару «сказать шефу», и шеф затёр бы свою правку старым текстом."""
+    rig = _rig()
+    rig.book.chef_inserts_rows("Лист1", above=5, moment="before_write")
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    rig.book.chef_edits_cell("'Лист1'!G6", "томаты, сахар, соль", moment="now")
+
+    result = rig.append()
+
+    assert (result.row, result.already_written, result.not_written) == (6, True, ())
+    found = rig.journal.records[-1]
+    assert found.note is not None and "с тех пор в листе иначе: G" in found.note
+
+
+def test_row_without_journal_trail_is_taken_as_written() -> None:
+    """Строка с нашей ссылкой этикетки в листе есть, а попытки в журнале нет
+    (журнал чистили или строку писали с другим ключом). За записанное
+    принята строка, какая она сейчас: повару называется всё, чем отправка
+    от неё отличается, и в журнале об этом сказано."""
+    ours = row(
+        SPEC,
+        category="Соусы",
+        name="Соус Барбекю",
+        supplier="Север",
+        label_url=drive_view_url("lbl1"),
+        approval_status=APPROVED,
+    )
+    rig = _rig((*EXISTING, ours))
+
+    result = rig.append()
+
+    assert (result.row, result.already_written) == (6, True)
+    assert result.not_written == ("manufacturer", "composition", "protein", "fat", "carbs")
+    record = rig.journal.only()
+    assert record.note is not None and "за записанное принята строка листа" in record.note
+    assert record.values["name"] == "Соус Барбекю"
+    assert record.values["fat"] is None, "в values — строка листа: жиров там нет"
+    assert rig.writes() == []
+
+
+def test_short_path_without_reread_row_compares_with_written() -> None:
+    """Запись verified без перечитанной строки в after (так писал бы журнал
+    до этого правила): короткий путь считает строкой записанное."""
+    rig = _rig()
+    rig.journal.found(
+        NewWrite(
+            book="ingredient_cards",
+            sheet="Лист1",
+            row=6,
+            request_key=KEY,
+            actor_id=None,
+            before={"rows": {}},
+            values=dict.fromkeys(FIELDS) | {"fat": 12.5},
+        ),
+        content_hash="0" * 64,
+        note="",
+    )
     edited = _values()
     edited["fat"] = Decimal("13.5")
 
     result = rig.append(edited)
 
-    assert (result.row, result.already_written, result.not_written) == (6, True, ("fat",))
-    assert rig.line(6)[_index("fat")] == "12,5", "в листе — первая версия"
-    found = rig.journal.records[-1]
-    assert found.values["fat"] == 13.5, "в журнале — отправленное в этот раз"
-    assert found.note is not None and "не записаны: I" in found.note
-    assert found.after is not None
-    assert found.after["rows"]["6"][_index("fat")] == "12,5"
+    assert (result.row, result.journal_id, result.already_written) == (6, 1, True)
+    assert "fat" in result.not_written
+    assert rig.book.requests == 0
 
 
 def test_prior_attempt_is_found_by_label_link_even_after_rename() -> None:
     """Шеф поправил имя в строке прежней попытки. Свою строку писатель ищет по
-    ссылке этикетки во всём листе, а не только среди тёзок: второй строки нет,
-    а правка имени названа."""
+    ссылке этикетки во всём листе, а не только среди тёзок: второй строки нет.
+    Имя правил шеф, не повар, — это в журнале, а не в ответе."""
     rig = _rig()
     rig.book.chef_inserts_rows("Лист1", above=5, moment="before_write")
     with pytest.raises(WriteNotConfirmedError):
@@ -964,8 +1059,10 @@ def test_prior_attempt_is_found_by_label_link_even_after_rename() -> None:
 
     result = rig.append()
 
-    assert (result.row, result.already_written, result.not_written) == (6, True, ("name",))
+    assert (result.row, result.already_written, result.not_written) == (6, True, ())
     assert rig.writes() == writes
+    note = rig.journal.records[-1].note
+    assert note is not None and "с тех пор в листе иначе: B" in note
 
 
 def test_duplicate_with_foreign_label_link_is_refused() -> None:
@@ -1034,7 +1131,8 @@ def test_resumed_attempt_never_clears_a_landed_row(monkeypatch: pytest.MonkeyPat
     Повар отправляет ещё раз. Правило «чужая ячейка — убрать наши» — для окна
     в секунду в том же вызове, что и запись; к строке, которой шеф с тех пор
     пользуется, оно не применяется никогда: verified, строка та же, ни одной
-    очистки, отличия — в журнале и в ответе."""
+    очистки. Правки шефа — в журнале; повару сказать нечего: он ничего не
+    менял."""
     rig = _rig()
     _google_down_after_write(rig, monkeypatch, applied=True)
     with pytest.raises(WriteNotConfirmedError):
@@ -1046,12 +1144,7 @@ def test_resumed_attempt_never_clears_a_landed_row(monkeypatch: pytest.MonkeyPat
 
     result = rig.append()
 
-    assert result == AppendResult(
-        row=6,
-        journal_id=1,
-        already_written=True,
-        not_written=("composition", "approval_status"),
-    )
+    assert result == AppendResult(row=6, journal_id=1, already_written=True)
     assert "values_batch_clear" not in rig.writes()
     line = rig.line(6)
     assert (line[_index("composition")], line[_index("approval_status")]) == (
@@ -1065,6 +1158,71 @@ def test_resumed_attempt_never_clears_a_landed_row(monkeypatch: pytest.MonkeyPat
     reader = SheetsReader(rig.client, {"ingredient_cards": "cards-id"})
     [imported] = [item for item in reader.read(SPEC).rows if item.number == 6]
     assert record.content_hash == imported.content_hash, "хеш — строки, какая она сейчас"
+
+
+def test_resumed_attempt_names_only_the_cooks_edits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Прерванная попытка легла. С тех пор шеф поправил состав, а повар —
+    жиры. Повару называются только его жиры; правка шефа — в журнале. В
+    values записи — то, что на самом деле записала та попытка."""
+    rig = _rig()
+    _google_down_after_write(rig, monkeypatch, applied=True)
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    monkeypatch.undo()
+    rig.book.chef_edits_cell("'Лист1'!G6", "томаты, сахар, соль", moment="now")
+    edited = _values()
+    edited["fat"] = Decimal("13.5")
+
+    result = rig.append(edited)
+    again = rig.append(edited)
+
+    assert (result.row, result.already_written, result.not_written) == (6, True, ("fat",))
+    assert again == result, "короткий путь по ключу отвечает то же"
+    record = rig.journal.only()
+    assert record.values["fat"] == 12.5
+    assert record.note is not None and "с тех пор в листе иначе: G" in record.note
+
+
+def test_every_success_carries_the_unconfirmed_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Первая попытка не подтверждена, и её строки с нашей ссылкой в листе уже
+    нет: шеф вписал своё поверх имени и ссылки. Вторая пишет новую строку и
+    повисает без ответа, третья её находит. Каждая удачная запись журнала
+    несёт ссылку на неподтверждённую — и удачный ответ тоже."""
+    rig = _rig()
+    rig.book.tamper_after_write("'Лист1'!B6", "Соус шефа")
+    rig.book.tamper_after_write("'Лист1'!P6", "ссылка шефа")
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    _google_down_after_write(rig, monkeypatch, applied=True)
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    monkeypatch.undo()
+
+    result = rig.append()
+
+    assert result == AppendResult(
+        row=7, journal_id=2, already_written=True, shifted=UnconfirmedWrite(id=1, row=6)
+    )
+    note = rig.journal.get(2).note
+    assert note is not None and "журнал №1, строка 6" in note
+
+
+def test_fresh_write_after_unconfirmed_attempt_notes_it() -> None:
+    """Неподтверждённая попытка не нашлась в листе по ссылке — повтор пишет
+    строку заново. Запись удалась, но и она несёт ссылку на ту попытку: в
+    ответе и в журнале."""
+    rig = _rig()
+    rig.book.tamper_after_write("'Лист1'!B6", "Соус шефа")
+    rig.book.tamper_after_write("'Лист1'!P6", "ссылка шефа")
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+
+    result = rig.append()
+
+    assert (result.row, result.already_written) == (7, False)
+    assert result.shifted == UnconfirmedWrite(id=1, row=6)
+    note = rig.journal.get(2).note
+    assert note is not None and "журнал №1, строка 6" in note
 
 
 @pytest.mark.parametrize(
@@ -1159,8 +1317,30 @@ def test_retry_refuses_when_interrupted_row_holds_someone_else(
 # ---------------------------------------------------------------------------
 SRC = Path(__file__).resolve().parents[2] / "src"
 _WRITE_METHODS = re.compile(
-    r"\b(?:update_cells?|append_rows?|batch_clear|insert_rows?|delete_rows|values_update"
-    r"|values_append|values_clear|values_batch_update|values_batch_clear|batch_update)\b"
+    r"\b(?:"
+    # значения
+    r"update_acell|update_cells?|append_rows?|batch_clear|batch_format|batch_merge"
+    r"|values_update|values_append|values_clear|values_batch_update|values_batch_clear"
+    r"|batch_update"
+    # строки, колонки, диапазоны
+    r"|insert_rows?|insert_cols|add_rows|add_cols|delete_rows|delete_columns"
+    r"|delete_dimension|cut_range|copy_range|copy_to|merge_cells|unmerge_cells"
+    r"|add_dimension_group_columns|add_dimension_group_rows"
+    r"|delete_dimension_group_columns|delete_dimension_group_rows"
+    r"|hide_rows|hide_columns|unhide_rows|unhide_columns|hide_gridlines|show_gridlines"
+    r"|columns_auto_resize|rows_auto_resize|set_basic_filter|clear_basic_filter"
+    r"|add_validation|add_protected_range|delete_protected_range"
+    r"|define_named_range|delete_named_range|update_tab_color|clear_tab_color"
+    r"|update_index|update_title"
+    # листы и таблица целиком
+    r"|add_worksheet|del_worksheet|del_worksheet_by_id|duplicate_sheet|reorder_worksheets"
+    r"|update_locale|update_timezone|update_drive_metadata|spreadsheets_sheets_copy_to"
+    # заметки
+    r"|update_notes?|insert_notes?|clear_notes?"
+    # доступ и файлы
+    r"|insert_permission|remove_permissions?|transfer_ownership|accept_ownership"
+    r"|del_spreadsheet|import_csv"
+    r")\b"
 )
 _PROTOCOL = {"values_batch_update", "values_batch_clear", "batch_update"}
 """Методы записи, которые объявляет протокол таблицы в ``sync/client.py``."""
@@ -1172,9 +1352,14 @@ def test_only_the_writer_writes_to_sheets() -> None:
     журнала, то, от чего правило 9 и уводит.
 
     Ловится и упоминание без вызова: ссылка на метод (``write =
-    book.values_update``) — та же запись. Список — однозначные методы записи
-    gspread 6.2. ``.update(`` и ``.clear(`` не ловятся: так же зовутся методы
-    словаря и множества, и храповик краснел бы на каждом ``dict.update``.
+    book.values_update``) — та же запись. Список — все методы gspread 6.2,
+    которые меняют таблицу, лист или доступ к ним и чьё имя однозначно
+    (сверено по ``Spreadsheet``, ``Worksheet``, ``Client`` и ``HTTPClient``).
+    Не ловятся методы с общими именами: ``update``, ``clear``, ``format``,
+    ``sort``, ``resize``, ``freeze``, ``hide``, ``show``, ``copy``,
+    ``create``, ``share``, ``duplicate`` — так же зовутся методы словаря,
+    множества, списка и строки, и храповик краснел бы на каждом
+    ``dict.update``.
     """
     found: dict[str, set[str]] = {}
     for path in SRC.rglob("*.py"):

@@ -23,7 +23,7 @@ from kitchen.db.journal import (
     ROLLED_BACK,
     VERIFIED,
     OpenWrite,
-    UnconfirmedWrite,
+    SentWrite,
     WritersBusyError,
 )
 
@@ -100,18 +100,18 @@ class FakeJournal:
                     status=record.status,
                     before=dict(record.before),
                     values=dict(record.values),
+                    after=dict(record.after) if record.after is not None else None,
                 )
         return None
 
-    def find_unconfirmed(self, request_key: str) -> UnconfirmedWrite | None:
-        for record in reversed(self.records):
-            if (
-                record.request_key == request_key
-                and record.status == FAILED
-                and record.note == LAYOUT_UNCONFIRMED
-            ):
-                return UnconfirmedWrite(id=record.id, row=record.row)
-        return None
+    def unconfirmed_attempts(self, request_key: str) -> tuple[SentWrite, ...]:
+        return tuple(
+            SentWrite(id=record.id, row=record.row, values=dict(record.values))
+            for record in reversed(self.records)
+            if record.request_key == request_key
+            and record.status == FAILED
+            and record.note == LAYOUT_UNCONFIRMED
+        )
 
     def start(self, write: NewWrite) -> int:
         return self._add(write, PENDING).id
