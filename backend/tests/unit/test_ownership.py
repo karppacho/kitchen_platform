@@ -14,7 +14,7 @@ import pytest
 
 from kitchen.domain.cards import APPROVED, CardDraftData, card_row
 from kitchen.sync import ownership, specs
-from kitchen.sync.ownership import Column, ForbiddenWriteError, Kind, Owner
+from kitchen.sync.ownership import Column, ForbiddenWriteError, Kind, Owner, SheetSpec
 
 PEOPLE = "принадлежит людям"
 BOOK_CLOSED = re.escape("путь записи книги не открыт (ADR-0003)")
@@ -107,8 +107,13 @@ def test_only_the_cards_sheet_is_open() -> None:
     побочный эффект. Проверяются все листы, а не «все книги, кроме
     карточек»: новое описание листа в книге карточек (там есть и листы,
     которые ведут люди) тоже обязано прийти закрытым или покраснить тест.
+    Описания собираются из модуля целиком, а не из списков: лист, который
+    забыли вписать в ALL_SPECS, проверку не обойдёт.
     """
-    open_sheets = [spec for spec in (*specs.ALL_SPECS, specs.TASTING_RATINGS) if spec.writable()]
+    every_spec = [value for value in vars(specs).values() if isinstance(value, SheetSpec)]
+    assert specs.TASTING_RATINGS in every_spec, "описания собраны не все"
+
+    open_sheets = [spec for spec in every_spec if spec.writable()]
     assert open_sheets == [specs.INGREDIENT_CARDS]
 
 

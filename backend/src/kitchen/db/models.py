@@ -36,7 +36,9 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kitchen.db.base import Base
@@ -417,3 +419,69 @@ class UserRole(Base):
     profile: Mapped[Profile] = relationship(back_populates="roles")
 
     __table_args__ = (Index("ix_user_roles_role_code", "role_code"),)
+
+
+class SheetWrite(Base):
+    """Одна запись платформы в Google-таблицу — журнал `sheet_writes`.
+
+    Лист — рабочая площадка шефа и единственная копия его работы. Каждая
+    наша запись в него оставляет здесь след: куда писали, что было в строках
+    до записи, что отправили, кто и чем кончилось. По журналу разбирают
+    неясный исход — экрана для него пока нет, только база и лог.
+
+    Строка заводится ``pending`` отдельным коммитом ДО записи в лист: упади
+    процесс посреди записи — след останется, и повтор отправки с тем же
+    ``request_key`` сначала перечитает строку, а не запишет вторую.
+    """
+
+    __tablename__ = "sheet_writes"
+
+    STATUSES = ("pending", "verified", "rolled_back", "failed")
+    OPEN_STATUSES = ("pending", "verified")
+    """Открытые: запись идёт или состоялась. По ключу запроса такая — одна."""
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    book: Mapped[str] = mapped_column(String(32))
+    """Ключ книги, как в описании листа: «ingredient_cards»."""
+    sheet: Mapped[str] = mapped_column(Text)
+    row: Mapped[int] = mapped_column(Integer)
+    """Номер строки в листе, с единицы — как его видит шеф."""
+    action: Mapped[str] = mapped_column(String(16), default="append")
+    status: Mapped[str] = mapped_column(String(16))
+    request_key: Mapped[str] = mapped_column(Text)
+    """Ключ запроса снаружи (на черновик — один): повтор отправки узнаётся по нему."""
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("profiles.id", ondelete="SET NULL"), index=True
+    )
+    before: Mapped[dict[str, object]] = mapped_column(JSONB)
+    """Снимок до записи (FORMATTED): строки N−1 и N целиком, с Q и R. Если
+    раскладку не подтвердили — ещё и весь прочитанный лист."""
+    values: Mapped[dict[str, object]] = mapped_column(JSONB)
+    """Что ушло в лист: поле → значение, числа — числами JSON."""
+    after: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    """Строки N−1 и N, перечитанные после записи (и после очистки, если была)."""
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    """Хеш записанной строки — тот же, что посчитает импорт."""
+    error: Mapped[str | None] = mapped_column(Text)
+    """Почему запись не состоялась или её исход неизвестен — для разработчика."""
+    note: Mapped[str | None] = mapped_column(Text)
+    """Пометка о необычном удачном исходе: «найдена прежняя попытка»."""
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('pending', 'verified', 'rolled_back', 'failed')",
+            name="ck_sheet_writes_status",
+        ),
+        CheckConstraint("action in ('append')", name="ck_sheet_writes_action"),
+        # Одна открытая запись на ключ запроса: вторая строка от повтора
+        # отправки невозможна и при ошибке в коде. Неудачные ключ освобождают —
+        # повтор после отказа начинает новую попытку.
+        Index(
+            "ux_sheet_writes_open_request_key",
+            "request_key",
+            unique=True,
+            postgresql_where=text("status in ('pending', 'verified')"),
+        ),
+    )

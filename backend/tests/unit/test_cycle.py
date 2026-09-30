@@ -12,7 +12,7 @@ from sqlalchemy.exc import DataError, IntegrityError, OperationalError, SQLAlche
 
 from kitchen.config import Settings
 from kitchen.sync import specs
-from kitchen.sync.cycle import BOOKS, explain, explain_import, judge, reader_from
+from kitchen.sync.cycle import BOOKS, SyncCycle, explain, explain_import, judge, reader_from
 from kitchen.sync.importer import Importer
 from kitchen.sync.reader import (
     BOOK_OPEN_FAILED,
@@ -25,8 +25,10 @@ from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
 from tests.fake_sheets import IDS, header, kitchen_sheets, row, sheets_client
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
+
+    from kitchen.sync.ownership import SheetSpec
 
 ACCESS = "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
 NOT_FOUND = (
@@ -517,6 +519,63 @@ def test_import_failure_speaks_plainly(error: SQLAlchemyError, problem: str) -> 
     ячейку. Прочее (таймаут, обрыв) — без догадки про лист. Исходник — не
     здесь, а в журнале."""
     assert explain_import(error) == problem
+
+
+# ---------------------------------------------------------------------------
+# Перенос одной книги — после записи карточки
+# ---------------------------------------------------------------------------
+
+
+class _StopError(Exception):
+    """Цикл дочитал — дальше тесту не нужно: до базы дело не доходит."""
+
+
+class _SpyReader(SheetsReader):
+    """Читатель, который запоминает, какие листы у него попросили."""
+
+    def __init__(self) -> None:
+        super().__init__(sheets_client(), IDS)
+        self.wanted: list[list[SheetSpec]] = []
+
+    def read_many(self, specs: Sequence[SheetSpec]) -> dict[str, SheetData | str]:
+        self.wanted.append(list(specs))
+        raise _StopError
+
+
+def _no_database() -> object:
+    raise AssertionError("до базы цикл дойти не должен")
+
+
+def test_one_book_reads_only_its_sheets() -> None:
+    """Сразу после записи карточки её книга переносится одна: кухню читать
+    незачем, это лишние запросы к квоте Google."""
+    reader = _SpyReader()
+
+    with pytest.raises(_StopError):
+        SyncCycle(reader, _no_database).run(force=True, books=("ingredient_cards",))
+
+    assert reader.wanted == [[specs.INGREDIENT_CARDS]]
+
+
+def test_every_book_by_default() -> None:
+    reader = _SpyReader()
+
+    with pytest.raises(_StopError):
+        SyncCycle(reader, _no_database).run()
+
+    assert reader.wanted == [list(Importer.SPECS)]
+
+
+@pytest.mark.parametrize("books", [("ingredient_card",), ()], ids=["typo", "empty"])
+def test_unknown_book_is_refused_before_reading(books: tuple[str, ...]) -> None:
+    """Опечатка в имени книги — отказ сразу, а не цикл, молча не перенёсший
+    ничего."""
+    reader = _SpyReader()
+
+    with pytest.raises(ValueError, match="книг"):
+        SyncCycle(reader, _no_database).run(books=books)
+
+    assert reader.wanted == []
 
 
 # ---------------------------------------------------------------------------

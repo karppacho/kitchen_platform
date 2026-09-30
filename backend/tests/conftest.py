@@ -65,11 +65,13 @@ _SHEET_IDS = itertools.count(1001)
 class FakeWorksheet:
     """Дублёр листа.
 
-    Воспроизводит то свойство настоящего gspread, из-за которого ломался
-    код: **хвостовые пустые ячейки не возвращаются**. Лист на двадцать
-    колонок отдаёт строку длиной в три, если остальное пусто. Код,
-    написанный в расчёте на прямоугольник, падает на этом с IndexError —
-    или, хуже, читает не ту колонку.
+    ``get_all_values`` отдаёт строки **без хвостовых пустых ячеек**: лист на
+    двадцать колонок отдаёт строку длиной в три, если остальное пусто. Это
+    строже gspread 6.2 — его ``get_all_values`` выравнивает строки до
+    прямоугольника (``fill_gaps``). Рваные строки в жизни приходят из
+    ``values_batch_get`` — им читает листы и импорт, и писатель строки. Код,
+    написанный в расчёте на прямоугольник, падает на них с IndexError — или,
+    хуже, читает не ту колонку, — и фальшивка ловит это на любом пути чтения.
 
     Сетка листа конечна, как у настоящего: ``row_count`` строк (по умолчанию
     не меньше 1000 — столько у нового листа Google) и ``col_count`` колонок
@@ -136,6 +138,13 @@ class FakeWorksheet:
                 if box is None or (box.top <= r <= box.bottom and box.left <= c <= box.right):
                     line[c] = ""
 
+    def _insert_rows(self, index: int, count: int) -> None:
+        """Вставить ``count`` пустых строк перед строкой с индексом ``index``
+        (с нуля): всё ниже съезжает, сетка растёт — как у Google."""
+        if index < len(self._cells):
+            self._cells[index:index] = [[] for _ in range(count)]
+        self._grid_rows += count
+
 
 class OpenedWorksheet:
     """Лист, как его отдаёт gspread при открытии.
@@ -178,6 +187,15 @@ _METHODS = (
 """Вызовы Sheets API, которым тест может заказать отказ. Открытие листа —
 тоже запрос, и у писателя он первый."""
 
+_MOMENTS = ("before_write", "after_write", "after_clear")
+"""Когда шеф успевает что-то сделать в листе.
+
+``before_write`` — между нашим чтением листа и записью: срабатывает, когда
+приходит следующий ``values_batch_update``, до того как он что-то сделал.
+``after_write`` — сразу после того, как запись легла, до её перечитывания
+(и до ответа: при отказе «после применения» — тоже). ``after_clear`` —
+сразу после того, как легла очистка."""
+
 
 class FakeSpreadsheet:
     """Дублёр таблицы.
@@ -203,6 +221,9 @@ class FakeSpreadsheet:
       («12.5», «5%», «01.02.2026», «1 030»), — AssertionError, а не текст;
     * ``updatedRange`` в ответе записи повторяет запрошенный диапазон, а не
       нормализует его, как Google;
+    * ``get_all_values`` отдаёт рваные строки — без хвостовых пустых ячеек,
+      как пакетное чтение, — а gspread 6.2 выравнивает их до прямоугольника
+      (``fill_gaps``); код обязан переживать обе формы;
     * ``get_all_values`` оставляет пустые строки в конце листа (пакетное
       чтение их, как и Google, отрезает);
     * диапазоны — только ``'Лист'``, ``'Лист'!A1`` и ``'Лист'!A1:B2``; всё
@@ -218,7 +239,8 @@ class FakeSpreadsheet:
         # нему видно и тело записи, и порядок «сначала сетка, потом запись».
         self.calls: list[tuple[str, object]] = []
         self._failures: dict[str, list[_Failure]] = {}
-        self._tampers: list[tuple[str, str]] = []
+        # Что шеф сделает в листе и когда (см. _MOMENTS): по порядку заказа.
+        self._chef: list[tuple[str, Callable[[], None]]] = []
 
     # --- что заказывает тест ------------------------------------------------
     def fail_next(self, method: str, *, applied: bool, error: Exception | None = None) -> None:
@@ -245,9 +267,44 @@ class FakeSpreadsheet:
         Так выглядит правка шефа между нашей записью и её перечитыванием:
         запись прошла без ошибки, а при сверке ячейка чужая.
         """
-        _, box, anchor = self._target(cell)
-        assert box is not None and anchor, f"подменить можно одну ячейку, а не «{cell}»"
-        self._tampers.append((cell, value))
+        self.chef_edits_cell(cell, value, moment="after_write")
+
+    def chef_edits_cell(self, cell: str, value: str, *, moment: str) -> None:
+        """Шеф вписал ``value`` в одну ячейку ``cell`` — в окне ``moment``.
+
+        Правка одноразовая и срабатывает на ближайшем подходящем вызове (см.
+        :data:`_MOMENTS`): до записи её значение наша запись может затереть,
+        после записи — сверка увидит чужую ячейку.
+        """
+        assert moment in _MOMENTS, f"шеф не действует в окне «{moment}»: есть {_MOMENTS}"
+        sheet, box, anchor = self._target(cell)
+        assert box is not None and anchor, f"вписать можно в одну ячейку, а не в «{cell}»"
+        top, left = box.top, box.left
+        self._chef.append((moment, lambda: sheet._put(top, left, value)))
+
+    def chef_inserts_rows(self, title: str, above: int, count: int = 1, *, moment: str) -> None:
+        """Шеф вставил ``count`` пустых строк над строкой ``above`` листа
+        ``title`` — в окне ``moment``.
+
+        Всё, что было в строке ``above`` и ниже, съезжает на ``count`` строк
+        вниз, сетка листа растёт — как от «Вставить строку выше» в Google.
+        Номера строк, которые писатель запомнил при чтении, после этого
+        указывают на чужое.
+        """
+        assert moment in _MOMENTS, f"шеф не действует в окне «{moment}»: есть {_MOMENTS}"
+        assert title in self._sheets, f"листа «{title}» нет"
+        assert above >= 1, f"строки считаются с единицы, а не «{above}»"
+        assert count >= 1, f"вставить можно хотя бы одну строку, а не «{count}»"
+        sheet = self._sheets[title]
+        assert above <= sheet._grid_rows, f"строки {above} нет в сетке листа «{title}»"
+        self._chef.append((moment, lambda: sheet._insert_rows(above - 1, count)))
+
+    def chef_waiting(self) -> list[str]:
+        """Окна заказанных, но ещё не сработавших правок шефа.
+
+        Правка, которая так и не сработала, значит, что тест проверял не то,
+        что думал: пустой список — все правки случились."""
+        return [moment for moment, _ in self._chef]
 
     # --- Sheets API ---------------------------------------------------------
     def worksheet(self, title: str) -> OpenedWorksheet:
@@ -308,6 +365,9 @@ class FakeSpreadsheet:
         ячеек, — отказ. ``null`` не трогает ячейку, очищает пустая строка.
         """
         wire = _over_the_wire(body or {})
+        # Шеф успел раньше, чем запрос дошёл до Google, — и при отказе тоже:
+        # его правка от нашего запроса не зависит.
+        self._apply_chef("before_write")
         failure = self._sent("values_batch_update", wire)
         option = wire.get("valueInputOption")
         if option is None:
@@ -353,7 +413,7 @@ class FakeSpreadsheet:
 
         for sheet, row_index, column_index, cell in planned:
             sheet._put(row_index, column_index, cell)
-        self._apply_tampers()
+        self._apply_chef("after_write")
         if failure is not None:
             raise failure.error
         return {"totalUpdatedCells": len(planned), "responses": responses}
@@ -376,6 +436,7 @@ class FakeSpreadsheet:
             targets.append((sheet, box))
         for sheet, box in targets:
             sheet._clear(box)
+        self._apply_chef("after_clear")
         if failure is not None:
             raise failure.error
         return {"clearedRanges": list(ranges)}
@@ -440,12 +501,12 @@ class FakeSpreadsheet:
         box, anchor = parsed
         return sheet, box, anchor
 
-    def _apply_tampers(self) -> None:
-        tampers, self._tampers = self._tampers, []
-        for cell, value in tampers:
-            sheet, box, _ = self._target(cell)
-            assert box is not None
-            sheet._put(box.top, box.left, value)
+    def _apply_chef(self, moment: str) -> None:
+        """Сделать то, что шеф заказал на это окно, — по порядку заказа."""
+        now = [action for when, action in self._chef if when == moment]
+        self._chef = [(when, action) for when, action in self._chef if when != moment]
+        for action in now:
+            action()
 
 
 class FakeSheetsClient:

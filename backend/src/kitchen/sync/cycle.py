@@ -345,11 +345,24 @@ class SyncCycle:
         self._lock_timeout = lock_timeout
         self._statement_timeout = statement_timeout
 
-    def run(self, *, force: bool = False) -> CycleResult:
-        """`force` — переносить и без изменений (ручной запуск)."""
+    def run(self, *, force: bool = False, books: Sequence[str] | None = None) -> CycleResult:
+        """`force` — переносить и без изменений (ручной запуск).
+
+        `books` — какие книги прочитать и перенести; по умолчанию все. Сразу
+        после записи карточки переносится одна книга карточек: карточка
+        попадает в базу обычным путём, а кухню незачем ни читать (квота
+        Google), ни трогать. Неизвестная книга — ValueError до чтения.
+        """
+        chosen = tuple(BOOKS) if books is None else tuple(books)
+        unknown = [book for book in chosen if book not in BOOKS]
+        if unknown or not chosen:
+            raise ValueError(
+                f"Неизвестные книги: {', '.join(unknown) or 'список пуст'}; есть {', '.join(BOOKS)}"
+            )
+        selected = [book for book in BOOKS if book in chosen]
         read_started_at = self._clock()
-        sheets = self._reader.read_many(Importer.SPECS)
-        verdicts = {book: judge(book, sheets) for book in BOOKS}
+        sheets = self._reader.read_many([spec for book in selected for spec in BOOKS[book]])
+        verdicts = {book: judge(book, sheets) for book in selected}
         result = CycleResult()
         importer = Importer(self._reader, self._sessions)
 

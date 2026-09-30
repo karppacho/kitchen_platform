@@ -359,6 +359,90 @@ def test_cell_changed_between_write_and_check() -> None:
     assert _read(book, "'Лист1'!A3:C3") == [["a", "шеф", "c"]]
 
 
+def test_chef_inserts_row_before_our_write() -> None:
+    """Шеф вставил строку над строкой 2 между нашим чтением и записью:
+    «Соусы» съехали в строку 3, и запись в строку 3 ложится поверх них —
+    то, что писатель обязан заметить по строке выше."""
+    book, _ = _book(rows=3)
+    book.chef_inserts_rows("Лист1", above=2, moment="before_write")
+
+    _write(book, ("'Лист1'!A3:B3", ["x", "y"]))
+
+    assert _read(book, "'Лист1'!A1:C3") == [HEAD, [], ["x", "y", "Север"]]
+    assert book.worksheet("Лист1").row_count == 4, "сетка растёт вместе со вставкой"
+    assert book.chef_waiting() == []
+
+
+def test_chef_inserts_rows_after_our_write() -> None:
+    """Две строки вставлены над нашей сразу после записи: наша уехала на две
+    вниз, а по её прежнему номеру — чужое."""
+    book, _ = _book()
+    book.chef_inserts_rows("Лист1", above=2, count=2, moment="after_write")
+
+    _write(book, ("'Лист1'!A3", ["наша"]))
+
+    assert _read(book, "'Лист1'!A2:A5") == [[], [], ["Соусы"], ["наша"]]
+
+
+def test_chef_cell_before_our_write_is_overwritten() -> None:
+    """Правка шефа до нашей записи в тех же ячейках затирается ею, в
+    остальных — остаётся."""
+    book, _ = _book()
+    book.chef_edits_cell("'Лист1'!B3", "шеф", moment="before_write")
+    book.chef_edits_cell("'Лист1'!D3", "заметка", moment="before_write")
+
+    _write(book, ("'Лист1'!A3:C3", ["a", "b", "c"]))
+
+    assert _read(book, "'Лист1'!A3:D3") == [["a", "b", "c", "заметка"]]
+
+
+def test_chef_acts_right_after_clear() -> None:
+    book, _ = _book()
+    book.chef_inserts_rows("Лист1", above=1, moment="after_clear")
+
+    book.values_batch_clear(body={"ranges": ["'Лист1'!C2"]})
+
+    assert _read(book, "'Лист1'!A2:C3") == [HEAD, ["Соусы", "Кетчуп"]]
+
+
+def test_chef_waits_for_his_moment() -> None:
+    """Правка на окно «после записи» ждёт записи, которая легла: чтение её
+    не будит, отказ до применения — тоже."""
+    book, _ = _book()
+    book.chef_edits_cell("'Лист1'!A3", "шеф", moment="after_write")
+    book.fail_next("values_batch_update", applied=False)
+
+    _read(book, "'Лист1'!A2:B2")
+    with pytest.raises(APIError):
+        _write(book, ("'Лист1'!B3", ["x"]))
+    assert book.chef_waiting() == ["after_write"]
+
+    _write(book, ("'Лист1'!B3", ["x"]))
+    assert _read(book, "'Лист1'!A3:B3") == [["шеф", "x"]]
+    assert book.chef_waiting() == []
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        lambda book: book.chef_edits_cell("'Лист1'!A3", "x", moment="потом"),
+        lambda book: book.chef_edits_cell("'Лист1'!A3:B3", "x", moment="after_write"),
+        lambda book: book.chef_inserts_rows("Лист2", above=2, moment="after_write"),
+        lambda book: book.chef_inserts_rows("Лист1", above=0, moment="after_write"),
+        lambda book: book.chef_inserts_rows("Лист1", above=2, count=0, moment="after_write"),
+        lambda book: book.chef_inserts_rows("Лист1", above=5, moment="after_write"),
+    ],
+    ids=["moment", "range", "sheet", "row-zero", "count-zero", "past-grid"],
+)
+def test_chef_orders_are_checked(order: Callable[[FakeSpreadsheet], None]) -> None:
+    """Непонятный заказ — отказ сразу, а не правка, которая никогда не
+    сработает."""
+    book, _ = _book(rows=4)
+    with pytest.raises(AssertionError):
+        order(book)
+    assert book.chef_waiting() == []
+
+
 def test_requests_are_logged_as_sent() -> None:
     """Журнал запросов — то, что ушло бы в Google после JSON. По нему тесты
     писателя проверяют RAW, диапазоны и порядок «сначала сетка, потом
@@ -402,3 +486,8 @@ def test_worksheet_exposes_id_and_row_count() -> None:
     assert isinstance(sheet, protocol.Worksheet)
     assert sheet.row_count == 7
     assert isinstance(sheet.id, int)
+
+    # Писатель работает с листом, который вернуло открытие, а не с исходным.
+    opened = FakeSpreadsheet({"Лист1": sheet}).worksheet("Лист1")
+    assert isinstance(opened, protocol.Worksheet)
+    assert (opened.id, opened.row_count, opened.title) == (sheet.id, 7, "Лист1")
