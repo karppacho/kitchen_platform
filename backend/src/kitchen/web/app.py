@@ -21,6 +21,7 @@ from kitchen.db.session import make_session_factory
 from kitchen.web.api import router
 from kitchen.web.auth_api import GOTRUE_TIMEOUT
 from kitchen.web.auth_api import router as auth_router
+from kitchen.web.csrf import CSRF_HEADER, CsrfMiddleware
 
 
 class Health(BaseModel):
@@ -66,6 +67,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # его на каждый вход значит платить рукопожатием TLS за каждый вход.
     app.state.http = httpx.Client(timeout=GOTRUE_TIMEOUT)
 
+    # Порядок важен: добавленный последним оборачивает остальных. Защита
+    # стоит внутри CORS, чтобы отказ с разрешённого адреса ушёл с
+    # заголовками CORS — иначе браузер показал бы «нет связи» вместо текста.
+    app.add_middleware(CsrfMiddleware, cors_origins=config.cors_origins)
     app.add_middleware(
         CORSMiddleware,
         # Явный список источников. Со звёздочкой браузер не пустит куки,
@@ -74,7 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=config.cors_origins,
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
-        allow_headers=["Authorization", "Content-Type"],
+        allow_headers=["Authorization", "Content-Type", CSRF_HEADER],
     )
 
     @app.get("/healthz", response_model=Health)

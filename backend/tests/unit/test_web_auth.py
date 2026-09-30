@@ -24,6 +24,11 @@ from kitchen.web.app import create_app
 SECRET = "секрет-подписи-для-тестов"
 PROFILE_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
+# Заголовок против подделки запросов. Фронтенд шлёт его на каждом
+# изменяющем запросе; без него запрос с кукой сессии получает 403
+# (см. tests/unit/test_csrf.py).
+CSRF = {"X-Kitchen-Csrf": "1"}
+
 _DEFAULT = object()
 
 
@@ -67,6 +72,7 @@ def make_client(
     profile: models.Profile | object | None = _DEFAULT,
     handler: Callable[[httpx.Request], httpx.Response] | None = None,
     anon_key: str = "anon-key-test",
+    cors_origins: tuple[str, ...] = ("http://localhost:5173",),
 ) -> TestClient:
     settings = Settings(  # type: ignore[call-arg]
         app_env="test",
@@ -74,6 +80,7 @@ def make_client(
         supabase_anon_key=anon_key,
         supabase_jwt_secret=SECRET,
         session_cookie_secure=True,
+        cors_origins=list(cors_origins),
     )
     app = create_app(settings)
     if handler is not None:
@@ -355,7 +362,7 @@ def test_refresh_replaces_both_cookies() -> None:
     client = make_client(handler=gotrue(200, rotated))
     client.cookies.set(auth.REFRESH_COOKIE, "refresh-token-1", path="/api/auth")
 
-    reply = client.post("/api/auth/refresh")
+    reply = client.post("/api/auth/refresh", headers=CSRF)
 
     assert reply.status_code == 200
     jar = cookies_of(reply)
@@ -369,7 +376,7 @@ def test_refresh_sends_the_cookie_to_gotrue() -> None:
     client = make_client(handler=handler)
     client.cookies.set(auth.REFRESH_COOKIE, "refresh-token-1", path="/api/auth")
 
-    client.post("/api/auth/refresh")
+    client.post("/api/auth/refresh", headers=CSRF)
 
     assert handler.seen.url.params["grant_type"] == "refresh_token"  # type: ignore[attr-defined]
     otpravleno = json.loads(handler.seen.content)  # type: ignore[attr-defined]
@@ -386,7 +393,7 @@ def test_refresh_rejected_by_gotrue_gives_401() -> None:
     client = make_client(handler=gotrue(400, {"error": "invalid_grant"}))
     client.cookies.set(auth.REFRESH_COOKIE, "refresh-expired", path="/api/auth")
 
-    assert client.post("/api/auth/refresh").status_code == 401
+    assert client.post("/api/auth/refresh", headers=CSRF).status_code == 401
 
 
 def test_refresh_gateway_401_is_misconfiguration_not_expired_session() -> None:
@@ -398,7 +405,7 @@ def test_refresh_gateway_401_is_misconfiguration_not_expired_session() -> None:
     client = make_client(handler=gotrue(401, {"message": "Invalid API key"}))
     client.cookies.set(auth.REFRESH_COOKIE, "refresh-token-1", path="/api/auth")
 
-    reply = client.post("/api/auth/refresh")
+    reply = client.post("/api/auth/refresh", headers=CSRF)
 
     assert reply.status_code == 502
 

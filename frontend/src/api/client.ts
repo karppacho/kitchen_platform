@@ -18,13 +18,26 @@ export class ApiError extends Error {
  *    при каждом перезапуске бэкенда, хотя refresh-токен у них ещё жив. */
 type IshodProdleniya = { itog: 'ok' } | { itog: 'otkaz' } | { itog: 'sboy'; status: number }
 
+/** Заголовок против подделки запросов. Сервер отклоняет изменяющий запрос
+ *  с кукой сессии без него: форма на чужом сайте поставить его не может, а
+ *  скрипт с чужой страницы — только с разрешения сервера, которого тот не
+ *  даёт. Шлём и на вход: в браузере может лежать просроченная кука. */
+const ZASHCHITA = 'X-Kitchen-Csrf'
+
+/** Методы, которые что-то меняют на сервере, — те же, что проверяет сервер. */
+const IZMENYAYUSHCHIE = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
+
 /** Идущее продление. Общее на все запросы: три запроса при открытии
  *  экрана не должны давать три продления, из которых два отвергнутся
  *  вращением refresh-токена. Все ждущие получают один и тот же исход. */
 let prodlenie: Promise<IshodProdleniya> | null = null
 
 function prodlit(): Promise<IshodProdleniya> {
-  prodlenie ??= fetch('/api/auth/refresh', { method: 'POST', credentials: 'include' })
+  prodlenie ??= fetch('/api/auth/refresh', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { [ZASHCHITA]: '1' },
+  })
     .then((otvet): IshodProdleniya => {
       if (otvet.ok) return { itog: 'ok' }
       if (otvet.status === 401) return { itog: 'otkaz' }
@@ -68,8 +81,11 @@ async function poyasnenie(otvet: Response): Promise<string> {
  * сервер дважды за один клик.
  */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  // Свои заголовки вызывающего сохраняем: вход, например, шлёт Content-Type.
+  const zagolovki = new Headers(init.headers)
+  if (IZMENYAYUSHCHIE.has((init.method ?? 'GET').toUpperCase())) zagolovki.set(ZASHCHITA, '1')
   const zapros = (): Promise<Response> =>
-    fetch(`/api${path}`, { ...init, credentials: 'include' })
+    fetch(`/api${path}`, { ...init, headers: zagolovki, credentials: 'include' })
 
   let otvet: Response
   try {
