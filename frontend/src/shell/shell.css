@@ -147,3 +147,28 @@
     flex: none;
   }
 }
+
+/* Экран раздела упал — сообщение на месте экрана, оболочка живёт. */
+.granitsa {
+  padding: calc(var(--shag) * 6) 0;
+}
+
+.granitsa h1 {
+  margin: 0 0 calc(var(--shag) * 2);
+  font-size: 18px;
+}
+
+.granitsa p {
+  margin: 0 0 calc(var(--shag) * 3);
+  color: var(--priglushyonnyy);
+}
+
+.granitsa button {
+  min-height: 44px;
+  padding: var(--shag) calc(var(--shag) * 4);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font: inherit;
+  cursor: pointer;
+}
