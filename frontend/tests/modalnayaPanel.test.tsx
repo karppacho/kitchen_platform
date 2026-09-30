@@ -81,11 +81,11 @@ test('остальная страница под панелью — inert, пр�
   expect(document.body.style.overflow).toBe('')
 })
 
-test('нажатие на затемнение закрывает панель', async () => {
+test('щелчок по затемнению закрывает панель', async () => {
   const { baseElement } = render(<Stend />)
   await userEvent.click(screen.getByRole('button', { name: 'Открыть' }))
   const fon = baseElement.querySelector('.modalnaya-fon')!
-  await userEvent.pointer({ keys: '[MouseLeft>]', target: fon })
+  await userEvent.click(fon)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
 

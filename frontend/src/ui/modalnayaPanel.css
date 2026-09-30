@@ -104,8 +104,12 @@
   to { transform: translateY(0); }
 }
 
+/* Селекторы те же, что ставят анимацию: медиа-запрос специфичности не
+   добавляет, и одиночный `.modalnaya-panel` (0,1,0) проиграл бы правилам
+   `.modalnaya--sleva .modalnaya-panel` (0,2,0) — анимация осталась бы. */
 @media (prefers-reduced-motion: reduce) {
-  .modalnaya-panel {
+  .modalnaya--sleva .modalnaya-panel,
+  .modalnaya--snizu .modalnaya-panel {
     animation: none;
   }
 }

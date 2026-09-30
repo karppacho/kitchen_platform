@@ -43,9 +43,12 @@ const TABUEMYE = [
  * `position: fixed` с возвратом прокрутки при закрытии), фокус — внутри,
  * Tab по кругу, Escape закрывает, при закрытии фокус — на открывшую кнопку.
  *
- * Гасить click после нажатия на затемнение, как делает `Vsplyvashka`, не
- * нужно: затемнение накрывает всю страницу, и нажатие приходится на него,
- * а не на строку таблицы под ним.
+ * Затемнение закрывает панель по click, а не по нажатию (pointerdown), как
+ * `Vsplyvashka`: на телефоне браузер синтезирует click после touchend по
+ * элементу под пальцем, и если панель убрать уже на нажатии, click придёт
+ * в строку списка или ссылку под затемнением — «призрачный» щелчок. По
+ * click цель — само затемнение, гасить ничего не нужно (у `Vsplyvashka`
+ * слушатель стоит на document, оттого ей и приходится гасить).
  */
 export function ModalnayaPanel({ id, storona, nazvanie, zagolovok, onZakryt, otkryvatel, children, niz }: Props) {
   const koren = useRef<HTMLDivElement>(null)
@@ -115,8 +118,9 @@ export function ModalnayaPanel({ id, storona, nazvanie, zagolovok, onZakryt, otk
 
   return createPortal(
     <div ref={koren} className={`modalnaya modalnaya--${storona}`}>
-      {/* Нажатие, а не click: закрываем в момент касания, как Vsplyvashka. */}
-      <div className="modalnaya-fon" onPointerDown={onZakryt} />
+      {/* click, а не pointerdown: иначе синтезированный после touchend click
+          попал бы в то, что под затемнением (см. описание компонента). */}
+      <div className="modalnaya-fon" onClick={onZakryt} />
       <div
         ref={panel}
         id={id}
