@@ -1,5 +1,7 @@
+/* Оболочка. Ширина ветвится классом obolochka--telefon (ставит Layout по
+   useWide), а не медиазапросом: порог живёт в одном месте — ui/useWide.ts. */
 .obolochka {
-  min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .shapka {
@@ -11,8 +13,21 @@
   border-bottom: 1px solid var(--granitsa);
 }
 
+/* На телефоне шапка липнет к верху и отступает под вырез экрана. Слой ниже
+   модальной панели (z-index 10 в modalnayaPanel.css). */
+.obolochka--telefon .shapka {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-top: calc(var(--shag) * 2 + env(safe-area-inset-top));
+}
+
 .shapka-nazvanie {
   font-weight: 600;
+}
+
+.obolochka--telefon .shapka-nazvanie {
+  font-size: 16px;
 }
 
 .shapka-kto {
@@ -23,12 +38,13 @@
   line-height: 1.2;
   min-width: 0;
   /* Несколько ролей через запятую («бренд-шеф, разработчик») переносятся
-     по словам, а не толкают шапку за край узкого экрана. */
+     по словам, а не толкают шапку за край. */
   overflow-wrap: anywhere;
   text-align: right;
 }
 
-.shapka-rol {
+.shapka-rol,
+.shtorka-rol {
   color: var(--priglushyonnyy);
   font-size: 12px;
 }
@@ -38,34 +54,40 @@
   border: 1px solid var(--granitsa);
   border-radius: var(--radius);
   background: none;
+  color: inherit;
   padding: var(--shag) calc(var(--shag) * 2);
   font: inherit;
   cursor: pointer;
   flex: none;
 }
 
+/* Кнопка меню — цель 44 px, но строка шапки не растёт: отрицательное поле
+   возвращает место. */
 .shapka-menyu {
-  display: flex;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  margin: calc(var(--shag) * -1) 0;
+  padding: 0;
 }
 
-/* На узком экране блок разбит на строки: сначала шапка, затем (если
-   открыто) меню на всю ширину, затем содержимое. Строчный flex с
-   раскрытым меню шириной 100% толкал бы контент за край экрана — колонка
-   этого не допускает в принципе, а не только при подходящих размерах. */
 .obolochka-telo {
   display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+.obolochka--telefon .obolochka-telo {
   flex-direction: column;
   align-items: stretch;
 }
 
 .bok {
-  display: none;
+  width: 220px;
+  flex: none;
   padding: calc(var(--shag) * 2);
-}
-
-.bok--otkryt {
-  display: block;
 }
 
 .menyu {
@@ -103,10 +125,21 @@
   letter-spacing: 0.02em;
 }
 
+/* В шторке пункты выше — под палец. */
+.modalnaya .menyu-punkt {
+  align-items: center;
+  min-height: 44px;
+}
+
 .soderzhimoe {
   flex: 1;
   min-width: 0;
   padding: calc(var(--shag) * 3);
+}
+
+/* Место под вкладки внизу: иначе последняя строка списка уходит под них. */
+.obolochka--telefon .soderzhimoe {
+  padding-bottom: calc(56px + var(--shag) * 3 + env(safe-area-inset-bottom));
 }
 
 .zaglushka-faza {
@@ -131,21 +164,75 @@
   margin: 0;
 }
 
-/* Кнопка меню нужна только там, где меню спрятано: на широком экране бок
-   показан всегда и постоянно стоит рядом с содержимым в одной строке. */
-@media (min-width: 1080px) {
-  .shapka-menyu {
-    display: none;
-  }
-  .obolochka-telo {
-    flex-direction: row;
-    align-items: flex-start;
-  }
-  .bok {
-    display: block;
-    width: 220px;
-    flex: none;
-  }
+/* Низ шторки: кто вошёл и «Выйти». */
+.shtorka-niz {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--shag) * 2);
+  width: 100%;
+}
+
+.shtorka-kto {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.shtorka-vyhod {
+  flex: none;
+  min-height: 44px;
+  padding: var(--shag) calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Вкладки внизу телефона. Закреплены; высота 56 px плюс отступ под «бровь». */
+.vkladki {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  padding-bottom: env(safe-area-inset-bottom);
+  background: var(--poverhnost);
+  border-top: 1px solid var(--granitsa);
+}
+
+/* Vkladki прячет вкладки атрибутом hidden, пока фокус в поле ввода. Но
+   `display: flex` выше перебивает браузерное `[hidden] { display: none }`
+   (у него специфичность ниже класса) — без этого правила атрибут остался бы
+   без действия, и вкладки висели бы над клавиатурой. */
+.vkladki[hidden] {
+  display: none;
+}
+
+.vkladka {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 56px;
+  padding: 0 var(--shag);
+  border-top: 3px solid transparent;
+  color: var(--priglushyonnyy);
+  font-size: 13px;
+  text-align: center;
+  text-decoration: none;
+}
+
+/* Текущая — цветом и полосой сверху, не одним цветом. */
+.vkladka--tekushchaya {
+  color: var(--aktsent);
+  border-top-color: var(--aktsent);
+  font-weight: 600;
 }
 
 /* Экран раздела упал — сообщение на месте экрана, оболочка живёт. */
