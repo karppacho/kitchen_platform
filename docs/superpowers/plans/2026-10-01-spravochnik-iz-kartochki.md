@@ -21,6 +21,7 @@
 - Строка находится по названию и по месту одновременно; при расхождении — отказ без записи. id = максимальный числовой id ING + 1 под очередью писателей.
 - Одна запись `values.batchUpdate` RAW; пустое — `null`; после — перечитать и сверить; откат — только своих ячеек и только при подтверждённой раскладке; журнал `sheet_writes` с действием `fill`; ключ запроса `ing-fill:<id карточки>`.
 - Деньги, КБЖУ, проценты — `Decimal`, никаких `float`/`Number()`/`parseFloat`. Потери вводятся в процентах, пишутся долей; оформление ячейки сверяется по свежему чтению.
+- В лист ING числа уходят JSON-числами, а не строками: при RAW строка «0.05» легла бы текстом, и формула P её не сложит. id (A), цены (L, M), вес (O) и потери (Q, R, S) — через `sheet_number` и сериализацию писателя карточек (`sync/writer.py`); короткое имя (E), единица (N) и статус (T) — текстом. Тест писателя проверяет типы в теле запроса.
 - Права: `chef`, `commerce`, `developer`. Изменяющие запросы — с `X-Kitchen-Csrf`.
 - Слои import-linter: `kitchen.web | kitchen.worker` → `kitchen.cards` → `kitchen.sync | kitchen.llm` → `kitchen.db` → `kitchen.domain`. mypy strict для `domain`, `sync`, `llm`, `cards`.
 - Не трогать `frontend/src/ui/DataTable.tsx`, `ui/PanelTablitsy.tsx`, `shell/Layout.tsx`, `shell.css`, `pages/DishDetail.tsx` — их переделывает чат мобильного вида.
