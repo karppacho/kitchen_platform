@@ -1,14 +1,14 @@
-import { useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type RefObject } from 'react'
+import { useRef, type MouseEvent } from 'react'
 
-import { kodSortirovki, poiskIliPusto, razobratKodSortirovki } from '../domain/adres'
-import { variantySortirovki, type GruppaFiltra, type OpisanieKolonki, type Sortirovka } from '../domain/tablitsa'
+import { poiskIliPusto } from '../domain/adres'
+import type { GruppaFiltra, OpisanieKolonki, Sortirovka } from '../domain/tablitsa'
 import { Fishki } from './Fishki'
-import { Galochki } from './Galochki'
+import { PanelOtbora } from './PanelOtbora'
 import './panelTablitsy.css'
 import { useWide } from './useWide'
 
 type Props<T> = {
-  /** Колонки таблицы — из них пункты выбора «Сортировка» на узком экране. */
+  /** Колонки таблицы — из них переключатели сортировки в панели на телефоне. */
   kolonki: readonly OpisanieKolonki<T>[]
   /** Текст в поле поиска как есть — `vvod` у `useTablitsaVAdrese`. */
   vvod: string
@@ -18,7 +18,7 @@ type Props<T> = {
   /** Сколько строк всего. */
   vsego: number
   sortirovka: Sortirovka | null
-  /** Выбор «Сортировка» — как `zadatSortirovku` у `useTablitsaVAdrese`. */
+  /** Выбор сортировки — как `zadatSortirovku` у `useTablitsaVAdrese`. */
   onSortirovka: (s: Sortirovka | null) => void
   gruppy: readonly GruppaFiltra[]
   /** Новый выбор колонки целиком — как `zadatVybor` у `useTablitsaVAdrese`. */
@@ -28,8 +28,9 @@ type Props<T> = {
 
 /**
  * Панель над таблицей: поиск, «Найдено: N из M», фишки включённых фильтров
- * и «Сбросить всё». На узком экране заголовков нет — там же выбор
- * «Сортировка» и «Фильтры» со всеми группами галочек.
+ * и «Сбросить всё». На телефоне заголовков с сортировкой и значками
+ * фильтров нет — там под полем кнопка «Сортировка и фильтры», открывающая
+ * панель снизу (`PanelOtbora`).
  */
 export function PanelTablitsy<T>({
   kolonki,
@@ -51,9 +52,9 @@ export function PanelTablitsy<T>({
 
   // Куда фокус, когда исчезла кнопка отбора (последняя фишка, «Сбросить
   // всё»), а соседок не осталось. На широком — поиск: с него начинают
-  // заново. На узком — «Фильтры»: фокус на поле ввода из обработчика
-  // касания открыл бы экранную клавиатуру на полэкрана (Chrome на Android
-  // фокусирует кнопку при касании, и сюда доходит).
+  // заново. На узком — «Сортировка и фильтры»: фокус на поле ввода из
+  // обработчика касания открыл бы экранную клавиатуру на полэкрана (Chrome
+  // на Android фокусирует кнопку при касании, и сюда доходит).
   function zapasnoyFokus() {
     if (wide) pole.current?.focus()
     else knopkaFiltrov.current?.focus()
@@ -65,6 +66,16 @@ export function PanelTablitsy<T>({
     if (event.currentTarget === document.activeElement) zapasnoyFokus()
     onSbrositVsyo()
   }
+
+  // Одной строкой и целиком: программа чтения с экрана зачитывает
+  // изменение живой области, и «5» без «из 130» ничего бы не сказало.
+  // Узел один, место разное: на широком — рядом с полем, на телефоне — под
+  // ним, в одном ряду с кнопкой отбора (поле там во всю строку).
+  const naidenoEl = (
+    <span className="panel-tablitsy-naideno" aria-live="polite" aria-atomic="true">
+      {`Найдено: ${naideno} из ${vsego}`}
+    </span>
+  )
 
   return (
     <div className="panel-tablitsy">
@@ -78,24 +89,25 @@ export function PanelTablitsy<T>({
           value={vvod}
           onChange={(event) => onVvod(event.target.value)}
         />
-        {/* Одной строкой и целиком: программа чтения с экрана зачитывает
-            изменение живой области, и «5» без «из 130» ничего бы не сказало. */}
-        <span className="panel-tablitsy-naideno" aria-live="polite" aria-atomic="true">
-          {`Найдено: ${naideno} из ${vsego}`}
-        </span>
+        {wide && naidenoEl}
       </div>
       {!wide && (
-        <UzkoeUpravlenie
-          knopka={knopkaFiltrov}
-          kolonki={kolonki}
-          sortirovka={sortirovka}
-          onSortirovka={onSortirovka}
-          gruppy={gruppy}
-          onVybor={onVybor}
-        />
+        <div className="panel-tablitsy-ryad panel-tablitsy-ryad--otbor">
+          {naidenoEl}
+          <PanelOtbora
+            knopka={knopkaFiltrov}
+            kolonki={kolonki}
+            naideno={naideno}
+            sortirovka={sortirovka}
+            onSortirovka={onSortirovka}
+            gruppy={gruppy}
+            onVybor={onVybor}
+            onSbrositVsyo={onSbrositVsyo}
+          />
+        </div>
       )}
-      {/* Фишки — под «Фильтрами», а не над ними: ряд, появившийся с первой
-          галочкой, сдвинул бы открытую панель из-под пальца. */}
+      {/* Фишки — последним рядом: он один появляется и исчезает вместе с
+          отбором, и ниже него ничего нет — поле и кнопка отбора не прыгают. */}
       {estOtbor && (
         <div className="panel-tablitsy-ryad">
           <Fishki
@@ -109,80 +121,5 @@ export function PanelTablitsy<T>({
         </div>
       )}
     </div>
-  )
-}
-
-type SvoystvaUzkogo<T> = Pick<Props<T>, 'kolonki' | 'sortirovka' | 'onSortirovka' | 'gruppy' | 'onVybor'> & {
-  /** Кнопка «Фильтры» — у панели: на неё же уходит фокус с исчезнувших
-      фишек и «Сбросить всё». */
-  knopka: RefObject<HTMLButtonElement>
-}
-
-/**
- * Сортировка и фильтры на узком экране. «Фильтры» раскрывают панель в
- * потоке страницы, а не поверх: на телефоне всплывающей панели негде
- * встать, а группы галочек — те же, что под значками шапки.
- */
-function UzkoeUpravlenie<T>({ knopka, kolonki, sortirovka, onSortirovka, gruppy, onVybor }: SvoystvaUzkogo<T>) {
-  const [otkryty, otkryt] = useState(false)
-  const idPaneli = useId()
-  const punkty = useMemo(() => variantySortirovki(kolonki), [kolonki])
-  const vklyucheno = gruppy.filter((g) => g.aktivna).length
-
-  function zakryt() {
-    otkryt(false)
-    // Фокус был в панели — она исчезнет, и он упал бы на body.
-    knopka.current?.focus()
-  }
-
-  function klavisha(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== 'Escape') return
-    event.preventDefault()
-    zakryt()
-  }
-
-  return (
-    <>
-      <div className="panel-tablitsy-ryad">
-        <select
-          className="panel-tablitsy-pole panel-tablitsy-sortirovka"
-          aria-label="Сортировка"
-          value={sortirovka ? kodSortirovki(sortirovka) : ''}
-          onChange={(event) => onSortirovka(razobratKodSortirovki(event.target.value))}
-        >
-          <option value="">Без сортировки</option>
-          {punkty.map((p) => (
-            <option key={p.kod} value={p.kod}>
-              {p.podpis}
-            </option>
-          ))}
-        </select>
-        <button
-          ref={knopka}
-          type="button"
-          className="panel-tablitsy-filtry"
-          aria-expanded={otkryty}
-          aria-controls={otkryty ? idPaneli : undefined}
-          onClick={() => otkryt(!otkryty)}
-        >
-          {vklyucheno > 0 ? `Фильтры (${vklyucheno})` : 'Фильтры'}
-        </button>
-      </div>
-      {/* Закрытая — убрана из документа, а не спрятана: в галочках те же
-          слова, что в ячейках («Соус»), и поиск текста по странице — у
-          тестов экранов тоже — находил бы их дважды. */}
-      {otkryty && (
-        <div id={idPaneli} role="group" aria-label="Фильтры" className="panel-tablitsy-panel" onKeyDown={klavisha}>
-          {gruppy.map((g) => (
-            <Galochki key={g.kolonka} gruppa={g} onVybor={onVybor} />
-          ))}
-          <div className="panel-tablitsy-niz">
-            <button type="button" className="panel-tablitsy-gotovo" onClick={zakryt}>
-              Готово
-            </button>
-          </div>
-        </div>
-      )}
-    </>
   )
 }

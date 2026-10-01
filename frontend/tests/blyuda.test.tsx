@@ -294,13 +294,14 @@ test('на 360 px «Маржа %: сначала худшая» — тот же 
   setViewport(360)
   const u = userEvent.setup()
   narisovat()
-  const sortirovka = await screen.findByRole('combobox', { name: 'Сортировка' })
+  await u.click(await screen.findByRole('button', { name: 'Сортировка и фильтры' }))
+  const otbor = screen.getByRole('dialog', { name: 'Сортировка и фильтры' })
 
-  await u.selectOptions(sortirovka, 'Маржа %: сначала худшая')
+  await u.click(within(otbor).getByRole('radio', { name: 'Маржа %: сначала худшая' }))
   expect(nazvaniya()).toEqual(['Салат овощной', 'Круасан с мортаделой', 'Кетчуп'])
   expect(parametry()).toEqual([['sort', 'margin']])
 
-  await u.selectOptions(sortirovka, 'Маржа %: сначала лучшая')
+  await u.click(within(otbor).getByRole('radio', { name: 'Маржа %: сначала лучшая' }))
   expect(nazvaniya()).toEqual(['Круасан с мортаделой', 'Салат овощной', 'Кетчуп'])
   expect(parametry()).toEqual([['sort', '-margin']])
 })
@@ -309,10 +310,13 @@ test('на 360 px сортировка по id — «по возрастанию
   // id блюд — номера из таблицы («B001»), и «id: от А до Я» читалось бы
   // странно. Так же, как у справочника.
   setViewport(360)
+  const u = userEvent.setup()
   narisovat()
-  const punkty = within(await screen.findByRole('combobox', { name: 'Сортировка' }))
-    .getAllByRole('option')
-    .map((p) => p.textContent)
+  await u.click(await screen.findByRole('button', { name: 'Сортировка и фильтры' }))
+  const otbor = screen.getByRole('dialog', { name: 'Сортировка и фильтры' })
+  const punkty = within(within(otbor).getByRole('group', { name: 'Сортировка' }))
+    .getAllByRole('radio')
+    .map((p) => p.parentElement?.textContent)
   expect(punkty.filter((p) => p?.startsWith('id:'))).toEqual(['id: по возрастанию', 'id: по убыванию'])
 })
 

@@ -251,11 +251,13 @@ test('на 360 px строка справочника: подпись «id · к
 test('на 360 px сортировка по id — «по возрастанию / по убыванию», а не по алфавиту', async () => {
   // id — номера из таблицы, и «id: от А до Я» читалось бы странно.
   setViewport(360)
+  const u = userEvent.setup()
   narisovat()
-  await poisk()
-  const punkty = within(screen.getByRole('combobox', { name: 'Сортировка' }))
-    .getAllByRole('option')
-    .map((p) => p.textContent)
+  await u.click(await screen.findByRole('button', { name: 'Сортировка и фильтры' }))
+  const otbor = screen.getByRole('dialog', { name: 'Сортировка и фильтры' })
+  const punkty = within(within(otbor).getByRole('group', { name: 'Сортировка' }))
+    .getAllByRole('radio')
+    .map((p) => p.parentElement?.textContent)
   expect(punkty).toContain('id: по возрастанию')
   expect(punkty).toContain('id: по убыванию')
   expect(punkty.filter((p) => p?.startsWith('id:'))).toHaveLength(2)

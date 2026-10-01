@@ -9,9 +9,10 @@ import { PanelTablitsy } from '../src/ui/PanelTablitsy'
 import { setViewport } from './setup'
 
 // Панель над таблицей: поиск, «Найдено», фишки включённых фильтров и
-// «Сбросить всё»; на узком экране ещё выбор «Сортировка» и «Фильтры» —
-// заголовков с кнопками там нет. Состояние — в стенде, группы — из
-// настоящего primenit.
+// «Сбросить всё»; на узком экране ещё кнопка «Сортировка и фильтры» с
+// панелью снизу — заголовков с кнопками там нет. Состояние — в стенде,
+// группы — из настоящего primenit. Сама панель снизу — в panelOtbora.test;
+// здесь — её место в ряду и связь с фишками и «Найдено».
 
 type Stroka = { id: string; nazvanie: string; kategoriya: string; tsena: string | null }
 
@@ -97,19 +98,17 @@ beforeEach(() => {
 })
 
 const poisk = () => screen.getByRole('searchbox', { name: 'Поиск по названию или id' })
-const vyborSortirovki = () => screen.getByRole('combobox', { name: 'Сортировка' })
-const knopkaFiltrov = () => screen.getByRole('button', { name: /^Фильтры/ })
-const panelFiltrov = () => screen.getByRole('group', { name: 'Фильтры' })
+const knopkaOtbora = () => screen.getByRole('button', { name: /^Сортировка и фильтры/ })
+const panelOtbora = () => screen.getByRole('dialog', { name: 'Сортировка и фильтры' })
+const pereklyuchatel = (tekst: string) => within(panelOtbora()).getByRole('radio', { name: tekst })
+const galochka = (tekst: string) => within(panelOtbora()).getByRole('checkbox', { name: tekst })
 const fishka = (tekst: string) => screen.getByRole('button', { name: `Снять фильтр «${tekst}»` })
 const sbrositVsyo = () => screen.queryByRole('button', { name: 'Сбросить всё' })
 const spisokFishek = () => screen.queryByRole('list', { name: 'Активные фильтры' })
-// Групп и галочек вне «Фильтров» у панели нет: пусто — значит, панели нет
-// в документе. hidden: true — ищем и среди спрятанного (атрибут hidden,
-// display: none). Без имени: у спрятанного узла имя для доступности пустое,
-// и поиск по имени «Фильтры» его не нашёл бы.
-const panelVDokumente = () =>
-  screen.queryAllByRole('group', { hidden: true }).length > 0 ||
-  screen.queryAllByRole('checkbox', { hidden: true }).length > 0
+// Галочек вне панели снизу у панели над таблицей нет: пусто — значит,
+// панели нет в документе. hidden: true — ищем и среди спрятанного (атрибут
+// hidden, display: none, свёрнутый details).
+const galochkiVDokumente = () => screen.queryAllByRole('checkbox', { hidden: true }).length > 0
 
 test('«Найдено: N из M» — в aria-live и следует за поиском', async () => {
   render(<Stend />)
@@ -130,21 +129,41 @@ test('поиск из одних пробелов — как пустой: сп�
   expect(spisokFishek()).not.toBeInTheDocument()
 })
 
-test('на 1440 px нет выбора сортировки и «Фильтров» — они в шапке таблицы', () => {
+test('на 1440 px нет кнопки «Сортировка и фильтры» — сортировка и фильтры в шапке таблицы', () => {
   render(<Stend vyborNachalo={{ category: ['Соус'] }} />)
-  expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /^Фильтры/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /^Сортировка и фильтры/ })).not.toBeInTheDocument()
   // Фишки — на обеих ширинах.
   expect(fishka('Категория: Соус')).toBeInTheDocument()
 })
 
-test('на 360 px — выбор «Сортировка»: «Без сортировки» и по два пункта на колонку', () => {
+test('на 360 px: поле во всю строку, «Найдено», кнопка «Сортировка и фильтры» открывает панель', async () => {
   setViewport(360)
   render(<Stend />)
-  const punkty = within(vyborSortirovki())
-    .getAllByRole('option')
-    .map((p) => p.textContent)
-  expect(punkty).toEqual([
+  expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /^Фильтры/ })).not.toBeInTheDocument()
+  expect(screen.getByText('Найдено: 3 из 3')).toHaveAttribute('aria-live', 'polite')
+  await userEvent.click(screen.getByRole('button', { name: 'Сортировка и фильтры' }))
+  expect(screen.getByRole('dialog', { name: 'Сортировка и фильтры' })).toBeInTheDocument()
+})
+
+test('на 360 px число включённых групп — на кнопке; фишки под ней снимают фильтр', async () => {
+  setViewport(360)
+  render(<Stend vyborNachalo={{ category: ['Соус'], price: ['est'] }} />)
+  expect(screen.getByRole('button', { name: 'Сортировка и фильтры (2)' })).toBeInTheDocument()
+  await userEvent.click(fishka('Категория: Соус'))
+  expect(screen.getByRole('button', { name: 'Сортировка и фильтры (1)' })).toBeInTheDocument()
+})
+
+test('сортировка на 360 px — переключатели по два на колонку: текущая отмечена, смена, «Без сортировки»', async () => {
+  setViewport(360)
+  const onSortirovka = vi.fn()
+  render(<Stend sortirovkaNachalo={{ kolonka: 'category', napravlenie: 'ubyv' }} onSortirovka={onSortirovka} />)
+  await userEvent.click(knopkaOtbora())
+  // Колонка с сортировкой и фильтром («Категория») даёт и пару
+  // переключателей, и группу галочек; колонка без того и другого («id») —
+  // ничего.
+  const sortirovka = within(panelOtbora()).getByRole('group', { name: 'Сортировка' })
+  expect(within(sortirovka).getAllByRole('radio').map((r) => r.parentElement?.textContent)).toEqual([
     'Без сортировки',
     'Название: от А до Я',
     'Название: от Я до А',
@@ -153,88 +172,49 @@ test('на 360 px — выбор «Сортировка»: «Без сортир
     'Цена: по возрастанию',
     'Цена: по убыванию',
   ])
-  expect(vyborSortirovki()).toHaveDisplayValue('Без сортировки')
-})
-
-test('выбор сортировки на 360 px — текущая сортировка, смена, «Без сортировки»', async () => {
-  setViewport(360)
-  const onSortirovka = vi.fn()
-  render(<Stend sortirovkaNachalo={{ kolonka: 'category', napravlenie: 'ubyv' }} onSortirovka={onSortirovka} />)
-  expect(vyborSortirovki()).toHaveDisplayValue('Категория: от Я до А')
-  await userEvent.selectOptions(vyborSortirovki(), 'Цена: по возрастанию')
-  expect(vyborSortirovki()).toHaveDisplayValue('Цена: по возрастанию')
+  expect(pereklyuchatel('Категория: от Я до А')).toBeChecked()
+  await userEvent.click(pereklyuchatel('Цена: по возрастанию'))
+  expect(pereklyuchatel('Цена: по возрастанию')).toBeChecked()
   // Сортировка — вид, а не отбор: сбрасывать «всё» из-за неё нечего.
   expect(sbrositVsyo()).not.toBeInTheDocument()
-  await userEvent.selectOptions(vyborSortirovki(), 'Без сортировки')
+  await userEvent.click(pereklyuchatel('Без сортировки'))
   expect(onSortirovka.mock.calls).toEqual([[{ kolonka: 'price', napravlenie: 'vozr' }], [null]])
 })
 
-test('«Фильтры (2)» — число включённых колонок, aria-expanded, внутри все группы', async () => {
-  setViewport(360)
-  render(<Stend vyborNachalo={{ category: ['Пицца', 'Соус'], price: ['net'] }} />)
-  const knopka = screen.getByRole('button', { name: 'Фильтры (2)' })
-  expect(knopka).toHaveAttribute('aria-expanded', 'false')
-  await userEvent.click(knopka)
-  expect(knopka).toHaveAttribute('aria-expanded', 'true')
-  expect(knopka).toHaveAttribute('aria-controls', panelFiltrov().id)
-  const gruppy = within(panelFiltrov()).getAllByRole('group')
-  expect(gruppy).toEqual([
-    within(panelFiltrov()).getByRole('group', { name: 'Категория' }),
-    within(panelFiltrov()).getByRole('group', { name: 'Цена' }),
-  ])
-})
-
-test('без фильтров кнопка — просто «Фильтры», группы в ней все', async () => {
-  setViewport(360)
-  render(<Stend />)
-  await userEvent.click(screen.getByRole('button', { name: 'Фильтры' }))
-  expect(within(panelFiltrov()).getByRole('group', { name: 'Категория' })).toBeInTheDocument()
-  expect(within(panelFiltrov()).getByRole('group', { name: 'Цена' })).toBeInTheDocument()
-})
-
-test('галочка в «Фильтрах» отбирает, панель остаётся открытой', async () => {
+test('галочка в панели отбирает сразу: панель открыта, «Найдено» и число на кнопке живые', async () => {
   setViewport(360)
   const onVybor = vi.fn()
   render(<Stend onVybor={onVybor} />)
-  await userEvent.click(knopkaFiltrov())
-  await userEvent.click(within(panelFiltrov()).getByRole('checkbox', { name: 'Соус · 2' }))
+  await userEvent.click(knopkaOtbora())
+  await userEvent.click(galochka('Соус · 2'))
   expect(onVybor).toHaveBeenCalledWith('category', ['Соус'])
-  expect(within(panelFiltrov()).getByRole('checkbox', { name: 'Соус · 2' })).toBeChecked()
-  expect(screen.getByRole('button', { name: 'Фильтры (1)' })).toHaveAttribute('aria-expanded', 'true')
+  expect(galochka('Соус · 2')).toBeChecked()
+  expect(screen.getByRole('button', { name: 'Сортировка и фильтры (1)' })).toHaveAttribute('aria-expanded', 'true')
   expect(screen.getByText('Найдено: 2 из 3')).toBeInTheDocument()
 })
 
-test('«Готово» закрывает «Фильтры» и возвращает фокус на кнопку', async () => {
+test('Escape закрывает панель и возвращает фокус на кнопку', async () => {
   setViewport(360)
   render(<Stend />)
-  await userEvent.click(knopkaFiltrov())
-  await userEvent.click(within(panelFiltrov()).getByRole('checkbox', { name: 'Соус · 2' }))
-  await userEvent.click(within(panelFiltrov()).getByRole('button', { name: 'Готово' }))
-  expect(panelVDokumente()).toBe(false)
-  expect(knopkaFiltrov()).toHaveFocus()
-  expect(knopkaFiltrov()).toHaveAttribute('aria-expanded', 'false')
-})
-
-test('Escape закрывает «Фильтры» и возвращает фокус на кнопку', async () => {
-  setViewport(360)
-  render(<Stend />)
-  await userEvent.click(knopkaFiltrov())
-  await userEvent.click(within(panelFiltrov()).getByRole('checkbox', { name: 'есть · 2' }))
-  expect(within(panelFiltrov()).getByRole('checkbox', { name: 'есть · 2' })).toHaveFocus()
+  await userEvent.click(knopkaOtbora())
+  await userEvent.click(galochka('есть · 2'))
+  expect(galochka('есть · 2')).toHaveFocus()
   await userEvent.keyboard('{Escape}')
-  expect(panelVDokumente()).toBe(false)
-  expect(knopkaFiltrov()).toHaveFocus()
-  expect(knopkaFiltrov()).toHaveAttribute('aria-expanded', 'false')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(knopkaOtbora()).toHaveFocus()
+  expect(knopkaOtbora()).toHaveAttribute('aria-expanded', 'false')
 })
 
-test('закрытых «Фильтров» в документе нет — не спрятаны, а убраны', async () => {
+test('закрытой панели в документе нет — не спрятана, а убрана', async () => {
+  // В галочках те же слова, что в ячейках («Соус»), и поиск текста по
+  // странице — у тестов экранов тоже — находил бы их дважды.
   setViewport(360)
   render(<Stend vyborNachalo={{ category: ['Соус'] }} />)
-  expect(panelVDokumente()).toBe(false)
-  await userEvent.click(knopkaFiltrov())
-  expect(panelVDokumente()).toBe(true)
-  await userEvent.click(knopkaFiltrov())
-  expect(panelVDokumente()).toBe(false)
+  expect(galochkiVDokumente()).toBe(false)
+  await userEvent.click(knopkaOtbora())
+  expect(galochkiVDokumente()).toBe(true)
+  await userEvent.click(within(panelOtbora()).getByRole('button', { name: 'Показать 2' }))
+  expect(galochkiVDokumente()).toBe(false)
 })
 
 test('фишка — на каждую включённую колонку, с отмеченными значениями', () => {
@@ -275,22 +255,23 @@ test.each([1440, 360])('на %i px снятая последняя фишка �
 
 // На телефоне фокус на поле ввода из обработчика касания открывает экранную
 // клавиатуру на полэкрана (Chrome на Android фокусирует кнопку при
-// касании). Поэтому на узком запасная цель — «Фильтры», а не поиск.
-test('на 360 px снятая единственная фишка — фокус на «Фильтры», а не на поиск', async () => {
+// касании). Поэтому на узком запасная цель — «Сортировка и фильтры», а не
+// поиск.
+test('на 360 px снятая единственная фишка — фокус на «Сортировка и фильтры», а не на поиск', async () => {
   setViewport(360)
   render(<Stend vyborNachalo={{ price: ['est'] }} />)
   await userEvent.click(fishka('Цена: есть'))
   expect(spisokFishek()).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Фильтры' })).toHaveFocus()
+  expect(screen.getByRole('button', { name: /^Сортировка и фильтры/ })).toHaveFocus()
 })
 
-test('на 360 px «Сбросить всё» — фокус на «Фильтры», а не на поиск', async () => {
+test('на 360 px «Сбросить всё» — фокус на «Сортировка и фильтры», а не на поиск', async () => {
   setViewport(360)
   render(<Stend vvodNachalo="кетч" vyborNachalo={{ price: ['est'] }} />)
   await userEvent.click(sbrositVsyo()!)
   expect(sbrositVsyo()).not.toBeInTheDocument()
   expect(poisk()).toHaveValue('')
-  expect(screen.getByRole('button', { name: 'Фильтры' })).toHaveFocus()
+  expect(screen.getByRole('button', { name: /^Сортировка и фильтры/ })).toHaveFocus()
 })
 
 test.each([1440, 360])('на %i px фишка и «Сбросить всё» без фокуса на них фокус не трогают', (shirina) => {

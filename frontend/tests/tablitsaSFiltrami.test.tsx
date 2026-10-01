@@ -108,6 +108,8 @@ const nabrat = (tekst: string) => fireEvent.change(poisk(), { target: { value: t
 const zagolovok = (title: string) => screen.getByRole('columnheader', { name: title })
 const knopkaSortirovki = (title: string) => within(zagolovok(title)).getByRole('button', { name: title })
 const panel = (title: string) => screen.getByRole('dialog', { name: `Фильтр: ${title}` })
+// Панель снизу на 360 px — одна на сортировку и все группы галочек.
+const panelOtbora = () => screen.getByRole('dialog', { name: 'Сортировка и фильтры' })
 
 // Названия строк сверху вниз — и в таблице, и в списке на узком экране.
 const NAZVANIYA = new RegExp(`^(${BLYUDA.map((b) => b.nazvanie).join('|')})$`)
@@ -173,7 +175,7 @@ test('всё отфильтровано: шапка и панель на мес�
   expect(parametry()).toEqual([['category', 'Пицца']])
 })
 
-test('всё отфильтровано на 360 px: «Фильтры» на месте, снятая галочка возвращает строки', async () => {
+test('всё отфильтровано на 360 px: «Сортировка и фильтры» на месте, снятая галочка возвращает строки', async () => {
   setViewport(360)
   const u = polzovatel()
   narisovat('/?category=Пицца&price=net')
@@ -182,9 +184,8 @@ test('всё отфильтровано на 360 px: «Фильтры» на м�
   expect(screen.queryByText(PUSTO_EKRANA)).not.toBeInTheDocument()
   expect(screen.getByText('Найдено: 0 из 4')).toBeInTheDocument()
 
-  await u.click(screen.getByRole('button', { name: 'Фильтры (2)' }))
-  const filtry = screen.getByRole('group', { name: 'Фильтры' })
-  await u.click(within(filtry).getByRole('checkbox', { name: 'нет · 0' }))
+  await u.click(screen.getByRole('button', { name: 'Сортировка и фильтры (2)' }))
+  await u.click(within(panelOtbora()).getByRole('checkbox', { name: 'нет · 0' }))
   expect(poryadok()).toEqual(['Маргарита', 'Пепперони'])
   expect(parametry()).toEqual([['category', 'Пицца']])
 })
@@ -225,13 +226,13 @@ test('варианты фильтра считаются по строкам, п
   expect(podpisiGalochek(panel('Категория'))).toEqual(['Пицца · 1', 'Соус · 2'])
 })
 
-test('варианты в «Фильтрах» на 360 px — тоже по строкам, прошедшим поиск', async () => {
+test('варианты в панели отбора на 360 px — тоже по строкам, прошедшим поиск', async () => {
   setViewport(360)
   const u = polzovatel()
   narisovat()
   await u.type(poisk(), 'е')
-  await u.click(screen.getByRole('button', { name: 'Фильтры' }))
-  const kategoriya = within(screen.getByRole('group', { name: 'Фильтры' })).getByRole('group', { name: 'Категория' })
+  await u.click(screen.getByRole('button', { name: 'Сортировка и фильтры' }))
+  const kategoriya = within(panelOtbora()).getByRole('group', { name: 'Категория' })
   expect(podpisiGalochek(kategoriya)).toEqual(['Пицца · 1', 'Соус · 2'])
 })
 
@@ -304,10 +305,10 @@ async function naUzkom() {
   setViewport(360)
   const u = polzovatel()
   const vid = narisovat()
-  await u.selectOptions(screen.getByRole('combobox', { name: 'Сортировка' }), 'Цена: по убыванию')
-  await u.click(screen.getByRole('button', { name: 'Фильтры' }))
-  await u.click(within(screen.getByRole('group', { name: 'Фильтры' })).getByRole('checkbox', { name: 'Соус · 2' }))
-  await u.click(screen.getByRole('button', { name: 'Готово' }))
+  await u.click(screen.getByRole('button', { name: 'Сортировка и фильтры' }))
+  await u.click(within(panelOtbora()).getByRole('radio', { name: 'Цена: по убыванию' }))
+  await u.click(within(panelOtbora()).getByRole('checkbox', { name: 'Соус · 2' }))
+  await u.click(within(panelOtbora()).getByRole('button', { name: 'Показать 2' }))
   await u.type(poisk(), 'е')
   await podozhdat(350)
   const itog = { adres, stroki: poryadok() }

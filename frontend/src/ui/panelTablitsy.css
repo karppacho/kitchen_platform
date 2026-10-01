@@ -24,9 +24,13 @@
   font: inherit;
 }
 
-/* На широком поле во всю ширину окна было бы длиннее любого названия. */
 .panel-tablitsy-poisk {
   flex: 1 1 200px;
+}
+
+/* На широком поле во всю ширину окна было бы длиннее любого названия; на
+   телефоне оно во всю строку — ряд ему там отдан целиком. */
+.obolochka:not(.obolochka--telefon) .panel-tablitsy-poisk {
   max-width: 480px;
 }
 
@@ -35,12 +39,13 @@
   white-space: nowrap;
 }
 
-.panel-tablitsy-sortirovka {
-  flex: 1 1 180px;
+/* На телефоне: поле во всю строку, под ним «Найдено» и кнопка отбора. */
+.panel-tablitsy-ryad--otbor {
+  justify-content: space-between;
 }
 
-.panel-tablitsy-filtry {
-  flex: none;
+.panel-otbora-knopka {
+  min-height: 44px;
   padding: var(--shag) calc(var(--shag) * 3);
   border: 1px solid var(--granitsa);
   border-radius: var(--radius);
@@ -50,33 +55,76 @@
   cursor: pointer;
 }
 
-.panel-tablitsy-filtry[aria-expanded='true'] {
+.panel-otbora-knopka[aria-expanded='true'] {
   border-color: var(--aktsent);
   color: var(--aktsent);
 }
 
-/* «Фильтры» на узком — в потоке страницы, под кнопкой. */
-.panel-tablitsy-panel {
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--shag) * 3);
-  padding: calc(var(--shag) * 3);
-  border: 1px solid var(--granitsa);
-  border-radius: var(--radius);
-  background: var(--poverhnost);
+.panel-otbora-sortirovka {
+  margin: 0 0 calc(var(--shag) * 3);
+  padding: 0;
+  border: 0;
 }
 
-.panel-tablitsy-niz {
-  display: flex;
-  justify-content: flex-end;
+.panel-otbora-sortirovka legend {
+  padding: 0;
+  margin-bottom: var(--shag);
+  font-weight: 600;
+  color: var(--priglushyonnyy);
 }
 
-.panel-tablitsy-gotovo {
-  padding: var(--shag) calc(var(--shag) * 3);
+.panel-otbora-variant {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--shag) * 2);
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.panel-otbora-variant input {
+  margin: 0;
+  accent-color: var(--aktsent);
+}
+
+.panel-otbora-gruppa {
+  border-top: 1px solid var(--granitsa);
+}
+
+.panel-otbora-gruppa summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Заголовок группы уже в summary — легенду галочек прячем визуально,
+   оставляя программе чтения с экрана. */
+.panel-otbora-gruppa .galochki legend {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.panel-otbora-pokazat {
+  flex: 1;
+  min-height: 44px;
   border: 0;
   border-radius: var(--radius);
   background: var(--aktsent);
   color: var(--poverhnost);
+  font: inherit;
+  cursor: pointer;
+}
+
+.panel-otbora-sbros {
+  min-height: 44px;
+  padding: 0 calc(var(--shag) * 3);
+  border: 0;
+  background: none;
+  color: var(--aktsent);
   font: inherit;
   cursor: pointer;
 }
@@ -138,9 +186,7 @@
 
 /* Под палец цели выше. */
 @media (pointer: coarse) {
-  .panel-tablitsy-pole,
-  .panel-tablitsy-filtry,
-  .panel-tablitsy-gotovo {
+  .panel-tablitsy-pole {
     padding-top: calc(var(--shag) * 2);
     padding-bottom: calc(var(--shag) * 2);
   }
