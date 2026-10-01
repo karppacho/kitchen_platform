@@ -2,8 +2,17 @@ import { useState } from 'react'
 
 import { useVarianty } from '../../api/kartochki'
 import type { Draft } from '../../api/types'
+import { kakVSpiske } from '../../domain/poisk'
 import { estDannye, Sostoyanie } from '../../ui/Sostoyanie'
-import { RamkaShaga, useShag, ZAGOLOVOK_SHAGA } from './RamkaShaga'
+import {
+  OshibkaUPolya,
+  RamkaShaga,
+  svoistvaPolya,
+  useShag,
+  ZAGOLOVOK_SHAGA,
+} from './RamkaShaga'
+
+const POLYA = ['category'] as const
 
 /**
  * Шаг 2. Категория — из списка или своя.
@@ -14,12 +23,13 @@ import { RamkaShaga, useShag, ZAGOLOVOK_SHAGA } from './RamkaShaga'
  * ляжет в лист.
  */
 export function ShagKategoriya({ chernovik }: { chernovik: Draft }) {
-  const upravlenie = useShag(chernovik)
+  const upravlenie = useShag(chernovik, POLYA)
   const varianty = useVarianty()
   const spisok = varianty.data?.categories ?? []
   const [kategoriya, zadatKategoriyu] = useState(chernovik.category)
   const [drugayaVybrana, vybratDruguyu] = useState(false)
-  const tekst = kategoriya.trim()
+  // «сыры» во «Другая…» — это «Сыры» из списка, а не новая категория.
+  const vybrano = kakVSpiske(kategoriya, spisok)
 
   // Категория черновика не из списка — в прошлый раз повар вписал её сам.
   // Пока список не пришёл, судить об этом не по чему.
@@ -29,12 +39,18 @@ export function ShagKategoriya({ chernovik }: { chernovik: Draft }) {
   return (
     <RamkaShaga
       upravlenie={upravlenie}
-      mozhnoDalee={tekst !== ''}
-      onDalee={() => upravlenie.dalee({ category: tekst })}
+      mozhnoDalee={vybrano !== ''}
+      onDalee={() => upravlenie.dalee({ category: vybrano })}
+      polya={{ category: vybrano }}
     >
       {/* Список не пришёл — свою категорию вписать всё равно можно. */}
       {!estDannye(varianty) && <Sostoyanie query={varianty} />}
-      <div className="kartochka-varianty" role="radiogroup" aria-labelledby={ZAGOLOVOK_SHAGA}>
+      <div
+        className="kartochka-varianty"
+        role="radiogroup"
+        aria-labelledby={ZAGOLOVOK_SHAGA}
+        {...svoistvaPolya(upravlenie, 'category')}
+      >
         {spisok.map((k) => (
           <label key={k}>
             <input
@@ -62,6 +78,7 @@ export function ShagKategoriya({ chernovik }: { chernovik: Draft }) {
           Другая…
         </label>
       </div>
+      <OshibkaUPolya upravlenie={upravlenie} pole="category" />
       {svoya && (
         <label className="kartochka-pole">
           <span>Своя категория</span>

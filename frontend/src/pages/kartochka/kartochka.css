@@ -47,6 +47,68 @@
   gap: var(--shag);
 }
 
+/* Состав бывает в пять строк — поле растёт вниз, не вбок. */
+textarea.kartochka-vvod {
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.kartochka-vvod[aria-invalid='true'] {
+  border-color: var(--oshibka);
+}
+
+/* Заголовок шага получает фокус при смене шага — для читалки экрана, а
+   рамка фокуса вокруг заголовка зрячему ни к чему. */
+.kartochka h2:focus {
+  outline: none;
+}
+
+/* Группа полей: КБЖУ, сроки. */
+.kartochka-gruppa {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+  margin: 0;
+  padding: calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+}
+
+.kartochka-gruppa legend {
+  padding: 0 var(--shag);
+  color: var(--priglushyonnyy);
+}
+
+/* Живая область есть всегда, даже пустая: спрятанную (display: none)
+   читалка экрана не слушает, и первое объявление пропало бы. */
+.kartochka-zhivaya {
+  display: grid;
+  gap: calc(var(--shag) * 2);
+}
+
+.kartochka-etiketka {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+}
+
+/* Фото этикетки — во всю ширину колонки, но не выше экрана телефона: под
+   ним должны быть видны кнопки. */
+.kartochka-foto {
+  display: block;
+  max-width: 100%;
+  max-height: 50vh;
+  object-fit: contain;
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+}
+
+.kartochka-zhdyom {
+  padding: calc(var(--shag) * 3);
+  border: 1px dashed var(--granitsa);
+  border-radius: var(--radius);
+}
+
 /* Кнопки — не меньше 44 px: в них попадают пальцем, иногда в перчатке. */
 .kartochka button {
   min-height: 44px;

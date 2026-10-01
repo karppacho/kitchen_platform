@@ -1,0 +1,52 @@
+/* Выбор фото: подписи-кнопки над невидимыми полями файла. Кнопки — не
+   меньше 44 px: в них попадают пальцем у плиты. */
+
+.foto-vybor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 2);
+}
+
+.foto-vybor-knopka {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 4);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  color: var(--tekst);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.foto-vybor-glavnaya {
+  flex: 1;
+  border-color: var(--aktsent);
+  background: var(--aktsent);
+  color: #fff;
+}
+
+/* Поле файла — в разметке, но невидимо: его открывает подпись. Не
+   display: none — тогда до него не дойти с клавиатуры. */
+.foto-vybor-pole {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  opacity: 0;
+}
+
+.foto-vybor-knopka:focus-within {
+  outline: 2px solid var(--aktsent);
+  outline-offset: 2px;
+}
+
+.foto-vybor-knopka:has(.foto-vybor-pole:disabled) {
+  cursor: default;
+  opacity: 0.5;
+}

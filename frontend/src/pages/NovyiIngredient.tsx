@@ -1,12 +1,21 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-import { NAZVANIYA_SHAGOV, SHAGI, useChernovik, useNachatChernovik } from '../api/kartochki'
+import {
+  NAZVANIYA_SHAGOV,
+  SHAGI,
+  useChernovik,
+  useNachatChernovik,
+  useRaspoznavanie,
+  type Raspoznavanie,
+} from '../api/kartochki'
 import type { Draft } from '../api/types'
 import { Sostoyanie } from '../ui/Sostoyanie'
-import { RamkaShaga, useShag } from './kartochka/RamkaShaga'
+import { PamyatShagovMastera, RamkaShaga, useShag } from './kartochka/RamkaShaga'
+import { ShagEtiketka } from './kartochka/ShagEtiketka'
 import { ShagKategoriya } from './kartochka/ShagKategoriya'
 import { ShagNazvanie } from './kartochka/ShagNazvanie'
 import { ShagPostavshchik } from './kartochka/ShagPostavshchik'
+import { ShagProverka } from './kartochka/ShagProverka'
 import './kartochka/kartochka.css'
 import './pages.css'
 
@@ -24,6 +33,9 @@ export function NovyiIngredient() {
   const [vRabote, zadatVRabote] = useState<string | null>(null)
   const nachat = useNachatChernovik((novyi) => zadatVRabote(novyi.id))
   const oshibka = nachat.error instanceof Error ? nachat.error.message : null
+  // Распознавание запускает шаг «Фото этикетки», а ждёт его итога шаг
+  // «Проверка» — запрос живёт здесь, над шагами, и переживает смену шага.
+  const raspoznavanie = useRaspoznavanie()
 
   const dannye = chernovik.data
   let ekran
@@ -48,8 +60,13 @@ export function NovyiIngredient() {
       />
     )
   } else {
-    // Ключ — шаг: у каждого шага свой ввод, с черновика заново.
-    ekran = <Master key={dannye.step} chernovik={dannye} />
+    // Ключ — шаг: у каждого шага свой ввод, с черновика заново. Память
+    // шагов — снаружи ключа: она помнит, какой шаг показан первым.
+    ekran = (
+      <PamyatShagovMastera>
+        <Master key={dannye.step} chernovik={dannye} raspoznavanie={raspoznavanie} />
+      </PamyatShagovMastera>
+    )
   }
 
   return (
@@ -107,6 +124,20 @@ function Vybor({
   oshibka: string | null
 }) {
   const [sprashivaem, sprosit] = useState(false)
+  const net = useRef<HTMLButtonElement>(null)
+  const zanovo = useRef<HTMLButtonElement>(null)
+  const sprashivali = useRef(false)
+
+  // Вопрос открылся — фокус на безопасном ответе: случайное «Готово» или
+  // пробел не сотрёт работу. Закрылся — фокус обратно, а не в никуда.
+  useEffect(() => {
+    if (sprashivaem) {
+      sprashivali.current = true
+      net.current?.focus()
+    } else if (sprashivali.current) {
+      zanovo.current?.focus()
+    }
+  }, [sprashivaem])
 
   return (
     <div className="kartochka">
@@ -130,7 +161,7 @@ function Vybor({
             нельзя.
           </p>
           <div className="kartochka-knopki">
-            <button type="button" onClick={() => sprosit(false)}>
+            <button type="button" ref={net} onClick={() => sprosit(false)}>
               Нет, оставить
             </button>
             <button
@@ -147,7 +178,7 @@ function Vybor({
         </div>
       ) : (
         <div className="kartochka-knopki">
-          <button type="button" onClick={() => sprosit(true)} disabled={zanyato}>
+          <button type="button" ref={zanovo} onClick={() => sprosit(true)} disabled={zanyato}>
             Начать заново
           </button>
           <button
@@ -164,7 +195,13 @@ function Vybor({
   )
 }
 
-function Master({ chernovik }: { chernovik: Draft }) {
+function Master({
+  chernovik,
+  raspoznavanie,
+}: {
+  chernovik: Draft
+  raspoznavanie: Raspoznavanie
+}) {
   switch (chernovik.step) {
     case 'supplier':
       return <ShagPostavshchik chernovik={chernovik} />
@@ -172,13 +209,17 @@ function Master({ chernovik }: { chernovik: Draft }) {
       return <ShagKategoriya chernovik={chernovik} />
     case 'name':
       return <ShagNazvanie chernovik={chernovik} />
+    case 'label':
+      return <ShagEtiketka chernovik={chernovik} raspoznavanie={raspoznavanie} />
+    case 'review':
+      return <ShagProverka chernovik={chernovik} raspoznavanie={raspoznavanie} />
     default:
       return <ShagPozzhe chernovik={chernovik} />
   }
 }
 
-/** Шаги с этикетки и дальше появятся следующими задачами этапа. До них —
- *  честно: шаг не готов, заполненное сохранено, назад можно. */
+/** Шаги после проверки появятся следующей задачей этапа. До неё — честно:
+ *  шаг не готов, заполненное сохранено, назад можно. */
 function ShagPozzhe({ chernovik }: { chernovik: Draft }) {
   const upravlenie = useShag(chernovik)
   return (

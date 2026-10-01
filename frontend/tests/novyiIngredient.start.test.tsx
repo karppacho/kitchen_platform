@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { delay, http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 
 import { KLYUCH_CHERNOVIKA } from '../src/api/kartochki'
 import type { Draft, DraftPatch, NameCheck } from '../src/api/types'
@@ -135,7 +135,10 @@ beforeEach(() => {
   udaleno = []
   sozdano = 0
 })
-afterEach(() => server.resetHandlers())
+afterEach(() => {
+  server.resetHandlers()
+  vi.useRealTimers()
+})
 afterAll(() => server.close())
 
 function narisovat(put = '/cards') {
@@ -158,12 +161,35 @@ function punktyMenyu(): string[] {
 }
 
 /** Черновик на нужном шаге — повар вернулся к нему и нажал «Продолжить». */
-async function prodolzhit(chastichno: Partial<Draft>) {
+async function prodolzhit(
+  chastichno: Partial<Draft>,
+  polzovatel: Pick<ReturnType<typeof userEvent.setup>, 'click'> = userEvent,
+) {
   chernovik = { ...novyi(PERVYI), ...chastichno }
   const vid = narisovat()
-  await userEvent.click(await screen.findByRole('button', { name: 'Продолжить' }))
+  await polzovatel.click(await screen.findByRole('button', { name: 'Продолжить' }))
   return vid
 }
+
+/** Часы теста: идут сами, но их можно перевести вперёд — на срок ожидания. */
+function chasy() {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  return {
+    polzovatel: userEvent.setup({ advanceTimers: vi.advanceTimersByTime }),
+    vperyod: (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms)),
+  }
+}
+
+/** Ответ, который держит тест: отпускается, когда тесту нужно. */
+function otlozhennyi() {
+  let otpustit: () => void = () => {}
+  const zhdat = new Promise<void>((gotovo) => {
+    otpustit = gotovo
+  })
+  return { zhdat, otpustit }
+}
+
+const NE_SOKHRANILOS = 'Не удалось сохранить — проверьте связь и нажмите ещё раз'
 
 // ---------------------------------------------------------------------------
 // Раздел повара в меню
@@ -420,11 +446,15 @@ test('каждый шаг шлёт PATCH с step — и вперёд, и наз�
 test('перечитывание, начатое до правки, не возвращает экран на прежний шаг', async () => {
   const { queries } = await prodolzhit({ step: 'supplier' })
   // Повар вернулся во вкладку — черновик перечитывается, а сеть медленная:
-  // ответ несёт черновик, каким он был до правки.
+  // ответ несёт черновик, каким он был до правки, и приходит, когда тест
+  // его отпустит, — после правки, на любой машине.
+  const chtenie = otlozhennyi()
+  let prochitano = false
   server.use(
     http.get('/api/cards/drafts/current', async () => {
       const kakBylo = chernovik
-      await delay(400)
+      await chtenie.zhdat
+      prochitano = true
       return HttpResponse.json(kakBylo)
     }),
   )
@@ -434,8 +464,47 @@ test('перечитывание, начатое до правки, не воз�
   await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
   expect(await screen.findByText('Шаг 2 из 9')).toBeInTheDocument()
 
-  // Опоздавший ответ пришёл бы теперь — экран остаётся на шаге 2.
-  await new Promise((gotovo) => setTimeout(gotovo, 600))
+  // Опоздавший ответ приходит только теперь — экран остаётся на шаге 2.
+  chtenie.otpustit()
+  await waitFor(() => expect(prochitano).toBe(true))
+  await waitFor(() => expect(queries.isFetching({ queryKey: KLYUCH_CHERNOVIKA })).toBe(0))
+  expect(screen.getByText('Шаг 2 из 9')).toBeInTheDocument()
+})
+
+test('перечитывание, начатое во время правки, не откатывает экран после неё', async () => {
+  const { queries } = await prodolzhit({ step: 'supplier' })
+  const pravka = otlozhennyi()
+  const chtenie = otlozhennyi()
+  let chitaem = false
+  let prochitano = false
+  server.use(
+    http.patch('/api/cards/drafts/:id', async ({ request }) => {
+      const telo = (await request.json()) as DraftPatch
+      await pravka.zhdat
+      chernovik = { ...chernovik!, ...telo } as Draft
+      return HttpResponse.json(chernovik)
+    }),
+    http.get('/api/cards/drafts/current', async () => {
+      chitaem = true
+      const kakBylo = chernovik
+      await chtenie.zhdat
+      prochitano = true
+      return HttpResponse.json(kakBylo)
+    }),
+  )
+
+  await userEvent.type(screen.getByRole('textbox', { name: 'Поставщик' }), 'Метро')
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+  // Правка ушла и ещё не ответила — а черновик уже перечитывается.
+  void queries.invalidateQueries({ queryKey: KLYUCH_CHERNOVIKA })
+  await waitFor(() => expect(chitaem).toBe(true))
+
+  pravka.otpustit()
+  expect(await screen.findByText('Шаг 2 из 9')).toBeInTheDocument()
+
+  chtenie.otpustit()
+  await waitFor(() => expect(prochitano).toBe(true))
+  await waitFor(() => expect(queries.isFetching({ queryKey: KLYUCH_CHERNOVIKA })).toBe(0))
   expect(screen.getByText('Шаг 2 из 9')).toBeInTheDocument()
 })
 
@@ -449,4 +518,240 @@ test('черновик пропал (отправлен или сброшен в
   // Правка ответила 404 — вместо тупика с «обновите страницу» экран сам
   // узнаёт, что черновика больше нет, и предлагает начать.
   expect(await screen.findByRole('button', { name: 'Начать' })).toBeInTheDocument()
+})
+
+test('черновик завели в другой вкладке (POST 409) — перечитать и предложить «Продолжить»', async () => {
+  narisovat()
+  const nachat = await screen.findByRole('button', { name: 'Начать' })
+  // Пока экран показывал «Начать», вторая вкладка уже завела черновик.
+  chernovik = { ...novyi(PERVYI), supplier: 'Метро', step: 'category' }
+
+  await userEvent.click(nachat)
+
+  expect(await screen.findByRole('button', { name: 'Продолжить' })).toBeInTheDocument()
+  expect(screen.getByText(/Метро/)).toBeInTheDocument()
+  expect(sozdano).toBe(0)
+})
+
+// ---------------------------------------------------------------------------
+// Отказы и сбои правки
+// ---------------------------------------------------------------------------
+
+test('правка во время отправки (409) — текст сервера, без повтора', async () => {
+  let popytok = 0
+  server.use(
+    http.patch('/api/cards/drafts/:id', () => {
+      popytok += 1
+      return HttpResponse.json({ detail: 'Карточка отправляется — подождите' }, { status: 409 })
+    }),
+  )
+  const { polzovatel, vperyod } = chasy()
+  await prodolzhit({ step: 'supplier' }, polzovatel)
+
+  await polzovatel.type(screen.getByRole('textbox', { name: 'Поставщик' }), 'Метро')
+  await polzovatel.click(screen.getByRole('button', { name: 'Далее' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Карточка отправляется — подождите')
+  await vperyod(60_000)
+  expect(popytok).toBe(1)
+  expect(screen.getByText('Шаг 1 из 9')).toBeInTheDocument()
+})
+
+test('отказ правки (422) — текст у своего поля', async () => {
+  server.use(
+    http.patch('/api/cards/drafts/:id', () =>
+      HttpResponse.json(
+        { detail: 'Поставщик: не больше 200 знаков', field: 'supplier' },
+        { status: 422 },
+      ),
+    ),
+  )
+  await prodolzhit({ step: 'supplier' })
+
+  await userEvent.type(screen.getByRole('textbox', { name: 'Поставщик' }), 'Метро')
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+
+  expect(await screen.findByText('Поставщик: не больше 200 знаков')).toBeInTheDocument()
+  const pole = screen.getByRole('textbox', { name: 'Поставщик' })
+  expect(pole).toHaveAttribute('aria-invalid', 'true')
+  expect(pole).toHaveAccessibleDescription('Поставщик: не больше 200 знаков')
+})
+
+test('сбой сохранения — обрыв или 5xx — «не удалось сохранить», а не «получить данные»', async () => {
+  server.use(http.patch('/api/cards/drafts/:id', () => HttpResponse.error()))
+  await prodolzhit({ step: 'supplier' })
+  await userEvent.type(screen.getByRole('textbox', { name: 'Поставщик' }), 'Метро')
+
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent(NE_SOKHRANILOS)
+
+  server.use(
+    http.patch(
+      '/api/cards/drafts/:id',
+      () => new HttpResponse('<html>Bad Gateway</html>', { status: 502 }),
+    ),
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Далее' })).toBeEnabled())
+  expect(screen.getByRole('alert')).toHaveTextContent(NE_SOKHRANILOS)
+})
+
+test('правка не ответила за срок — понятный текст, кнопки снова доступны', async () => {
+  server.use(
+    http.patch('/api/cards/drafts/:id', async () => {
+      await delay('infinite')
+      return HttpResponse.json(chernovik)
+    }),
+  )
+  const { polzovatel, vperyod } = chasy()
+  await prodolzhit({ step: 'supplier' }, polzovatel)
+  await polzovatel.type(screen.getByRole('textbox', { name: 'Поставщик' }), 'Метро')
+
+  await polzovatel.click(screen.getByRole('button', { name: 'Далее' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Далее' })).toBeDisabled())
+
+  await vperyod(20_000)
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(NE_SOKHRANILOS)
+  expect(screen.getByRole('button', { name: 'Далее' })).toBeEnabled()
+})
+
+test('двойное касание «Далее» — одна правка', async () => {
+  server.use(
+    http.patch('/api/cards/drafts/:id', async ({ request }) => {
+      pravki.push((await request.json()) as DraftPatch)
+      await delay(100)
+      chernovik = { ...chernovik!, ...pravki.at(-1) } as Draft
+      return HttpResponse.json(chernovik)
+    }),
+  )
+  await prodolzhit({ step: 'supplier' })
+  await userEvent.type(screen.getByRole('textbox', { name: 'Поставщик' }), 'Метро')
+
+  // Два касания подряд, быстрее, чем экран успел перерисоваться.
+  const dalee = screen.getByRole('button', { name: 'Далее' })
+  fireEvent.click(dalee)
+  fireEvent.click(dalee)
+
+  expect(await screen.findByText('Шаг 2 из 9')).toBeInTheDocument()
+  expect(pravki).toEqual([{ supplier: 'Метро', step: 'category' }])
+})
+
+// ---------------------------------------------------------------------------
+// «Назад», регистр, фокус, проверка названия
+// ---------------------------------------------------------------------------
+
+test('«Назад» сохраняет набранное на шаге', async () => {
+  await prodolzhit({ supplier: 'Метро', category: 'Сыры', step: 'name' })
+
+  await userEvent.type(screen.getByRole('textbox', { name: 'Название' }), 'Моцарелла')
+  await userEvent.click(screen.getByRole('button', { name: 'Назад' }))
+
+  expect(await screen.findByText('Шаг 2 из 9')).toBeInTheDocument()
+  expect(pravki).toEqual([{ name: 'Моцарелла', step: 'category' }])
+
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+  expect(await screen.findByRole('textbox', { name: 'Название' })).toHaveValue('Моцарелла')
+})
+
+test('поставщик и категория уходят написанием из списка — без учёта регистра и пробелов', async () => {
+  await prodolzhit({ step: 'supplier' })
+
+  // «метро» не должно стать вторым поставщиком рядом с «Метро».
+  await userEvent.type(screen.getByRole('textbox', { name: 'Поставщик' }), '  метро ')
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+
+  await userEvent.click(await screen.findByRole('radio', { name: 'Другая…' }))
+  await userEvent.type(screen.getByRole('textbox', { name: 'Своя категория' }), 'сыры  ')
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+
+  expect(await screen.findByText('Шаг 3 из 9')).toBeInTheDocument()
+  expect(pravki).toEqual([
+    { supplier: 'Метро', step: 'category' },
+    { category: 'Сыры', step: 'name' },
+  ])
+})
+
+test('при смене шага фокус — на заголовке шага; при первом показе — нет', async () => {
+  await prodolzhit({ step: 'supplier' })
+  expect(screen.getByRole('heading', { name: 'Поставщик' })).not.toHaveFocus()
+
+  await userEvent.type(screen.getByRole('textbox', { name: 'Поставщик' }), 'Метро')
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+
+  // Кнопка, на которой был фокус, исчезла с прежним шагом: читалка экрана
+  // объявит новый шаг, а не замолчит.
+  expect(await screen.findByRole('heading', { name: 'Категория' })).toHaveFocus()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Назад' }))
+  expect(await screen.findByRole('heading', { name: 'Поставщик' })).toHaveFocus()
+})
+
+test('«Начать заново»: фокус на «Нет, оставить», после отказа — снова на «Начать заново»', async () => {
+  chernovik = novyi(PERVYI)
+  narisovat()
+
+  await userEvent.click(await screen.findByRole('button', { name: 'Начать заново' }))
+  // Безопасный выбор под пальцем: случайное «Готово» не сотрёт работу.
+  expect(screen.getByRole('button', { name: 'Нет, оставить' })).toHaveFocus()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Нет, оставить' }))
+  expect(screen.getByRole('button', { name: 'Начать заново' })).toHaveFocus()
+})
+
+test('проверка названия: «Проверяем…» и замечания — в живой области', async () => {
+  server.use(
+    http.get('/api/cards/name-check', ({ request }) => {
+      if (new URL(request.url).searchParams.get('name') === 'Сбой') {
+        return new HttpResponse(null, { status: 500 })
+      }
+      return HttpResponse.json({ ...NICHEGO, reference: { exact: ['Моцарелла'], similar: [] } })
+    }),
+  )
+  await prodolzhit({ supplier: 'Метро', category: 'Сыры', step: 'name' })
+  const pole = screen.getByRole('textbox', { name: 'Название' })
+
+  await userEvent.type(pole, 'Моцарелла')
+  expect(screen.getByText('Проверяем название…').closest('[role="status"]')).not.toBeNull()
+  const kakVSpravochnike = await screen.findByText(/Название как в справочнике/)
+  expect(kakVSpravochnike.closest('[role="status"]')).not.toBeNull()
+
+  await userEvent.clear(pole)
+  await userEvent.type(pole, 'Сбой')
+  const neProvereno = await screen.findByText(/Не удалось проверить/)
+  expect(neProvereno.closest('[role="status"]')).not.toBeNull()
+})
+
+test('сбой проверки названия — «Далее» доступна с замечанием', async () => {
+  server.use(http.get('/api/cards/name-check', () => new HttpResponse(null, { status: 500 })))
+  await prodolzhit({ supplier: 'Метро', category: 'Сыры', step: 'name' })
+
+  await userEvent.type(screen.getByRole('textbox', { name: 'Название' }), 'Томаты черри')
+
+  expect(await screen.findByText(/это проверится при отправке/)).toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+  expect(await screen.findByText('Шаг 4 из 9')).toBeInTheDocument()
+  expect(pravki).toEqual([{ name: 'Томаты черри', step: 'label' }])
+})
+
+test('проверка названия не ответила за 10 с — «Далее» доступна с замечанием', async () => {
+  server.use(
+    http.get('/api/cards/name-check', async () => {
+      await delay('infinite')
+      return HttpResponse.json(NICHEGO)
+    }),
+  )
+  const { polzovatel, vperyod } = chasy()
+  await prodolzhit({ supplier: 'Метро', category: 'Сыры', step: 'name' }, polzovatel)
+
+  await polzovatel.type(screen.getByRole('textbox', { name: 'Название' }), 'Томаты черри')
+  await vperyod(1000)
+  // Пока ждём — сказано, чего ждём.
+  expect(screen.getByText('Проверяем название…')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Далее' })).toBeDisabled()
+
+  await vperyod(10_000)
+
+  expect(await screen.findByText(/это проверится при отправке/)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Далее' })).toBeEnabled()
 })

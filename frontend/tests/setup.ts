@@ -1,6 +1,14 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
+import { transferableAbortController } from 'node:util'
 import { afterEach, beforeEach } from 'vitest'
+
+// jsdom ставит свой AbortController, а fetch в тестах — из Node, и сигнал
+// jsdom он не принимает: любой запрос со сроком или отменой падал бы сразу,
+// ещё до msw. Возвращаем AbortController Node — как в браузере, где fetch и
+// AbortController из одной семьи.
+globalThis.AbortController = transferableAbortController().constructor as typeof AbortController
+globalThis.AbortSignal = new AbortController().signal.constructor as typeof AbortSignal
 
 let shirina = 1440
 

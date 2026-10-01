@@ -2,7 +2,15 @@ import { useEffect, useState } from 'react'
 
 import { useProverkaImeni } from '../../api/kartochki'
 import type { CardHit, Draft } from '../../api/types'
-import { RamkaShaga, useShag, ZAGOLOVOK_SHAGA } from './RamkaShaga'
+import {
+  OshibkaUPolya,
+  RamkaShaga,
+  svoistvaPolya,
+  useShag,
+  ZAGOLOVOK_SHAGA,
+} from './RamkaShaga'
+
+const POLYA = ['name'] as const
 
 /** Пауза после последней буквы перед проверкой названия: на каждую букву
  *  спрашивать сервер незачем, а ждать дольше — повар уже тянется к «Далее». */
@@ -33,7 +41,7 @@ function kto(karta: CardHit): string {
  * позицией справочника сама, без сверки шефом.
  */
 export function ShagNazvanie({ chernovik }: { chernovik: Draft }) {
-  const upravlenie = useShag(chernovik)
+  const upravlenie = useShag(chernovik, POLYA)
   const [imya, zadatImya] = useState(chernovik.name)
   const tekst = imya.trim()
   const otlozhennoe = useOtlozhennoe(tekst, ZADERZHKA_PROVERKI)
@@ -54,12 +62,16 @@ export function ShagNazvanie({ chernovik }: { chernovik: Draft }) {
       ]
     : []
   const ubrannaya = otvet?.hidden.exact[0]
+  // Ждём паузы в наборе или ответа сервера — повар видит, почему «Далее»
+  // ещё серая. Ответ не пришёл за 10 с — проверка считается несостоявшейся.
+  const proveryaem = tekst !== '' && !proverenoTekushchee
 
   return (
     <RamkaShaga
       upravlenie={upravlenie}
       mozhnoDalee={tekst !== '' && proverenoTekushchee && dubl === undefined}
       onDalee={() => upravlenie.dalee({ name: tekst })}
+      polya={{ name: tekst }}
     >
       <p id={POYASNENIE_ID} className="kartochka-poyasnenie">
         Как продукт будет называться в таблице.
@@ -68,30 +80,36 @@ export function ShagNazvanie({ chernovik }: { chernovik: Draft }) {
         className="kartochka-vvod"
         type="text"
         aria-labelledby={ZAGOLOVOK_SHAGA}
-        aria-describedby={POYASNENIE_ID}
+        {...svoistvaPolya(upravlenie, 'name', POYASNENIE_ID)}
         value={imya}
         maxLength={200}
         autoComplete="off"
         onChange={(sobytie) => zadatImya(sobytie.target.value)}
       />
+      <OshibkaUPolya upravlenie={upravlenie} pole="name" />
+
+      {/* Живая область: что проверка сказала, читалка экрана объявит сама,
+          без перехода к тексту. Область есть всегда — иначе первое
+          объявление теряется. */}
+      <div role="status" className="kartochka-zhivaya">
+        {proveryaem && <p className="kartochka-poyasnenie">Проверяем название…</p>}
+        {proverka.isError && otlozhennoe === tekst && (
+          <p className="kartochka-zamechanie">
+            Не удалось проверить, есть ли уже такая карточка, — это проверится при отправке.
+          </p>
+        )}
+        {kakVSpravochnike && (
+          <p className="kartochka-horosho">
+            Название как в справочнике — карточка свяжется с ним сама.
+          </p>
+        )}
+      </div>
 
       {dubl && (
         <p className="kartochka-oshibka" role="alert">
           «{dubl.name}» уже есть в таблице
           {dubl.supplier ? ` (поставщик ${dubl.supplier})` : ''} — вторую карточку с этим
           названием не запишут. Измените название.
-        </p>
-      )}
-
-      {proverka.isError && otlozhennoe === tekst && (
-        <p className="kartochka-zamechanie">
-          Не удалось проверить, есть ли уже такая карточка, — это проверится при отправке.
-        </p>
-      )}
-
-      {kakVSpravochnike && (
-        <p className="kartochka-horosho">
-          Название как в справочнике — карточка свяжется с ним сама.
         </p>
       )}
 
