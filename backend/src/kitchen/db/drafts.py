@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, exists, func, or_, select, update
+from sqlalchemy import Interval, and_, cast, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from kitchen.db import models
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     import uuid
     from datetime import datetime, timedelta
 
+    from sqlalchemy import ColumnElement
     from sqlalchemy.orm import Session
 
 ACTIVE = "active"
@@ -118,16 +119,39 @@ def own_draft(
 # Часы — базы (`now()`), а не процесса: отметку ставит и читает база, и
 # расхождение часов контейнеров не делает свежую отметку зависшей.
 # ---------------------------------------------------------------------------
+def _not_submitting(window: timedelta) -> ColumnElement[bool]:
+    """Отправка не идёт: отметки нет или она старше ``window``."""
+    return or_(
+        models.CardDraft.submit_started_at.is_(None),
+        models.CardDraft.submit_started_at < func.now() - window,
+    )
+
+
+def _not_recognizing(stale_after: timedelta) -> ColumnElement[bool]:
+    """Распознавание не идёт: не «идёт» или «идёт» старше ``stale_after``."""
+    return or_(
+        models.CardDraft.recognition_status.is_distinct_from(RUNNING),
+        models.CardDraft.recognition_started_at < func.now() - stale_after,
+    )
+
+
 def claim_submit(
-    session: Session, owner_id: uuid.UUID, draft_id: uuid.UUID, window: timedelta
+    session: Session,
+    owner_id: uuid.UUID,
+    draft_id: uuid.UUID,
+    *,
+    window: timedelta,
+    recognition_stale: timedelta,
 ) -> models.CardDraft | None:
     """Поставить отметку «отправка идёт» и взять черновик, каким он ушёл в лист.
 
     Одним запросом: отметка ставится, только если её нет или она старше
     ``window`` (процесс умер посреди записи), — вторая отправка разом её не
-    поставит. Поля и id фото берутся из этого же запроса: замена фото после
-    него ждёт снятия отметки. ``None`` — черновика нет, он не активен или
-    отправка уже идёт. Коммитит вызывающий — до записи в лист.
+    поставит, — и если не идёт распознавание этикетки (его итог лёг бы в
+    черновик, уже ушедший в лист, и пропал бы). Поля и id фото берутся из
+    этого же запроса: замена фото после него ждёт снятия отметки. ``None`` —
+    черновика нет, он не активен, отправка или распознавание уже идут.
+    Коммитит вызывающий — до записи в лист.
     """
     statement = (
         update(models.CardDraft)
@@ -135,10 +159,8 @@ def claim_submit(
             models.CardDraft.id == draft_id,
             models.CardDraft.owner_id == owner_id,
             models.CardDraft.status == ACTIVE,
-            or_(
-                models.CardDraft.submit_started_at.is_(None),
-                models.CardDraft.submit_started_at < func.now() - window,
-            ),
+            _not_submitting(window),
+            _not_recognizing(recognition_stale),
         )
         .values(submit_started_at=func.now())
         .returning(models.CardDraft)
@@ -151,6 +173,44 @@ def submitting(session: Session, draft_id: uuid.UUID, window: timedelta) -> bool
     """Идёт ли отправка черновика сейчас — отметка моложе ``window``."""
     query = select(models.CardDraft.submit_started_at >= func.now() - window).where(
         models.CardDraft.id == draft_id
+    )
+    return bool(session.scalar(query))
+
+
+def submit_left(session: Session, draft_id: uuid.UUID, window: timedelta) -> timedelta | None:
+    """Сколько свежей отметке отправки осталось до предела; ``None`` — отметки нет."""
+    query = select(cast(models.CardDraft.submit_started_at + window - func.now(), Interval)).where(
+        models.CardDraft.id == draft_id
+    )
+    left: timedelta | None = session.scalar(query)
+    return left
+
+
+def open_sheet_write(session: Session, request_key: str) -> str | None:
+    """Статус открытой записи журнала по ключу — ``pending`` или ``verified``
+    (она одна: частичный уникальный индекс); ``None`` — открытой нет."""
+    query = select(models.SheetWrite.status).where(
+        models.SheetWrite.request_key == request_key,
+        models.SheetWrite.status.in_(models.SheetWrite.OPEN_STATUSES),
+    )
+    status: str | None = session.scalar(query)
+    return status
+
+
+def card_in_database(session: Session, *, label_url: str, row: int, name: str) -> bool:
+    """Перенесена ли карточка в базу: по ссылке на её этикетку — она своя у
+    каждой отправки, — или по строке листа с тем же названием."""
+    query = select(
+        exists().where(
+            models.IngredientCard.removed_at.is_(None),
+            or_(
+                models.IngredientCard.label_url == label_url,
+                and_(
+                    models.IngredientCard.source_row == row,
+                    models.IngredientCard.name == name,
+                ),
+            ),
+        )
     )
     return bool(session.scalar(query))
 
@@ -202,10 +262,13 @@ def start_recognition(
     owner_id: uuid.UUID,
     draft_id: uuid.UUID,
     label_file_id: str,
+    *,
     stale_after: timedelta,
+    submit_window: timedelta,
 ) -> datetime | None:
     """Отметить «распознавание идёт» — если не идёт (или зависло дольше
-    ``stale_after``) и этикетка та же, что скачана для модели.
+    ``stale_after``), этикетка та же, что скачана для модели, и черновик не
+    отправляется (итог распознавания лёг бы в уже ушедший в лист и пропал).
 
     Отдаёт метку начала: по ней результат узнаёт, что он всё ещё про этот
     запуск. ``None`` — не начато. Коммитит вызывающий.
@@ -217,10 +280,8 @@ def start_recognition(
             models.CardDraft.owner_id == owner_id,
             models.CardDraft.status == ACTIVE,
             models.CardDraft.label_file_id == label_file_id,
-            or_(
-                models.CardDraft.recognition_status.is_distinct_from(RUNNING),
-                models.CardDraft.recognition_started_at < func.now() - stale_after,
-            ),
+            _not_recognizing(stale_after),
+            _not_submitting(submit_window),
         )
         .values(recognition_status=RUNNING, recognition_started_at=func.now())
         .returning(models.CardDraft.recognition_started_at)

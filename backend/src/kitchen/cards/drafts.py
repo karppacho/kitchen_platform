@@ -19,9 +19,10 @@
   папке и пишется в лог. А фото черновика, по которому уже была попытка
   записи в лист, в корзину не идут вовсе: строка могла лечь, и ссылки на
   них у шефа должны открываться.
-* **Пока карточка отправляется, фото не трогаются.** Ссылки на них уже
-  летят в лист: замена, удаление фото и «Начать заново» ждут конца отправки
-  (409), иначе фото, на которое сошлётся строка шефа, ушло бы в корзину.
+* **Пока карточка отправляется, черновик не меняется.** Строка уже собрана,
+  а ссылки на фото летят в лист: правка, замена и удаление фото и «Начать
+  заново» ждут конца отправки (409) — иначе правка молча не попала бы в
+  лист, а фото, на которое сошлётся строка шефа, ушло бы в корзину.
 * **Текст повара не обрезается молча** — длиннее предела поля отказ с
   пределом; КБЖУ разбирает домен, неясное число — отказ с названием поля.
 * **Проверка КБЖУ не хранится.** В черновике — только замечания самой
@@ -329,13 +330,21 @@ def start_draft(session: Session, owner_id: uuid.UUID) -> CardDraft:
 
 
 def update_draft(
-    session: Session, owner_id: uuid.UUID, draft_id: uuid.UUID, changes: Mapping[str, str | None]
+    session: Session,
+    owner_id: uuid.UUID,
+    draft_id: uuid.UUID,
+    changes: Mapping[str, str | None],
+    *,
+    submit_window: timedelta,
 ) -> CardDraft:
     """Правка черновика: только переданные поля, целиком или никак.
 
+    Идёт отправка — :class:`DraftConflictError`: строка уже собрана из
+    черновика, и правка в лист не попала бы, а повар считал бы, что попала.
     Проверка КБЖУ не хранится — новые числа она увидит при выдаче сама
     (:func:`draft_warnings`)."""
     draft = require_active(session, owner_id, draft_id, lock=True)
+    _not_submitting(session, draft.id, submit_window)
     values = validate_changes(changes)
     for name, value in values.items():
         setattr(draft, name, value)
@@ -413,6 +422,16 @@ def require_active(
     if draft is None:
         raise DraftNotFoundError
     return draft
+
+
+def forget_recognition(draft: CardDraft) -> None:
+    """Сбросить распознавание: статус (и «идёт»), прочитанное и замечания
+    этикетки — они о прежнем фото. Поля черновика остаются: повар их видел и
+    мог править; проверка КБЖУ пересчитается по ним сама."""
+    draft.recognition_status = None
+    draft.recognition_started_at = None
+    draft.recognition = None
+    draft.recognition_warnings = []
 
 
 def _not_submitting(session: Session, draft_id: uuid.UUID, window: timedelta) -> None:
@@ -508,10 +527,7 @@ def put_photo(
     previous: str | None = getattr(locked, slot)
     setattr(locked, slot, file_id)
     if kind == "label":
-        locked.recognition_status = None
-        locked.recognition_started_at = None
-        locked.recognition = None
-        locked.recognition_warnings = []
+        forget_recognition(locked)
     keep = bool(previous) and store.sheet_write_exists(session, submit_request_key(locked.id))
     session.commit()
     if previous:
@@ -528,12 +544,17 @@ def remove_photo(
     *,
     submit_window: timedelta,
 ) -> CardDraft:
-    """Убрать фото из слота; файл — в корзину по тем же правилам, что при замене."""
+    """Убрать фото из слота; файл — в корзину по тем же правилам, что при замене.
+
+    Убрали этикетку — распознавание сбрасывается, как при замене: оно о
+    фото, которого больше нет."""
     slot = _slot(kind)
     draft = require_active(session, owner_id, draft_id, lock=True)
     _not_submitting(session, draft.id, submit_window)
     previous: str | None = getattr(draft, slot)
     setattr(draft, slot, None)
+    if kind == "label":
+        forget_recognition(draft)
     keep = bool(previous) and store.sheet_write_exists(session, submit_request_key(draft.id))
     session.commit()
     if previous:

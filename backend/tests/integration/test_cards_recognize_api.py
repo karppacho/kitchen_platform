@@ -483,7 +483,11 @@ def test_drive_failure_is_502_without_calling_the_model(
 
 @pytest.mark.parametrize(
     ("meanwhile", "text"),
-    [("replaced", "заменили"), ("started", "уже распознаётся")],
+    [
+        ("replaced", "заменили"),
+        ("started", "уже распознаётся"),
+        ("submitting", "Карточка отправляется"),
+    ],
 )
 def test_change_while_label_was_downloading_is_409(
     people: None,
@@ -492,9 +496,9 @@ def test_change_while_label_was_downloading_is_409(
     meanwhile: str,
     text: str,
 ) -> None:
-    """Пока фото скачивалось для модели, этикетку переснял сам повар — или
-    распознавание запустила вторая вкладка. Модель не зовётся: читать
-    скачанное незачем, а второй вызов — лишние деньги."""
+    """Пока фото скачивалось для модели, этикетку переснял сам повар,
+    распознавание запустила вторая вкладка или карточку отправили. Модель не
+    зовётся: читать скачанное незачем, а второй вызов — лишние деньги."""
     polza = FakePolza(answer())
     client = make_client(drive, polza.transport())
     draft = labelled(client)
@@ -507,8 +511,15 @@ def test_change_while_label_was_downloading_is_409(
                     record = session.get(models.CardDraft, uuid.UUID(str(draft["id"])))
                     assert record is not None
                     record.label_file_id = "another-label"
-            else:
+            elif meanwhile == "started":
                 set_running(sessions, draft["id"], timedelta(0))
+            else:
+                with sessions.begin() as session:
+                    session.execute(
+                        update(models.CardDraft)
+                        .where(models.CardDraft.id == uuid.UUID(str(draft["id"])))
+                        .values(submit_started_at=func.now())
+                    )
             return content
 
     client.app.dependency_overrides[cards.get_drive] = lambda: ChangedMeanwhile(  # type: ignore[attr-defined]
@@ -612,6 +623,103 @@ def test_result_for_replaced_label_does_not_land(
     assert len(uploaded(drive)) == 2
     [call] = journal(sessions)
     assert call.ok is True
+
+
+def test_removing_label_resets_recognition(
+    people: None, drive: FakeDrive, sessions: sessionmaker[Session]
+) -> None:
+    """Убрали этикетку — распознавание о фото, которого нет: сбрасывается, как
+    при замене. Проверка КБЖУ остаётся — числа в черновике те же."""
+    client = make_client(drive, FakePolza(answer(proteins="120", fats="<0,5")).transport())
+    draft = labelled(client)
+    assert recognize(client, draft["id"]).json()["recognition_status"] == "done"
+
+    reply = client.delete(photo_url(draft["id"]), headers=CSRF)
+
+    assert reply.status_code == 200
+    body = reply.json()
+    assert (body["recognition_status"], body["recognition_error"]) == (None, None)
+    assert body["warnings"] == list(
+        check_nutrients(Decimal("120"), None, Decimal("25"), Decimal("110"))
+    )
+    record = draft_row(sessions, draft["id"])
+    assert (record.recognition, record.recognition_warnings) == (None, [])
+
+
+def test_label_removed_while_model_reads_leaves_nothing_running(
+    people: None, drive: FakeDrive, sessions: sessionmaker[Session]
+) -> None:
+    """Повар убрал этикетку, пока модель её читала: итог не ложится, и «идёт»
+    не висит до предела — черновик сразу свободен."""
+    holder: dict[str, TestClient] = {}
+
+    def model(request: httpx.Request) -> httpx.Response:
+        client = holder["client"]
+        draft_id = current(client)["id"]  # type: ignore[index]
+        assert client.delete(photo_url(draft_id), headers=CSRF).status_code == 200
+        return answer()
+
+    client = make_client(drive, httpx.MockTransport(model))
+    holder["client"] = client
+    draft = labelled(client)
+
+    reply = recognize(client, draft["id"])
+
+    assert reply.status_code == 409
+    assert "убрали" in reply.json()["detail"]
+    record = draft_row(sessions, draft["id"])
+    assert (record.recognition_status, record.label_name) == (None, "")
+
+
+def test_result_for_changed_label_clears_its_own_running(
+    people: None, drive: FakeDrive, sessions: sessionmaker[Session]
+) -> None:
+    """Этикетку сменили в обход сброса распознавания (замена и удаление фото
+    сбрасывают его сами — это страховка): запуск, чей итог не лёг, снимает своё
+    «идёт», а не оставляет его висеть до предела."""
+
+    def model(request: httpx.Request) -> httpx.Response:
+        with sessions.begin() as session:
+            session.execute(
+                update(models.CardDraft)
+                .where(models.CardDraft.status == "active")
+                .values(label_file_id="another-label")
+            )
+        return answer()
+
+    client = make_client(drive, httpx.MockTransport(model))
+    draft = labelled(client)
+
+    reply = recognize(client, draft["id"])
+
+    assert reply.status_code == 409
+    assert "заменили" in reply.json()["detail"]
+    record = draft_row(sessions, draft["id"])
+    assert (record.recognition_status, record.recognition_started_at) == (None, None)
+    assert record.label_name == ""
+
+
+def test_recognition_waits_while_card_is_being_sent(
+    people: None, drive: FakeDrive, sessions: sessionmaker[Session]
+) -> None:
+    """Черновик уже уходит в лист: итог распознавания лёг бы в него и пропал.
+    409 — и модель не зовётся, бюджет не тратится."""
+    polza = FakePolza(answer())
+    client = make_client(drive, polza.transport())
+    draft = labelled(client)
+    with sessions.begin() as session:
+        session.execute(
+            update(models.CardDraft)
+            .where(models.CardDraft.id == uuid.UUID(str(draft["id"])))
+            .values(submit_started_at=func.now())
+        )
+
+    reply = recognize(client, draft["id"])
+
+    assert reply.status_code == 409
+    assert reply.json() == {"detail": "Карточка отправляется — подождите"}
+    assert polza.requests == []
+    assert journal(sessions) == []
 
 
 def test_cancel_during_recognition_is_404_and_journaled(

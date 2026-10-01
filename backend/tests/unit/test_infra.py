@@ -13,6 +13,7 @@ Supabase пулер и шлюз по умолчанию публикуются �
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -307,6 +308,40 @@ def test_draft_uploads_are_capped_before_login_check() -> None:
     timeout = re.search(r"^\s*proxy_read_timeout\s+(\d+)s;", body, re.MULTILINE)
     assert timeout and int(timeout.group(1)) >= 300, "отправка в лист идёт до минут"
     assert "add_header" not in body
+
+
+def test_recognize_takes_no_body() -> None:
+    """У распознавания тела нет — большое nginx не примет и не будет писать
+    во временный файл."""
+    body = _location_body("/api/cards/recognize/")
+
+    size = re.search(r"^\s*client_max_body_size\s+(\d+)k;", body, re.MULTILINE)
+    assert size and int(size.group(1)) <= 16
+
+
+@pytest.mark.parametrize(
+    ("path", "code", "detail"),
+    [
+        ("/api/cards/recognize/", 429, "Слишком часто — подождите минуту"),
+        ("/api/cards/drafts/", 413, "Фото больше 8 МБ — сфотографируйте ещё раз"),
+    ],
+)
+def test_nginx_refusals_on_card_paths_are_json(path: str, code: int, detail: str) -> None:
+    """Отказ самого nginx — тем же JSON ``{"detail": …}``, что у API: экран
+    показывает detail, а HTML-страница nginx ему ничего не скажет.
+
+    Через именованный location без ``add_header`` — иначе пропали бы CSP и
+    HSTS server (это проверяет и общий тест на add_header)."""
+    body = _location_body(path)
+    target = re.search(rf"^\s*error_page\s+{code}\s+=\s+(@\w+);", body, re.MULTILINE)
+    assert target, f"{path}: нет error_page {code} = @…"
+
+    named = _location_body(target.group(1))
+    assert re.search(r'^\s*default_type\s+"application/json; charset=utf-8";', named, re.M)
+    answer = re.search(rf"^\s*return\s+{code}\s+'(.*)';", named, re.MULTILINE)
+    assert answer, f"{target.group(1)}: нет return {code}"
+    assert json.loads(answer.group(1)) == {"detail": detail}
+    assert "add_header" not in named
 
 
 @pytest.mark.parametrize("path", ["/api/cards/recognize/", "/api/cards/drafts/"])

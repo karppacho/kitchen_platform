@@ -333,10 +333,12 @@ jobs:
       # Распознавание этикетки — вызов модели за деньги: зона llm пускает
       # запрос и три сверху (burst=3), пятый подряд — 429, а не 503. Черновики
       # карточек режут тело на 9 МБ ещё в nginx: до входа сервер его не читает.
-      - name: "Карточки: распознавание идёт к API с пределом частоты, большое фото — 413"
+      # Оба отказа — JSON с detail, как ответы API, и с заголовками
+      # безопасности server (именованные location без add_header).
+      - name: "Карточки: распознавание идёт к API с пределом частоты, большое фото — 413, отказы JSON"
         run: |
           recognize() {
-            curl -sk -o /dev/null -w '%{http_code}' -X POST \
+            curl -sk -D /tmp/h_rec.txt -o /tmp/b_rec.txt -w '%{http_code}' -X POST \
               --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/cards/recognize/x
           }
           for i in 1 2 3 4; do
@@ -345,10 +347,16 @@ jobs:
           done
           code=$(recognize)
           test "$code" = "429" || { echo "::error::пятый POST /api/cards/recognize/ подряд вернул $code, а не 429 (limit_req_status)"; exit 1; }
+          grep -qi '^content-type: application/json' /tmp/h_rec.txt || { echo "::error::429 распознавания — не JSON"; exit 1; }
+          grep -q '"detail"' /tmp/b_rec.txt || { echo "::error::в теле 429 распознавания нет detail"; exit 1; }
+          grep -qi '^strict-transport-security:' /tmp/h_rec.txt || { echo "::error::429 распознавания без HSTS — add_header в location?"; exit 1; }
           head -c 10485760 /dev/zero > /tmp/big_photo.bin
-          code=$(curl -sk -o /dev/null -w '%{http_code}' -X PUT --data-binary @/tmp/big_photo.bin \
+          code=$(curl -sk -D /tmp/h_big.txt -o /tmp/b_big.txt -w '%{http_code}' -X PUT --data-binary @/tmp/big_photo.bin \
             --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/cards/drafts/x/photos/label)
           test "$code" = "413" || { echo "::error::PUT 10 МБ в /api/cards/drafts/ вернул $code, а не 413 (client_max_body_size 9m)"; exit 1; }
+          grep -qi '^content-type: application/json' /tmp/h_big.txt || { echo "::error::413 черновиков — не JSON"; exit 1; }
+          grep -q '"detail"' /tmp/b_big.txt || { echo "::error::в теле 413 черновиков нет detail"; exit 1; }
+          grep -qi '^content-security-policy:' /tmp/h_big.txt || { echo "::error::413 черновиков без CSP — add_header в location?"; exit 1; }
 
       - name: "GET /api без слэша — 404"
         run: |

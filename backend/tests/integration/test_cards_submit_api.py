@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import math
+import time
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -28,7 +30,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 
-from kitchen.cards.submit import submit_window
+from kitchen.cards.recognize import STALE_AFTER
+from kitchen.cards.submit import (
+    IMPORT_GOOGLE_TIMEOUT,
+    IMPORT_LOCK_WAIT,
+    NOT_IMPORTED,
+    UNCONFIRMED,
+    submit_window,
+)
 from kitchen.config import Settings
 from kitchen.db import drafts as draft_store
 from kitchen.db import models
@@ -141,24 +150,23 @@ def make_client(
     config: Settings | None = None,
     writer: Callable[[], CardSheetWriter | None] | None = None,
     cycle: Callable[[], SyncCycle] | None = None,
-    real_writer: bool = False,
 ) -> TestClient:
-    """Приложение с фальшивыми Drive и таблицами; писатель и журнал — настоящие.
+    """Приложение с фальшивыми Drive и таблицами.
 
-    ``real_writer`` — писателя собирает само приложение из настроек (так
-    проверяется «таблица не настроена»)."""
+    Подменяется только вход в Google — ``sheets`` вместо ``GspreadClient``;
+    писателя, журнал и перенос в базу собирает само приложение, как в бою
+    (короткое ожидание замка и таймауты переноса — его), и оно же закрывает
+    вход после ответа. ``writer`` и ``cycle`` — подменить и их."""
     config = config or settings()
     app = create_app(config)
     app.dependency_overrides[cards.get_drive] = lambda: DriveClient(
         drive.session, folder_id=FOLDER_ID, timeout=(5, 30)
     )
-    if not real_writer:
-        app.dependency_overrides[cards.get_card_writer] = writer or (
-            lambda: CardSheetWriter(sheets, CARDS, DbJournal(sessions), hold=hold_limit(config))
-        )
-    app.dependency_overrides[cards.get_sync_cycle] = cycle or (
-        lambda: SyncCycle(SheetsReader(sheets, IDS), sessions)
-    )
+    app.state.google = lambda: sheets
+    if writer is not None:
+        app.dependency_overrides[cards.get_card_writer] = writer
+    if cycle is not None:
+        app.dependency_overrides[cards.get_sync_cycle] = cycle
     if user is not None:
         app.dependency_overrides[auth.current_user] = lambda: auth.CurrentUser(
             id=user, email="cook@example.com", display_name="Повар", roles=frozenset(roles)
@@ -295,6 +303,20 @@ def test_card_lands_in_free_row_with_drive_view_links(
     assert written[Q : R + 1] == ["", ""], "Q и R — колонки людей, их не пишем"
 
 
+def test_one_google_login_per_submit_closed_after_answer(
+    cook: TestClient, sheets: FakeSheetsClient
+) -> None:
+    """Писатель и перенос ходят одним входом в Google; перенос — с короткими
+    таймаутами; после ответа вход закрыт."""
+    draft = ready(cook)
+    closed = sheets.closed
+
+    assert submit(cook, draft["id"]).status_code == 200
+
+    assert sheets.timeouts == [IMPORT_GOOGLE_TIMEOUT]
+    assert sheets.closed == closed + 1
+
+
 def test_draft_is_submitted_and_card_is_in_database_right_after(
     cook: TestClient, drive: FakeDrive, sessions: sessionmaker[Session]
 ) -> None:
@@ -357,6 +379,36 @@ def test_repeat_is_already_written_without_second_row(
     assert len(journal(sessions)) == 1
 
 
+@pytest.mark.parametrize("in_database", [True, False], ids=["imported", "not-imported"])
+def test_repeat_does_not_go_to_google_and_tells_import_by_database(
+    cook: TestClient,
+    sheets: FakeSheetsClient,
+    sessions: sessionmaker[Session],
+    in_database: bool,
+) -> None:
+    """Повтор отправленного черновика — ни одного запроса к Google: строка из
+    журнала, «на сайте ли» — по базе. Иначе повтор после потерянного ответа
+    снова ждал бы перенос и мог не дождаться никогда."""
+    draft = ready(cook)
+    assert submit(cook, draft["id"]).json()["imported"] is True
+    if not in_database:
+        with sessions.begin() as session:
+            session.execute(
+                update(models.IngredientCard)
+                .where(models.IngredientCard.name == "Соус Барбекю")
+                .values(removed_at=func.now())
+            )
+    asked = len(book(sheets).calls)
+
+    again = submit(cook, draft["id"])
+
+    assert again.status_code == 200
+    assert book(sheets).calls[asked:] == [], "к Google — ни шага"
+    assert again.json()["already_written"] is True
+    assert again.json()["imported"] is in_database
+    assert (NOT_IMPORTED in again.json()["notes"]) is not in_database
+
+
 def test_two_submits_at_once(
     cook: TestClient, sheets: FakeSheetsClient, sessions: sessionmaker[Session]
 ) -> None:
@@ -370,7 +422,11 @@ def test_two_submits_at_once(
     after = submit(cook, draft["id"])
 
     assert [reply.status_code for reply in during] == [409]
-    assert during[0].json() == {"detail": "Карточка уже отправляется — подождите"}
+    assert (
+        during[0]
+        .json()["detail"]
+        .startswith("Карточка отправляется или отправка прервалась — попробуйте через")
+    )
     assert first.status_code == 200
     assert after.status_code == 200
     assert after.json()["already_written"] is True
@@ -507,9 +563,7 @@ def test_database_down_at_writers_queue_is_503(
 def test_sheet_not_configured_is_503(
     people: None, drive: FakeDrive, sheets: FakeSheetsClient, sessions: sessionmaker[Session]
 ) -> None:
-    client = make_client(
-        drive, sheets, sessions, config=settings(sheets_id_ingredient_cards=""), real_writer=True
-    )
+    client = make_client(drive, sheets, sessions, config=settings(sheets_id_ingredient_cards=""))
     draft = ready(client)
 
     reply = submit(client, draft["id"])
@@ -522,28 +576,21 @@ def test_sheet_not_configured_is_503(
 # ---------------------------------------------------------------------------
 # Перенос в базу — не часть записи
 # ---------------------------------------------------------------------------
-def test_import_lock_busy_still_200_with_imported_false(
-    people: None,
-    drive: FakeDrive,
-    sheets: FakeSheetsClient,
-    sessions: sessionmaker[Session],
+def test_import_lock_busy_answers_quickly_with_imported_false(
+    cook: TestClient, sheets: FakeSheetsClient, sessions: sessionmaker[Session]
 ) -> None:
-    """Импортный замок держит другой перенос дольше предела (55P03): строка
-    уже в листе — это успех; карточку перенесёт следующий цикл."""
-    client = make_client(
-        drive,
-        sheets,
-        sessions,
-        cycle=lambda: SyncCycle(
-            SheetsReader(sheets, IDS), sessions, lock_timeout=timedelta(milliseconds=200)
-        ),
-    )
-    draft = ready(client)
+    """Импортный замок занят (идёт перенос воркера или застрял ручной импорт)
+    дольше короткого ожидания — 55P03. Строка уже в листе — это успех, и повар
+    видит «Записано в строку N» за ~10 с, а не ждёт минуту или вечно;
+    карточку перенесёт воркер. Сборка переноса — боевая, из приложения."""
+    draft = ready(cook)
     importer = sessions()
     importer.begin()
     take_import_lock(importer)
     try:
-        reply = submit(client, draft["id"])
+        started = time.monotonic()
+        reply = submit(cook, draft["id"])
+        took = time.monotonic() - started
     finally:
         importer.rollback()
         importer.close()
@@ -551,7 +598,11 @@ def test_import_lock_busy_still_200_with_imported_false(
     assert reply.status_code == 200, reply.text
     body = reply.json()
     assert (body["row"], body["already_written"], body["imported"]) == (FREE_ROW, False, False)
-    assert any("на сайт пока не перенесена" in note for note in body["notes"])
+    assert NOT_IMPORTED in body["notes"]
+    # Граница — абсолютная, а не от константы: фронтенд ждёт отправку 60 с
+    # вместе с записью, и ответ «записано» обязан прийти задолго до этого.
+    assert 9 <= took < 20, f"ответ через {took:.1f} с"
+    assert timedelta(seconds=9) <= IMPORT_LOCK_WAIT <= timedelta(seconds=15)
     assert draft_row(sessions, draft["id"]).status == "submitted"
     assert line(sheets, FREE_ROW)[1] == "Соус Барбекю"
     assert card(sessions, "Соус Барбекю") is None
@@ -599,31 +650,117 @@ def test_writing_closed_by_ownership_rule_is_503(
     assert_still_active(sessions, draft["id"])
 
 
+def _database_gone(*args: object, **kwargs: object) -> bool:
+    raise OperationalError("update card_drafts", {}, Exception("server closed the connection"))
+
+
+@pytest.mark.parametrize("release_fails", [False, True], ids=["mark-only", "mark-and-release"])
 def test_row_written_but_draft_not_marked_tells_the_row_and_repeat_is_safe(
     cook: TestClient,
     sheets: FakeSheetsClient,
     sessions: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
+    release_fails: bool,
 ) -> None:
     """Строка легла, а база не ответила, когда черновик отмечался отправленным:
-    повару — номер строки и «нажмите ещё раз»; повтор второй строки не даёт."""
+    повару — номер строки и «нажмите ещё раз»; повтор второй строки не даёт.
+
+    Упала база целиком — не снялась и отметка «отправка идёт» (так же
+    выглядит перезапуск контейнера посреди отправки). Повтор не ждёт её
+    предела 16 минут: запись по ключу в журнале состоялась — черновик
+    доводится до конца коротким путём, без записи."""
     draft = ready(cook)
-    real = draft_store.mark_submitted
+    real_mark, real_end = draft_store.mark_submitted, draft_store.end_submit
 
-    def database_gone(*args: object, **kwargs: object) -> bool:
-        raise OperationalError("update card_drafts", {}, Exception("server closed the connection"))
-
-    monkeypatch.setattr(draft_store, "mark_submitted", database_gone)
+    monkeypatch.setattr(draft_store, "mark_submitted", _database_gone)
+    if release_fails:
+        monkeypatch.setattr(draft_store, "end_submit", _database_gone)
     first = submit(cook, draft["id"])
-    monkeypatch.setattr(draft_store, "mark_submitted", real)
+    monkeypatch.setattr(draft_store, "mark_submitted", real_mark)
+    monkeypatch.setattr(draft_store, "end_submit", real_end)
+    stuck = draft_row(sessions, draft["id"]).submit_started_at is not None
+    asked = len(book(sheets).calls)
     again = submit(cook, draft["id"])
 
     assert first.status_code == 503
     assert f"Карточка записана в строку {FREE_ROW}" in first.json()["detail"]
-    assert again.status_code == 200
+    assert stuck is release_fails
+    assert again.status_code == 200, again.text
     assert (again.json()["row"], again.json()["already_written"]) == (FREE_ROW, True)
     assert writes(sheets) == 1
-    assert draft_row(sessions, draft["id"]).status == "submitted"
+    record = draft_row(sessions, draft["id"])
+    assert (record.status, record.submitted_row, record.submit_started_at) == (
+        "submitted",
+        FREE_ROW,
+        None,
+    )
+    if release_fails:
+        assert book(sheets).calls[asked:] == [], "доведение — из журнала, без Google"
+
+
+def test_journal_trouble_after_the_write_asks_to_repeat(
+    people: None,
+    drive: FakeDrive,
+    sheets: FakeSheetsClient,
+    sessions: sessionmaker[Session],
+) -> None:
+    """База не ответила, когда писатель закрывал запись журнала, — а строка уже
+    легла (журнал ``pending``). Повару не «сервер не может записать», а
+    «нажмите ещё раз»: повтор перечитает строку и второй не напишет."""
+
+    class JournalFailsOnce(DbJournal):
+        failed = False
+
+        def finish(self, write_id: int, **changes: object) -> None:  # type: ignore[override]
+            if not JournalFailsOnce.failed:
+                JournalFailsOnce.failed = True
+                raise OperationalError("update sheet_writes", {}, Exception("connection lost"))
+            super().finish(write_id, **changes)  # type: ignore[arg-type]
+
+    client = make_client(
+        drive,
+        sheets,
+        sessions,
+        writer=lambda: CardSheetWriter(sheets, CARDS, JournalFailsOnce(sessions)),
+    )
+    draft = ready(client)
+
+    first = submit(client, draft["id"])
+    [write] = journal(sessions)
+    again = submit(client, draft["id"])
+
+    assert first.status_code == 502
+    assert first.json() == {"detail": UNCONFIRMED}
+    assert write.status == "pending"
+    assert again.status_code == 200, again.text
+    assert (again.json()["row"], again.json()["already_written"]) == (FREE_ROW, True)
+    assert writes(sheets) == 1
+
+
+def test_submit_waits_for_running_recognition(
+    cook: TestClient, sheets: FakeSheetsClient, sessions: sessionmaker[Session]
+) -> None:
+    """Пока модель читает этикетку, отправлять рано: её итог лёг бы в
+    черновик, уже ушедший в лист, и пропал. Зависшее «идёт» — не помеха."""
+    draft = ready(cook)
+
+    def running(ago: timedelta) -> None:
+        with sessions.begin() as session:
+            session.execute(
+                update(models.CardDraft)
+                .where(models.CardDraft.id == uuid.UUID(str(draft["id"])))
+                .values(recognition_status="running", recognition_started_at=func.now() - ago)
+            )
+
+    running(timedelta(seconds=5))
+    fresh = submit(cook, draft["id"])
+    running(STALE_AFTER + timedelta(minutes=1))
+    stale = submit(cook, draft["id"])
+
+    assert fresh.status_code == 409
+    assert fresh.json() == {"detail": "Дождитесь окончания распознавания"}
+    assert stale.status_code == 200, stale.text
+    assert writes(sheets) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +844,7 @@ def test_photos_and_cancel_wait_while_card_is_being_sent(
         during["replace"] = put_photo(cook, draft["id"], "package", JPEG_2)
         during["remove"] = cook.delete(photo_url(draft["id"], "before"), headers=CSRF)
         during["cancel"] = cook.delete(f"/api/cards/drafts/{draft['id']}", headers=CSRF)
+        during["edit"] = patch(cook, draft["id"], composition="другой состав")
 
     hook(sheets, meanwhile)
 
@@ -717,7 +855,11 @@ def test_photos_and_cancel_wait_while_card_is_being_sent(
         "replace": 409,
         "remove": 409,
         "cancel": 409,
+        "edit": 409,
     }
+    assert draft_row(sessions, draft["id"]).composition == "томатная паста, сахар", (
+        "правка не пропала молча: её не приняли, и повар это видел"
+    )
     assert {r.json()["detail"] for r in during.values()} == {"Карточка отправляется — подождите"}
     assert uploaded(drive) == files, "новое фото не загружалось"
     assert trashed(drive) == []
@@ -777,6 +919,11 @@ def test_stale_submit_mark_does_not_lock_the_draft(
     stale = submit(cook, draft["id"])
 
     assert fresh.status_code == 409
+    minutes = math.ceil((window - timedelta(seconds=10)) / timedelta(minutes=1))
+    assert fresh.json() == {
+        "detail": "Карточка отправляется или отправка прервалась — попробуйте через "
+        f"{minutes} минут"
+    }
     assert stale.status_code == 200, stale.text
 
 
