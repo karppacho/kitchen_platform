@@ -241,7 +241,7 @@ jobs:
       # прогонами через GitHub Actions — без него npm ci внутри Dockerfile
       # выполнялся бы заново на каждый PR.
       - name: Собрать образ nginx
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: infra/nginx/Dockerfile
