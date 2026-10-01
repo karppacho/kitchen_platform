@@ -5,6 +5,7 @@
   "lang": "ru",
   "start_url": "/dishes",
   "scope": "/",
+  "id": "/",
   "display": "standalone",
   "background_color": "#f2f2ef",
   "theme_color": "#fbfbf9",

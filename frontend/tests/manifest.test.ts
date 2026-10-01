@@ -14,6 +14,9 @@ test('манифест: имя, запуск с блюд, окно без адр
   expect(m.short_name).toBe('Кухня')
   expect(m.start_url).toBe('/dishes')
   expect(m.scope).toBe('/')
+  // id — постоянное имя приложения для браузера: без него оно выводится из
+  // start_url, и смена стартового экрана породила бы «второе» приложение.
+  expect(m.id).toBe('/')
   expect(m.display).toBe('standalone')
   expect(m.lang).toBe('ru')
   expect(m.background_color).toBe('#f2f2ef')
