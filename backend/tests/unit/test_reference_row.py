@@ -160,7 +160,7 @@ def test_weight_is_empty_for_kg_and_litre(unit: str) -> None:
         ("12,5", _D("0.125")),
         ("5%", _D("0.05")),
         ("0", _D("0")),
-        ("100", _D("1")),
+        ("99,9", _D("0.999")),
     ],
 )
 def test_losses_are_entered_in_percent_and_kept_as_share(raw: str, share: Decimal) -> None:
@@ -181,12 +181,17 @@ def test_losses_default_to_zero() -> None:
 
 
 @pytest.mark.parametrize("field", ["losses_unpacking", "losses_cutting", "losses_thermal"])
-@pytest.mark.parametrize("raw", ["-1", "100,5", "500"])
-def test_each_loss_is_from_0_to_100(field: str, raw: str) -> None:
+@pytest.mark.parametrize("raw", ["-1", "100", "100%", "100,5", "500"])
+def test_each_loss_is_from_0_to_below_100(field: str, raw: str) -> None:
+    """100 % потерь — от продукта ничего не остаётся.
+
+    Расчёт делит на (1 − потери): у калькулятора стоимость молча
+    становится нулём, у формул листа — «#ДЕЛ/0!». Поэтому 100 — отказ.
+    """
     errors = _errors(**{field: raw})
 
     assert set(errors) == {field}
-    assert "от 0 до 100" in errors[field]
+    assert "от 0 до 100 %, меньше 100" in errors[field]
 
 
 def test_loss_that_is_not_a_number_is_refused() -> None:
@@ -509,7 +514,10 @@ def test_refusals_explain_themselves_in_spec_words() -> None:
     assert NotFound.SHIFTED.message == (
         "Строки справочника сдвинуты относительно карточек — запись не сделана, проверьте лист ING"
     )
-    assert "запись не сделана" in NotFound.AMBIGUOUS.message
+    assert NotFound.AMBIGUOUS.message == (
+        "Согласованных карточек с таким названием несколько — не понять, какая строка "
+        "справочника относится к этой. Запись не сделана: переименуйте одну из карточек"
+    )
 
 
 # ---------------------------------------------------------------------------
