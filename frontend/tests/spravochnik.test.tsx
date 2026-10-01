@@ -209,16 +209,20 @@ test('отсутствие карточки — видимый сигнал', as
   expect(screen.getByLabelText('карточка есть')).toBeInTheDocument()
 })
 
-test('на 360 px остаются имя, цена и отметка карточки', async () => {
+test('на 360 px: имя, подпись «id · категория · ед.», цена и слова о карточке; заголовков таблицы нет', async () => {
+  // На телефоне категория и единица не пропадают — они живут в подписи
+  // строки под именем, а не в колонках: таблицы с шапкой на телефоне нет
+  // вовсе. «Сахаров» два; без сортировки список — в порядке ответа, первый
+  // — весовой (id 12, кг, без карточки).
   setViewport(360)
   narisovat()
-  await screen.findAllByText('Сахар')
+  const stroka = (await screen.findAllByText('Сахар'))[0]!.closest('li')!
 
-  expect(screen.getByText('100 ₽/кг')).toBeInTheDocument()
-  expect(screen.queryByText('Бакалея')).not.toBeInTheDocument()
-  // И колонки «Ед.» нет: единица и так стоит при цене («₽/кг»).
+  expect(stroka.querySelector('.stroka-podpis')).toHaveTextContent(/^12 · Бакалея · кг$/)
+  expect(within(stroka).getByText('100 ₽/кг')).toBeInTheDocument()
+  expect(stroka).toHaveTextContent('нет карточки')
   expect(screen.queryByText('Ед.')).not.toBeInTheDocument()
-  expect(screen.queryByText('кг')).not.toBeInTheDocument()
+  expect(screen.queryByRole('table')).not.toBeInTheDocument()
 })
 
 test('на 360 px строка справочника: подпись «id · категория · ед.», цена и слова о карточке; вес и статус — тапом', async () => {
