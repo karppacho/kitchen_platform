@@ -1,11 +1,48 @@
+/** Что, кроме текста, сервер кладёт в отказ — для экрана: у отказа правки —
+ *  поле, которое подсветить; у дубля карточки — строку листа; у неполного
+ *  черновика — чего не хватает (названиями для повара). */
+export type PodrobnostiOtkaza = {
+  field?: string | null
+  row?: number | null
+  missing?: readonly string[] | null
+}
+
 export class ApiError extends Error {
+  readonly field: string | null
+  readonly row: number | null
+  readonly missing: readonly string[] | null
+
   constructor(
     readonly status: number,
     message: string,
+    podrobnosti: PodrobnostiOtkaza = {},
   ) {
     super(message)
     this.name = 'ApiError'
+    this.field = podrobnosti.field ?? null
+    this.row = podrobnosti.row ?? null
+    this.missing = podrobnosti.missing ?? null
   }
+}
+
+const NET_SVYAZI = 'Нет связи с сервером'
+const NE_DOZHDALIS = 'Сервер не ответил вовремя — проверьте связь'
+
+/** Текст отказа, у которого нет своего текста: тело не JSON (страница
+ *  nginx, сбой сервера до ответа). Экран может заменить его своим. */
+export const NE_POLUCHILOS = 'Не удалось получить данные'
+
+/** Частота запросов nginx — ждать минуту, а не до завтра: этим он
+ *  отличается от дневного лимита распознавания с тем же кодом 429. Тот же
+ *  текст nginx шлёт и сам, в JSON. */
+export const SLISHKOM_CHASTO = 'Слишком часто — подождите минуту'
+
+/** Свой текст на отказы nginx, у которых тело — его страница, а не JSON.
+ *  С круга 1 задачи 8 nginx отвечает и на них JSON, но старый конфиг или
+ *  чужой прокси по дороге могут вернуть страницу. */
+const TEKST_PO_KODU: Readonly<Record<number, string>> = {
+  413: 'Фото больше 8 МБ — сфотографируйте ещё раз',
+  429: SLISHKOM_CHASTO,
 }
 
 /** Исход продления.
@@ -54,12 +91,12 @@ function prodlit(): Promise<IshodProdleniya> {
         // кодом, который продлевает без заголовка. Лечится обновлением
         // страницы — так и говорим. Но 403 бывает и у отключённой учётки,
         // поэтому текст сервера, если он есть, важнее нашего.
-        const soobshchenie = await poyasnenie(otvet, OTKAZ_ZASHCHITY)
+        const soobshchenie = (await razobratOtkaz(otvet, OTKAZ_ZASHCHITY)).tekst
         return { itog: 'sboy', status: 403, soobshchenie }
       }
-      return { itog: 'sboy', status: otvet.status, soobshchenie: 'Не удалось получить данные' }
+      return { itog: 'sboy', status: otvet.status, soobshchenie: NE_POLUCHILOS }
     })
-    .catch((): IshodProdleniya => ({ itog: 'sboy', status: 0, soobshchenie: 'Нет связи с сервером' }))
+    .catch((): IshodProdleniya => ({ itog: 'sboy', status: 0, soobshchenie: NET_SVYAZI }))
     .finally(() => {
       // Сбрасываем независимо от исхода: следующий запрос обязан суметь
       // продлиться заново, а не унаследовать чужой сбой навсегда.
@@ -68,17 +105,86 @@ function prodlit(): Promise<IshodProdleniya> {
   return prodlenie
 }
 
-async function poyasnenie(
-  otvet: Response,
-  zapas = 'Не удалось получить данные',
-): Promise<string> {
+type Otkaz = { tekst: string; podrobnosti: PodrobnostiOtkaza }
+
+async function razobratOtkaz(otvet: Response, zapas = NE_POLUCHILOS): Promise<Otkaz> {
   try {
-    const telo = (await otvet.json()) as { detail?: unknown }
-    if (typeof telo.detail === 'string') return telo.detail
+    const telo = (await otvet.json()) as {
+      detail?: unknown
+      field?: unknown
+      row?: unknown
+      missing?: unknown
+    }
+    if (typeof telo.detail === 'string') {
+      const { field, row, missing } = telo
+      return {
+        tekst: telo.detail,
+        podrobnosti: {
+          field: typeof field === 'string' ? field : null,
+          row: typeof row === 'number' ? row : null,
+          missing:
+            Array.isArray(missing) && missing.every((m) => typeof m === 'string') ? missing : null,
+        },
+      }
+    }
   } catch {
     // Тело не JSON — бывает у 502 от nginx. Это не повод падать.
   }
-  return zapas
+  return { tekst: TEKST_PO_KODU[otvet.status] ?? zapas, podrobnosti: {} }
+}
+
+/**
+ * Сигнал запроса: отмена вызывающим и истёкший срок — в одном.
+ *
+ * Своими руками, без AbortSignal.any и AbortSignal.timeout: первого нет в
+ * Safari до 17.4, второго — до 16, а у поваров телефоны разные.
+ */
+function storozh(signal: AbortSignal | null | undefined, srok: number | undefined) {
+  const ostanovka = new AbortController()
+  let istyok = false
+  const otmenit = () => ostanovka.abort()
+  if (signal?.aborted) ostanovka.abort()
+  else signal?.addEventListener('abort', otmenit, { once: true })
+  const taimer =
+    srok === undefined
+      ? undefined
+      : setTimeout(() => {
+          istyok = true
+          ostanovka.abort()
+        }, srok)
+  const oshibkaSvyazi = () => new ApiError(0, istyok ? NE_DOZHDALIS : NET_SVYAZI)
+  return {
+    signal: ostanovka.signal,
+    /** Ошибка связи: обрыв — «нет связи», вышел срок — «не ответил вовремя». */
+    oshibkaSvyazi,
+    /**
+     * Дождаться общего обещания, но не дольше срока и не после отмены.
+     * Само обещание не обрывается — его ждут и другие запросы.
+     */
+    dozhdatsya: <T,>(obeshchanie: Promise<T>): Promise<T> =>
+      new Promise<T>((gotovo, otkaz) => {
+        const stop = () => otkaz(oshibkaSvyazi())
+        if (ostanovka.signal.aborted) {
+          stop()
+          return
+        }
+        ostanovka.signal.addEventListener('abort', stop, { once: true })
+        obeshchanie.then(gotovo, otkaz).finally(() => {
+          ostanovka.signal.removeEventListener('abort', stop)
+        })
+      }),
+    snyat: () => {
+      clearTimeout(taimer)
+      signal?.removeEventListener('abort', otmenit)
+    },
+  }
+}
+
+export type Zapros = RequestInit & {
+  /** Сколько ждать ответа целиком, мс. Не дождались — ошибка связи
+   *  (status 0): кнопка не должна оставаться серой без срока, пока телефон
+   *  ловит сеть в подвале. */
+  srok?: number
 }
 
 /**
@@ -98,45 +204,59 @@ async function poyasnenie(
  * посадят refresh на 503 — шеф увидит «Не удалось получить данные» вместо
  * «Неверная почта или пароль», а при живой refresh-куке пароль ушёл бы на
  * сервер дважды за один клик.
+ *
+ * `srok` — сколько ждать ответа; `signal` — отмена вызывающим. И то и
+ * другое обрывает запрос и даёт ошибку связи (status 0).
  */
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function api<T>(path: string, { srok, signal, ...init }: Zapros = {}): Promise<T> {
   // Свои заголовки вызывающего сохраняем: вход, например, шлёт Content-Type.
   const zagolovki = new Headers(init.headers)
   if (IZMENYAYUSHCHIE.has((init.method ?? 'GET').toUpperCase())) zagolovki.set(ZASHCHITA, '1')
-  const zapros = (): Promise<Response> =>
-    fetch(`/api${path}`, { ...init, headers: zagolovki, credentials: 'include' })
-
-  let otvet: Response
-  try {
-    otvet = await zapros()
-  } catch {
-    throw new ApiError(0, 'Нет связи с сервером')
-  }
-
-  if (otvet.status === 401 && !path.startsWith('/auth/')) {
-    const ishod = await prodlit()
-    if (ishod.itog === 'ok') {
-      try {
-        otvet = await zapros()
-      } catch {
-        throw new ApiError(0, 'Нет связи с сервером')
-      }
-    } else if (ishod.itog === 'sboy') {
-      throw new ApiError(ishod.status, ishod.soobshchenie)
+  const strazh = storozh(signal, srok)
+  const zapros = async (): Promise<Response> => {
+    try {
+      return await fetch(`/api${path}`, {
+        ...init,
+        signal: strazh.signal,
+        headers: zagolovki,
+        credentials: 'include',
+      })
+    } catch {
+      throw strazh.oshibkaSvyazi()
     }
-    // itog === 'otkaz' — падаем дальше на общую обработку !otvet.ok:
-    // otvet всё ещё хранит исходный 401, и его тело идёт в сообщение.
   }
 
-  if (!otvet.ok) {
-    throw new ApiError(otvet.status, await poyasnenie(otvet))
-  }
-  if (otvet.status === 204) {
-    return undefined as T
-  }
   try {
-    return (await otvet.json()) as T
-  } catch {
-    throw new ApiError(otvet.status, 'Не удалось получить данные')
+    let otvet = await zapros()
+
+    if (otvet.status === 401 && !path.startsWith('/auth/')) {
+      // Срок — на весь запрос, с продлением: застрявшее в сети продление
+      // иначе держало бы кнопку серой сколько угодно.
+      const ishod = await strazh.dozhdatsya(prodlit())
+      if (ishod.itog === 'ok') {
+        otvet = await zapros()
+      } else if (ishod.itog === 'sboy') {
+        throw new ApiError(ishod.status, ishod.soobshchenie)
+      }
+      // itog === 'otkaz' — падаем дальше на общую обработку !otvet.ok:
+      // otvet всё ещё хранит исходный 401, и его тело идёт в сообщение.
+    }
+
+    if (!otvet.ok) {
+      const { tekst, podrobnosti } = await razobratOtkaz(otvet)
+      throw new ApiError(otvet.status, tekst, podrobnosti)
+    }
+    if (otvet.status === 204) {
+      return undefined as T
+    }
+    try {
+      return (await otvet.json()) as T
+    } catch {
+      // Тело оборвалось на полпути — это связь, а не нечитаемый ответ.
+      if (strazh.signal.aborted) throw strazh.oshibkaSvyazi()
+      throw new ApiError(otvet.status, NE_POLUCHILOS)
+    }
+  } finally {
+    strazh.snyat()
   }
 }

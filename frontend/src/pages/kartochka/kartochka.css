@@ -1,0 +1,283 @@
+/* Мастер «Новый ингредиент» — экран телефона в руке у плиты: одна колонка,
+   крупные поля и кнопки. На широком экране — та же колонка, не растянутая
+   на всю ширину. */
+
+.kartochka-razdel {
+  max-width: 560px;
+}
+
+.kartochka {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+}
+
+.kartochka p {
+  margin: 0;
+}
+
+.kartochka h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.kartochka-nomer,
+.kartochka-poyasnenie {
+  color: var(--priglushyonnyy);
+}
+
+.kartochka-svodka {
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* 16 px и больше: мельче iOS увеличивает страницу при фокусе в поле, и
+   повар потом ищет кнопки за краем экрана. */
+.kartochka-vvod {
+  width: 100%;
+  min-height: 48px;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font-size: 16px;
+}
+
+.kartochka-pole {
+  display: grid;
+  gap: var(--shag);
+}
+
+/* Состав бывает в пять строк — поле растёт вниз, не вбок. */
+textarea.kartochka-vvod {
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.kartochka-vvod[aria-invalid='true'] {
+  border-color: var(--oshibka);
+}
+
+/* Заголовок шага получает фокус при смене шага — для читалки экрана, а
+   рамка фокуса вокруг заголовка зрячему ни к чему. */
+.kartochka h2:focus {
+  outline: none;
+}
+
+/* Группа полей: КБЖУ, сроки. */
+.kartochka-gruppa {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+  margin: 0;
+  padding: calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+}
+
+.kartochka-gruppa legend {
+  padding: 0 var(--shag);
+  color: var(--priglushyonnyy);
+}
+
+/* Живая область есть всегда, даже пустая: спрятанную (display: none)
+   читалка экрана не слушает, и первое объявление пропало бы. */
+.kartochka-zhivaya {
+  display: grid;
+  gap: calc(var(--shag) * 2);
+}
+
+.kartochka-etiketka {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+}
+
+/* Фото этикетки — во всю ширину колонки, но не выше экрана телефона: под
+   ним должны быть видны кнопки. */
+.kartochka-foto {
+  display: block;
+  max-width: 100%;
+  max-height: 50vh;
+  object-fit: contain;
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+}
+
+/* Фото поменьше: на проверке под ним поля, которые не должны уехать ниже
+   края телефона; на шаге фото продукта таких слотов три. */
+.kartochka-foto-malenkoe {
+  max-height: 30vh;
+}
+
+.kartochka-zhdyom {
+  padding: calc(var(--shag) * 3);
+  border: 1px dashed var(--granitsa);
+  border-radius: var(--radius);
+}
+
+/* Кнопки — не меньше 44 px: в них попадают пальцем, иногда в перчатке. */
+.kartochka button {
+  min-height: 44px;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 4);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  color: var(--tekst);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.kartochka button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.kartochka-knopki {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 2);
+}
+
+/* Главное действие шага — справа и во всю оставшуюся ширину: до него
+   дотягивается большой палец. */
+.kartochka-knopki .kartochka-glavnaya {
+  flex: 1;
+  border-color: var(--aktsent);
+  background: var(--aktsent);
+  color: #fff;
+}
+
+.kartochka-knopki .kartochka-opasnaya {
+  flex: 1;
+  border-color: var(--oshibka);
+  color: var(--oshibka);
+}
+
+/* Варианты выбора — строки во всю ширину: касание по подписи выбирает. */
+.kartochka-varianty {
+  display: grid;
+  gap: var(--shag);
+}
+
+.kartochka-varianty label {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--shag) * 3);
+  min-height: 44px;
+  padding: 0 calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.kartochka-varianty input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  flex: none;
+}
+
+.kartochka-podskazki {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kartochka-podskazki button {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.kartochka-oshibka {
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-left: 3px solid var(--oshibka);
+  background: var(--oshibka-fon);
+  color: var(--tekst);
+}
+
+/* Замечание не запрещает идти дальше — цвет внимания, а не ошибки. */
+.kartochka-zamechanie {
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-left: 3px solid var(--vnimanie);
+  background: var(--vnimanie-fon);
+}
+
+.kartochka-zamechanie ul {
+  margin: var(--shag) 0 0;
+  padding-left: calc(var(--shag) * 5);
+}
+
+/* Блок отказа или замечания с кнопками перехода под текстом. */
+div.kartochka-oshibka,
+div.kartochka-zamechanie {
+  display: grid;
+  gap: calc(var(--shag) * 2);
+}
+
+.kartochka-zamechanie .kartochka-perekhody {
+  margin: 0;
+  padding-left: 0;
+}
+
+/* Оговорки сервера после записи — списком, каждая своей строкой. */
+ul.kartochka-zamechanie,
+ul.kartochka-poyasnenie {
+  display: grid;
+  gap: var(--shag);
+  margin: 0;
+  padding-left: calc(var(--shag) * 7);
+}
+
+/* «Да» / «Отбракован» — две крупные кнопки рядом: ответ одним касанием. */
+.kartochka-otvety {
+  display: flex;
+  gap: calc(var(--shag) * 2);
+}
+
+.kartochka .kartochka-otvety button {
+  flex: 1;
+  min-height: 56px;
+}
+
+.kartochka .kartochka-otvety button[aria-pressed='true'] {
+  border-color: var(--aktsent);
+  box-shadow: inset 0 0 0 1px var(--aktsent);
+}
+
+/* Сводка итога: название поля над значением, длинное переносится. */
+.kartochka-svodka-spisok {
+  display: grid;
+  gap: calc(var(--shag) * 2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kartochka-svodka-spisok li {
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+/* Описание набрано с переносами строк — так и показывается. */
+.kartochka-svodka-spisok b {
+  white-space: pre-line;
+}
+
+.kartochka-horosho {
+  color: var(--aktsent);
+}
+
+.kartochka-podtverzhdenie {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+  padding: calc(var(--shag) * 3);
+  border: 1px solid var(--oshibka);
+  border-radius: var(--radius);
+  background: var(--oshibka-fon);
+}
