@@ -1,0 +1,158 @@
+/* Мастер «Новый ингредиент» — экран телефона в руке у плиты: одна колонка,
+   крупные поля и кнопки. На широком экране — та же колонка, не растянутая
+   на всю ширину. */
+
+.kartochka-razdel {
+  max-width: 560px;
+}
+
+.kartochka {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+}
+
+.kartochka p {
+  margin: 0;
+}
+
+.kartochka h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.kartochka-nomer,
+.kartochka-poyasnenie {
+  color: var(--priglushyonnyy);
+}
+
+.kartochka-svodka {
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+/* 16 px и больше: мельче iOS увеличивает страницу при фокусе в поле, и
+   повар потом ищет кнопки за краем экрана. */
+.kartochka-vvod {
+  width: 100%;
+  min-height: 48px;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font-size: 16px;
+}
+
+.kartochka-pole {
+  display: grid;
+  gap: var(--shag);
+}
+
+/* Кнопки — не меньше 44 px: в них попадают пальцем, иногда в перчатке. */
+.kartochka button {
+  min-height: 44px;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 4);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  color: var(--tekst);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.kartochka button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.kartochka-knopki {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 2);
+}
+
+/* Главное действие шага — справа и во всю оставшуюся ширину: до него
+   дотягивается большой палец. */
+.kartochka-knopki .kartochka-glavnaya {
+  flex: 1;
+  border-color: var(--aktsent);
+  background: var(--aktsent);
+  color: #fff;
+}
+
+.kartochka-knopki .kartochka-opasnaya {
+  flex: 1;
+  border-color: var(--oshibka);
+  color: var(--oshibka);
+}
+
+/* Варианты выбора — строки во всю ширину: касание по подписи выбирает. */
+.kartochka-varianty {
+  display: grid;
+  gap: var(--shag);
+}
+
+.kartochka-varianty label {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--shag) * 3);
+  min-height: 44px;
+  padding: 0 calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.kartochka-varianty input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  flex: none;
+}
+
+.kartochka-podskazki {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kartochka-podskazki button {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.kartochka-oshibka {
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-left: 3px solid var(--oshibka);
+  background: var(--oshibka-fon);
+  color: var(--tekst);
+}
+
+/* Замечание не запрещает идти дальше — цвет внимания, а не ошибки. */
+.kartochka-zamechanie {
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-left: 3px solid var(--vnimanie);
+  background: var(--vnimanie-fon);
+}
+
+.kartochka-zamechanie ul {
+  margin: var(--shag) 0 0;
+  padding-left: calc(var(--shag) * 5);
+}
+
+.kartochka-horosho {
+  color: var(--aktsent);
+}
+
+.kartochka-podtverzhdenie {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+  padding: calc(var(--shag) * 3);
+  border: 1px solid var(--oshibka);
+  border-radius: var(--radius);
+  background: var(--oshibka-fon);
+}

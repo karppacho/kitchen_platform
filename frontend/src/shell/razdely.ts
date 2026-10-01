@@ -9,18 +9,31 @@
 export type Razdel = {
   put: string
   nazvanie: string
+  /** Кому раздел виден — коды ролей, как их отдаёт /api/me. Те же, что
+   *  у ручек раздела на сервере: пункт, который ответит отказом 403,
+   *  показывать незачем. */
+  roli: readonly string[]
   /** Заполнено — раздел ещё не сделан, открывается заглушкой. */
   faza?: string
   opisanie?: string
 }
 
+/** Справочник, блюда, сверка — с ценами и маржой. Сервер отдаёт их только
+ *  этим ролям; будущие разделы о ценах и меню — им же, пока их не сделали. */
+const S_TSENAMI = ['chef', 'developer', 'commerce'] as const
+
+/** Ручки карточек ингредиентов — повар, шеф, разработчик. */
+const KARTOCHKI = ['cook', 'chef', 'developer'] as const
+
 export const RAZDELY: Razdel[] = [
-  { put: '/ingredients', nazvanie: 'Справочник' },
-  { put: '/dishes', nazvanie: 'Блюда' },
-  { put: '/reconciliation', nazvanie: 'Сверка справочника' },
+  { put: '/ingredients', nazvanie: 'Справочник', roli: S_TSENAMI },
+  { put: '/dishes', nazvanie: 'Блюда', roli: S_TSENAMI },
+  { put: '/reconciliation', nazvanie: 'Сверка справочника', roli: S_TSENAMI },
+  { put: '/cards', nazvanie: 'Новый ингредиент', roli: KARTOCHKI },
   {
     put: '/pricing',
     nazvanie: 'Расчётка',
+    roli: S_TSENAMI,
     faza: 'фаза 3',
     opisanie:
       'Сводная таблица, по которой коммерческий отдел назначает розничные цены: ' +
@@ -28,16 +41,9 @@ export const RAZDELY: Razdel[] = [
       'когда откроется запись в листы.',
   },
   {
-    put: '/cards',
-    nazvanie: 'Карточки ингредиентов',
-    faza: 'фаза 3',
-    opisanie:
-      'Пошаговый поток для повара: снять этикетку телефоном, распознать состав ' +
-      'и сроки, поправить, сфотографировать продукт, отправить на согласование.',
-  },
-  {
     put: '/chat',
     nazvanie: 'Чат с ассистентом',
+    roli: S_TSENAMI,
     faza: 'фаза 3',
     opisanie:
       'Свободный вопрос текстом: «посчитай UC чизбургера», «что подорожает, если ' +
@@ -47,6 +53,7 @@ export const RAZDELY: Razdel[] = [
   {
     put: '/competitors',
     nazvanie: 'Конкуренты',
+    roli: S_TSENAMI,
     faza: 'фаза 4',
     opisanie:
       'Еженедельный срез меню восьми сайтов и история изменений цен. В архиве ' +
@@ -55,9 +62,21 @@ export const RAZDELY: Razdel[] = [
   {
     put: '/tastings',
     nazvanie: 'Дегустации',
+    roli: S_TSENAMI,
     faza: 'фаза 4',
     opisanie:
       'Слепые дегустации: жюри заходят по ссылке без учётной записи и оценивают ' +
       'с телефона, держа в другой руке образец. Шефу — экран прогресса.',
   },
 ]
+
+/**
+ * Разделы, которые видит человек с этими ролями, — объединение по всем его
+ * ролям. Фильтр только по ролям: будущие разделы (`faza`) остаются, их
+ * отсеивает тот, кому они не нужны (вкладки телефона), а меню показывает
+ * заглушками. Одна функция на меню, вкладки и маршруты — чтобы пункт,
+ * которого нет в меню, не открывался и по адресу.
+ */
+export function dostupnye(razdely: Razdel[], roli: readonly string[]): Razdel[] {
+  return razdely.filter((razdel) => razdel.roli.some((rol) => roli.includes(rol)))
+}

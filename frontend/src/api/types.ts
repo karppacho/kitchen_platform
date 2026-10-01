@@ -109,3 +109,107 @@ export type SyncStatus = {
   stale: boolean
   books: SyncBook[]
 }
+
+/** Шаг мастера «Новый ингредиент», как его хранит черновик на сервере.
+ *  Порядок — `SHAGI` в api/kartochki.ts («Шаг N из 9»). */
+export type Shag =
+  | 'supplier'
+  | 'category'
+  | 'name'
+  | 'label'
+  | 'review'
+  | 'approval'
+  | 'photos'
+  | 'description'
+  | 'summary'
+
+export type VidFoto = 'label' | 'package' | 'before' | 'after'
+
+/** Согласован ли продукт — ровно то, что ляжет в колонку листа. */
+export type Soglasovanie = 'Да' | 'Отбракован'
+
+/**
+ * Незаконченная карточка повара — черновик на сервере, один активный на
+ * повара. Ответ GET /api/cards/drafts/current и всех правок.
+ */
+export type Draft = {
+  id: string
+  status: string
+  step: Shag
+  supplier: string
+  category: string
+  name: string
+  label_name: string
+  manufacturer: string
+  composition: string
+  /** КБЖУ на 100 г — строками, без хвостовых нулей («12.5», «100»). */
+  protein: string | null
+  fat: string | null
+  carbs: string | null
+  kcal: string | null
+  shelf_life_sealed: string
+  shelf_life_defrost: string
+  shelf_life_after: string
+  defrost_conditions: string
+  description: string
+  approval: Soglasovanie | null
+  /** Какие фото есть. Сами фото — только через прокси сервера. */
+  photos: Record<VidFoto, boolean>
+  /** `running` — распознавание идёт, черновик надо опрашивать. */
+  recognition_status: 'running' | 'done' | 'failed' | null
+  recognition_error: string | null
+  warnings: string[]
+  /** Чего не хватает для отправки — словами для повара. */
+  missing: string[]
+  created_at: string
+  updated_at: string
+}
+
+/** Правка черновика: меняются только переданные поля. `null` в тексте —
+ *  пусто, в КБЖУ и согласовании — «нет». */
+export type DraftPatch = {
+  step?: Shag
+  supplier?: string | null
+  category?: string | null
+  name?: string | null
+  label_name?: string | null
+  manufacturer?: string | null
+  composition?: string | null
+  protein?: string | null
+  fat?: string | null
+  carbs?: string | null
+  kcal?: string | null
+  shelf_life_sealed?: string | null
+  shelf_life_defrost?: string | null
+  shelf_life_after?: string | null
+  defrost_conditions?: string | null
+  description?: string | null
+  approval?: Soglasovanie | null
+}
+
+/** Варианты выбора — частые первыми. «Другая…» сервер не отдаёт: это
+ *  действие экрана, а не категория. */
+export type CardOptions = {
+  categories: string[]
+  suppliers: string[]
+}
+
+export type CardHit = {
+  name: string
+  supplier: string
+}
+
+/**
+ * Есть ли уже такое название. Похожие ищутся, только когда точных нет.
+ *
+ * - `cards.exact` — дубль в листе: такую строку не запишут;
+ * - `hidden` — карточки, убранные из листа: имя свободно, но новая строка
+ *   вернёт на сайт старую карточку со старыми связями;
+ * - `reference` — имена справочника, только имена: взяв его, карточка
+ *   склеится с позицией сама.
+ */
+export type NameCheck = {
+  cards: { exact: CardHit[]; similar: CardHit[] }
+  hidden: { exact: CardHit[]; similar: CardHit[] }
+  reference: { exact: string[]; similar: string[] }
+}
