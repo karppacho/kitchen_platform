@@ -31,6 +31,8 @@ export type ZagruzkaSnimka = {
   oshibka: string | null
   /** Только что выбранное фото, уменьшенное, — адресом data:. */
   prevyu: string | null
+  /** Забыть выбранное здесь фото и отказ: фото из слота убрали. */
+  sbrosit: () => void
 }
 
 function tekstOtkazaZagruzki(oshibka: unknown): string {
@@ -97,6 +99,11 @@ export function useZagruzkaSnimka(
     sostoyanie,
     oshibka: neGotovo ?? (zagruzka.isError ? tekstOtkazaZagruzki(otkaz) : null),
     prevyu: gotovoe?.prevyu ?? null,
+    sbrosit: () => {
+      zagruzka.reset()
+      zadatGotovoe(null)
+      zadatNeGotovo(null)
+    },
   }
 }
 

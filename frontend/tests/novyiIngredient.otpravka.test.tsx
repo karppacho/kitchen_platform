@@ -6,6 +6,7 @@ import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 
+import { KLYUCH_CHERNOVIKA } from '../src/api/kartochki'
 import type { Draft, DraftPatch, Shag, Submitted } from '../src/api/types'
 import { App } from '../src/App'
 import { podmenitBrauzer, podmenitFormData, snimok } from './podmenaFoto'
@@ -79,8 +80,18 @@ let sozdano: number
 /** Ответы по одному на запрос; кончились — обычный ответ «сервера». */
 let otvetyZagruzki: Otvet[]
 let otvetyOtpravki: ('obryv' | Otvet)[]
+let otvetyUdaleniya: Otvet[]
+let udaleniya: { vid: string; zashchita: string | null }[]
 /** Строка, в которую легла карточка; повтор отправки — та же строка. */
 let stroka: number | null
+/** Сколько раз «сервер» менял черновик фото — для времени правки. */
+let pravokFoto: number
+
+/** Время правки — растёт с каждой правкой фото, с долями секунды, как у базы. */
+function vremyaPravki(): string {
+  pravokFoto += 1
+  return `2026-10-01T09:00:${String(pravokFoto).padStart(2, '0')}.123456Z`
+}
 
 /** Карточка в листе: ответ отправки. Повтор — та же строка, второй нет. */
 function zapisano(chastichno: Partial<Submitted> = {}): Response {
@@ -152,7 +163,22 @@ const server = setupServer(
     })
     const svoi = await otvetyZagruzki.shift()?.()
     if (svoi) return svoi
-    chernovik = { ...chernovik!, photos: { ...chernovik!.photos, [String(params.vid)]: true } }
+    chernovik = {
+      ...chernovik!,
+      photos: { ...chernovik!.photos, [String(params.vid)]: true },
+      updated_at: vremyaPravki(),
+    }
+    return HttpResponse.json(chernovik)
+  }),
+  http.delete('/api/cards/drafts/:id/photos/:vid', async ({ request, params }) => {
+    udaleniya.push({ vid: String(params.vid), zashchita: request.headers.get('X-Kitchen-Csrf') })
+    const svoi = await otvetyUdaleniya.shift()?.()
+    if (svoi) return svoi
+    chernovik = {
+      ...chernovik!,
+      photos: { ...chernovik!.photos, [String(params.vid)]: false },
+      updated_at: vremyaPravki(),
+    }
     return HttpResponse.json(chernovik)
   }),
   http.post('/api/cards/drafts/:id/submit', async ({ request, params }) => {
@@ -179,7 +205,10 @@ beforeEach(() => {
   sozdano = 0
   otvetyZagruzki = []
   otvetyOtpravki = []
+  otvetyUdaleniya = []
+  udaleniya = []
   stroka = null
+  pravokFoto = 0
   brauzer = podmenitBrauzer()
 })
 afterEach(() => {
@@ -375,9 +404,10 @@ test('в итоге видно, чего не хватает: «Отправит
 
 test('успех — «Записано в таблицу, строка N», «Добавить ещё» начинает новую карточку', async () => {
   const { queries } = await prodolzhit(chernovikNa('summary', { description: 'Для пиццы' }))
-  // Справочник и сверка уже в кэше — после отправки они устарели.
+  // Справочник, сверка и подсказки уже в кэше — после отправки они устарели.
   queries.setQueryData(['reconciliation'], { total: 0, linked: 0, needs_human: 0, rows: [] })
   queries.setQueryData(['ingredients', { limit: 500 }], [])
+  queries.setQueryData(['kartochki', 'varianty'], { categories: ['Сыры'], suppliers: [] })
 
   // Что уйдёт в таблицу — видно до отправки.
   const svodka = screen.getByRole('list', { name: 'Карточка' })
@@ -397,11 +427,18 @@ test('успех — «Записано в таблицу, строка N», «�
   expect(otpravki).toEqual([{ id: ID, zashchita: '1' }])
   expect(queries.getQueryState(['reconciliation'])?.isInvalidated).toBe(true)
   expect(queries.getQueryState(['ingredients', { limit: 500 }])?.isInvalidated).toBe(true)
+  // Новый поставщик — в подсказках следующей карточки.
+  expect(queries.getQueryState(['kartochki', 'varianty'])?.isInvalidated).toBe(true)
+  // Черновик перечитан: он отправлен, на сервере его больше нет.
+  await waitFor(() => expect(queries.getQueryData(KLYUCH_CHERNOVIKA)).toBeNull())
+  expect(screen.getByRole('heading', { name: ZAPISANO })).toBeInTheDocument()
 
   await userEvent.click(knopka('Добавить ещё'))
 
   expect(await screen.findByText('Шаг 1 из 9')).toBeInTheDocument()
   expect(screen.getByRole('textbox', { name: 'Поставщик' })).toHaveValue('')
+  // «Добавить ещё» исчезла вместе с итогом — фокус на заголовке нового шага.
+  expect(screen.getByRole('heading', { name: 'Поставщик' })).toHaveFocus()
   expect(sozdano).toBe(1)
 })
 
@@ -420,6 +457,9 @@ test('дубль в таблице (409) — «Изменить название
   expect(await screen.findByRole('alert')).toHaveTextContent(
     '«Моцарелла» уже есть в таблице — строка 3.',
   )
+  // Повтор дал бы тот же отказ — главное и единственное действие одно.
+  expect(knopka('Изменить название')).toHaveClass('kartochka-glavnaya')
+  expect(screen.queryByRole('button', { name: /^Отправить/ })).not.toBeInTheDocument()
   await userEvent.click(knopka('Изменить название'))
 
   expect(await screen.findByText('Шаг 3 из 9')).toBeInTheDocument()
@@ -462,10 +502,10 @@ test('сервер не ответил (502 nginx, не JSON) — свой те�
 })
 
 test.each([
-  ['колонки сдвинулись', SDVIG],
-  ['таблица занята', ZANYATA],
-  ['не настроено', NE_NASTROENA],
-])('503 %s — текст сервера, отправка сама не повторяется', async (_, tekst) => {
+  ['колонки сдвинулись', SDVIG, false],
+  ['таблица занята', ZANYATA, true],
+  ['не настроено', NE_NASTROENA, false],
+])('503 %s — текст сервера, отправка сама не повторяется', async (_, tekst, glavnaya) => {
   const { polzovatel, vperyod } = chasy()
   otvetyOtpravki = [() => HttpResponse.json({ detail: tekst }, { status: 503 })]
   await prodolzhit(chernovikNa('summary'), polzovatel)
@@ -475,8 +515,12 @@ test.each([
   expect(await screen.findByRole('alert')).toHaveTextContent(tekst)
   await vperyod(120_000)
   expect(otpravki).toHaveLength(1)
-  // Повар повторит позже сам — черновик на месте.
-  expect(knopka('Отправить ещё раз')).toBeEnabled()
+  // Повар повторит позже сам — черновик на месте. Где нужен шеф или
+  // администратор, повтор — не главное действие: сам по себе он не поможет.
+  const povtor = knopka('Отправить ещё раз')
+  expect(povtor).toBeEnabled()
+  if (glavnaya) expect(povtor).toHaveClass('kartochka-glavnaya')
+  else expect(povtor).not.toHaveClass('kartochka-glavnaya')
   expect(screen.getByText('Шаг 9 из 9')).toBeInTheDocument()
 })
 
@@ -555,12 +599,16 @@ test('двойное касание «Отправить» — один запр
 test('обрыв связи и срок 60 с — та же отправка повторяется сама', async () => {
   const { polzovatel, vperyod } = chasy()
   otvetyOtpravki = [
+    // Запрос не дошёл до сервера: связь оборвалась сразу.
     'obryv',
     async () => {
-      // Сервер записал, а ответ не дошёл: телефон ушёл из сети.
+      // Дошёл, сервер записал строку, а ответ не дошёл: телефон ушёл из сети.
+      zapisano()
       await delay('infinite')
       return undefined
     },
+    // Третья попытка — повтор уже записанной: та же строка, второй нет.
+    () => zapisano({ already_written: true }),
   ]
   await prodolzhit(chernovikNa('summary'), polzovatel)
 
@@ -636,4 +684,267 @@ test('оговорки сервера для шефа — повару как е
   expect(await screen.findByRole('heading', { name: ZAPISANO })).toBeInTheDocument()
   expect(screen.getByText(pravkiNePopali).closest('.kartochka-zamechanie')).not.toBeNull()
   expect(screen.getByText(tablitsuMenyali).closest('.kartochka-zamechanie')).not.toBeNull()
+})
+
+// ---------------------------------------------------------------------------
+// Круг правок 1: своя отправка ещё пишет, оборванное тело, удаление фото,
+// опоздавший ответ, «Назад» и отказ у описания
+// ---------------------------------------------------------------------------
+
+const OTPRAVLYAETSYA_17 =
+  'Карточка отправляется или отправка прервалась — попробуйте через 17 минут'
+const ZAPISYVAETSYA = 'Карточка ещё записывается — ждём ответа таблицы…'
+
+test('обрыв, а повтор застал свою же отправку (409) — ждём таблицу и показываем строку', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyOtpravki = [
+    // Связь оборвалась, пока сервер пишет строку (это 3–15 с).
+    'obryv',
+    // Повтор через 2 с застаёт её ещё идущей: отметка «отправляется» свежая.
+    () => HttpResponse.json({ detail: OTPRAVLYAETSYA_17 }, { status: 409 }),
+    // Первая закончилась — повтор отвечает её строкой.
+    () => zapisano({ already_written: true }),
+  ]
+  await prodolzhit(chernovikNa('summary'), polzovatel)
+
+  await polzovatel.click(knopka('Отправить в таблицу'))
+  await screen.findByText(/попытка 2 из 3/)
+  await vperyod(2_000)
+
+  // Не «ждите 17 минут»: это наша же отправка, она вот-вот закончится.
+  expect(await screen.findByText(ZAPISYVAETSYA)).toBeInTheDocument()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.queryByText(/17 минут/)).not.toBeInTheDocument()
+  expect(knopka('Отправить в таблицу')).toBeDisabled()
+
+  await vperyod(5_000)
+
+  expect(await screen.findByRole('heading', { name: ZAPISANO })).toBeInTheDocument()
+  expect(otpravki.map((o) => o.id)).toEqual([ID, ID, ID])
+})
+
+test('своя отправка не кончилась и за полминуты — текст сервера', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyOtpravki = [
+    'obryv',
+    ...Array.from(
+      { length: 7 },
+      () => () => HttpResponse.json({ detail: OTPRAVLYAETSYA_17 }, { status: 409 }),
+    ),
+  ]
+  await prodolzhit(chernovikNa('summary'), polzovatel)
+
+  await polzovatel.click(knopka('Отправить в таблицу'))
+  await screen.findByText(/попытка 2 из 3/)
+  await vperyod(2_000)
+  await screen.findByText(ZAPISYVAETSYA)
+  for (let raz = 0; raz < 6; raz += 1) await vperyod(5_000)
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(OTPRAVLYAETSYA_17)
+  // Обрыв, повтор и шесть ожиданий по 5 с — и больше сами не повторяем.
+  expect(otpravki).toHaveLength(8)
+  await vperyod(60_000)
+  expect(otpravki).toHaveLength(8)
+  expect(knopka('Отправить ещё раз')).toBeEnabled()
+})
+
+test('ответ отправки оборвался посреди тела — это обрыв: повтор показывает строку', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyOtpravki = [
+    () => {
+      // Строка легла, а ответ дошёл не целиком.
+      zapisano()
+      return new HttpResponse('{"row": 12', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    },
+    () => zapisano({ already_written: true }),
+  ]
+  await prodolzhit(chernovikNa('summary'), polzovatel)
+
+  await polzovatel.click(knopka('Отправить в таблицу'))
+  expect(await screen.findByText(/попытка 2 из 3/)).toBeInTheDocument()
+  await vperyod(2_000)
+
+  expect(await screen.findByRole('heading', { name: ZAPISANO })).toBeInTheDocument()
+  expect(screen.queryByText('Не удалось получить данные')).not.toBeInTheDocument()
+  expect(otpravki).toHaveLength(2)
+})
+
+test('пока идёт отправка, перечитанное «черновика нет» не уводит с итога', async () => {
+  const otvet = otlozhennyi()
+  otvetyOtpravki = [
+    async () => {
+      // Строка легла, черновик отмечен отправленным — а ответ ещё в пути.
+      chernovik = null
+      await otvet.zhdat
+      return undefined
+    },
+  ]
+  const { queries } = await prodolzhit(chernovikNa('summary'))
+
+  await userEvent.click(knopka('Отправить в таблицу'))
+  await screen.findByText(/Отправляем карточку в таблицу/)
+  await waitFor(() => expect(chernovik).toBeNull())
+  // Повар вернулся во вкладку — черновик перечитывается и приходит «нет».
+  await queries.invalidateQueries({ queryKey: KLYUCH_CHERNOVIKA })
+  await waitFor(() => expect(queries.isFetching({ queryKey: KLYUCH_CHERNOVIKA })).toBe(0))
+
+  expect(screen.getByText('Шаг 9 из 9')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Начать' })).not.toBeInTheDocument()
+
+  otvet.otpustit()
+  expect(await screen.findByRole('heading', { name: ZAPISANO })).toBeInTheDocument()
+})
+
+test('фото продукта можно убрать — после вопроса; пока убирается, шаг ждёт', async () => {
+  const udalenie = otlozhennyi()
+  otvetyUdaleniya = [
+    async () => {
+      await udalenie.zhdat
+      return undefined
+    },
+  ]
+  await prodolzhit(chernovikNa('photos'))
+  const doObrabotki = screen.getByRole('group', { name: 'До обработки' })
+  await userEvent.upload(within(doObrabotki).getByLabelText('Сфотографировать'), snimok(4032, 3024))
+  await waitFor(() => expect(knopka('Далее')).toBeEnabled())
+
+  // Сначала вопрос: «до обработки» после обработки уже не переснять.
+  await userEvent.click(within(doObrabotki).getByRole('button', { name: 'Убрать' }))
+  expect(within(doObrabotki).getByText(/Убрать фото/)).toBeInTheDocument()
+  expect(within(doObrabotki).getByRole('button', { name: 'Нет, оставить' })).toHaveFocus()
+  await userEvent.click(within(doObrabotki).getByRole('button', { name: 'Нет, оставить' }))
+  expect(udaleniya).toEqual([])
+  expect(within(doObrabotki).getByRole('button', { name: 'Убрать' })).toHaveFocus()
+
+  await userEvent.click(within(doObrabotki).getByRole('button', { name: 'Убрать' }))
+  await userEvent.click(within(doObrabotki).getByRole('button', { name: 'Да, убрать' }))
+
+  await waitFor(() => expect(udaleniya).toEqual([{ vid: 'before', zashchita: '1' }]))
+  expect(knopka('Назад')).toBeDisabled()
+  expect(knopka('Далее')).toBeDisabled()
+
+  udalenie.otpustit()
+
+  // Фото нет — ни превью этой загрузки, ни кнопки «Убрать»; снова «Пропустить».
+  await waitFor(() => expect(within(doObrabotki).queryByRole('img')).not.toBeInTheDocument())
+  expect(within(doObrabotki).getByLabelText('Сфотографировать')).toBeEnabled()
+  expect(within(doObrabotki).queryByRole('button', { name: 'Убрать' })).not.toBeInTheDocument()
+  expect(knopka('Пропустить')).toBeEnabled()
+})
+
+test('убрать фото во время отправки (409) — текст, фото на месте', async () => {
+  otvetyUdaleniya = [
+    () => HttpResponse.json({ detail: 'Карточка отправляется — подождите' }, { status: 409 }),
+  ]
+  await prodolzhit(
+    chernovikNa('photos', { photos: { label: true, package: true, before: false, after: false } }),
+  )
+  const vUpakovke = screen.getByRole('group', { name: 'В упаковке' })
+
+  await userEvent.click(within(vUpakovke).getByRole('button', { name: 'Убрать' }))
+  await userEvent.click(within(vUpakovke).getByRole('button', { name: 'Да, убрать' }))
+
+  expect(await within(vUpakovke).findByRole('alert')).toHaveTextContent(
+    'Карточка отправляется — подождите',
+  )
+  expect(within(vUpakovke).getByRole('img', { name: 'Фото в упаковке' })).toBeInTheDocument()
+  expect(udaleniya).toHaveLength(1)
+})
+
+test('пока фото слота загружается, «Убрать» недоступна', async () => {
+  const zagruzka = otlozhennyi()
+  otvetyZagruzki = [
+    async () => {
+      await zagruzka.zhdat
+      return undefined
+    },
+  ]
+  await prodolzhit(
+    chernovikNa('photos', { photos: { label: true, package: true, before: false, after: false } }),
+  )
+  const vUpakovke = screen.getByRole('group', { name: 'В упаковке' })
+
+  await userEvent.upload(within(vUpakovke).getByLabelText('Переснять'), snimok(4032, 3024))
+
+  expect(await within(vUpakovke).findByText('Загружаем фото…')).toBeInTheDocument()
+  expect(within(vUpakovke).getByRole('button', { name: 'Убрать' })).toBeDisabled()
+  zagruzka.otpustit()
+  await waitFor(() =>
+    expect(within(vUpakovke).getByRole('button', { name: 'Убрать' })).toBeEnabled(),
+  )
+})
+
+test('опоздавший ответ загрузки (старше в кэше) не откатывает соседнее фото', async () => {
+  const pervaya = otlozhennyi()
+  let zagruzok = 0
+  server.use(
+    http.put('/api/cards/drafts/:id/photos/:vid', async ({ params }) => {
+      zagruzok += 1
+      const nomer = zagruzok
+      chernovik = {
+        ...chernovik!,
+        photos: { ...chernovik!.photos, [String(params.vid)]: true },
+        updated_at: vremyaPravki(),
+      }
+      // Ответ — каким черновик был после этой загрузки; первый держится.
+      const otvet = chernovik
+      if (nomer === 1) await pervaya.zhdat
+      return HttpResponse.json(otvet)
+    }),
+  )
+  await prodolzhit(chernovikNa('photos'))
+  const vUpakovke = screen.getByRole('group', { name: 'В упаковке' })
+  const doObrabotki = screen.getByRole('group', { name: 'До обработки' })
+
+  await userEvent.upload(within(vUpakovke).getByLabelText('Сфотографировать'), snimok(4032, 3024))
+  await waitFor(() => expect(zagruzok).toBe(1))
+  await userEvent.upload(within(doObrabotki).getByLabelText('Сфотографировать'), snimok(4032, 3024))
+  // Вторая ответила первой — в ней уже оба фото.
+  expect(await within(doObrabotki).findByRole('button', { name: 'Убрать' })).toBeInTheDocument()
+
+  pervaya.otpustit()
+  await waitFor(() =>
+    expect(within(vUpakovke).queryByText('Загружаем фото…')).not.toBeInTheDocument(),
+  )
+
+  // Опоздавший ответ первой (без второго фото) лёг бы поверх и «потерял» его.
+  expect(within(doObrabotki).getByRole('button', { name: 'Убрать' })).toBeInTheDocument()
+  expect(within(vUpakovke).getByRole('button', { name: 'Убрать' })).toBeInTheDocument()
+})
+
+test('описание: отказ у поля (422) и «Назад» уносит набранное', async () => {
+  let otkazat = true
+  server.use(
+    http.patch('/api/cards/drafts/:id', async ({ request }) => {
+      const pravka = (await request.json()) as DraftPatch
+      pravki.push(pravka)
+      if (otkazat) {
+        return HttpResponse.json(
+          { detail: 'Описание: не больше 2000 знаков', field: 'description' },
+          { status: 422 },
+        )
+      }
+      chernovik = { ...chernovik!, ...pravka } as Draft
+      return HttpResponse.json(chernovik)
+    }),
+  )
+  await prodolzhit(chernovikNa('description'))
+  const pole = screen.getByRole('textbox', { name: 'Описание' })
+
+  await userEvent.type(pole, 'Тянется')
+  await userEvent.click(knopka('Далее'))
+
+  expect(await screen.findByText('Описание: не больше 2000 знаков')).toBeInTheDocument()
+  expect(pole).toHaveAttribute('aria-invalid', 'true')
+  expect(pole).toHaveAccessibleDescription(/Описание: не больше 2000 знаков/)
+  expect(pole).toHaveFocus()
+
+  otkazat = false
+  await userEvent.click(knopka('Назад'))
+
+  expect(await screen.findByText('Шаг 7 из 9')).toBeInTheDocument()
+  expect(pravki.at(-1)).toEqual({ description: 'Тянется', step: 'photos' })
 })

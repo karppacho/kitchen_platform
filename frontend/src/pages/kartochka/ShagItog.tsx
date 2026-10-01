@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, NE_POLUCHILOS } from '../../api/client'
-import { POVTOROV_OTPRAVKI, type Otpravka } from '../../api/kartochki'
+import { POVTOROV_OTPRAVKI, type KhodOtpravki, type Otpravka } from '../../api/kartochki'
 import type { Draft, Shag, Submitted, VidFoto } from '../../api/types'
 import { RamkaShaga, useShag, type UpravlenieShagom } from './RamkaShaga'
 
@@ -49,10 +49,12 @@ function tekstOtkaza(oshibka: unknown): string {
  * Шаг 9. Итог: что уйдёт в таблицу и «Отправить в таблицу».
  *
  * Чего не хватает — видно сразу, с переходом к шагу, где это заполняется;
- * пока не хватает, отправить нельзя. Отказ сервера — его текстом: дубль
- * названия ведёт на шаг названия, «не хватает» — к недостающему, прочее
- * («таблица занята», «черновик сохранён») — повтор позже той же кнопкой.
- * Пока идёт отправка, все кнопки ждут.
+ * пока не хватает, отправить нельзя. Отказ сервера — его текстом, а главное
+ * действие — по исходу: дубль названия — «Изменить название» (повтор дал бы
+ * тот же отказ); колонки съехали или запись не настроена — главного нет,
+ * нужен шеф или администратор, повтор — простой кнопкой; прочее («таблица
+ * занята», «черновик сохранён») — «Отправить ещё раз». Пока идёт отправка,
+ * все кнопки ждут.
  */
 export function ShagItog({ chernovik, otpravka }: { chernovik: Draft; otpravka: Otpravka }) {
   const upravlenie = useShag(chernovik)
@@ -63,19 +65,35 @@ export function ShagItog({ chernovik, otpravka }: { chernovik: Draft; otpravka: 
   const otkazPoPolyam = otkaz instanceof ApiError && otkaz.missing ? otkaz : null
   const nedostayot = otkazPoPolyam?.missing ?? chernovik.missing
   const dubl = otkaz instanceof ApiError && otkaz.status === 409 && otkaz.row !== null
+  // Колонки съехали, запись не настроена или закрыта: сервер просит
+  // сообщить шефу или администратору. Различаем по его тексту, пока у отказа
+  // нет своего кода.
+  const nuzhenChelovek =
+    otkaz instanceof ApiError && otkaz.status === 503 && otkaz.message.includes('сообщите')
   const zanyato = otpravka.idyot || upravlenie.zanyato
 
   const perejti = (shag: Shag) => upravlenie.dalee({}, shag)
+  const otpravit = () => otpravka.otpravit(chernovik)
   // У отбракованного не было фото продукта и описания — «Назад» к вопросу.
   const nazadNa: Shag = chernovik.approval === 'Отбракован' ? 'approval' : 'description'
   const upravlenieItoga: UpravlenieShagom = { ...upravlenie, nazad: () => perejti(nazadNa) }
 
+  let glavnoe: { tekst: string; deistvie: () => void; mozhno: boolean } | null = null
+  if (dubl) glavnoe = { tekst: 'Изменить название', deistvie: () => perejti('name'), mozhno: true }
+  else if (!nuzhenChelovek) {
+    glavnoe = {
+      tekst: otkaz ? 'Отправить ещё раз' : 'Отправить в таблицу',
+      deistvie: otpravit,
+      mozhno: nedostayot.length === 0,
+    }
+  }
+
   return (
     <RamkaShaga
       upravlenie={upravlenieItoga}
-      mozhnoDalee={nedostayot.length === 0}
-      onDalee={() => otpravka.otpravit(chernovik.id)}
-      tekstDalee={otkaz ? 'Отправить ещё раз' : 'Отправить в таблицу'}
+      mozhnoDalee={glavnoe?.mozhno}
+      onDalee={glavnoe?.deistvie}
+      tekstDalee={glavnoe?.tekst}
       zhdyom={otpravka.idyot}
     >
       <Svodka chernovik={chernovik} />
@@ -104,30 +122,33 @@ export function ShagItog({ chernovik, otpravka }: { chernovik: Draft; otpravka: 
       )}
 
       <div role="status" className="kartochka-zhivaya">
-        {otpravka.idyot && (
-          <p className="kartochka-zhdyom">
-            {otpravka.popytka === 1
-              ? 'Отправляем карточку в таблицу — это может занять до минуты.'
-              : `Связь прервалась — отправляем ещё раз (попытка ${otpravka.popytka} из ${
-                  POVTOROV_OTPRAVKI + 1
-                }) — второй строки в таблице не будет.`}
-          </p>
-        )}
+        {otpravka.idyot && <p className="kartochka-zhdyom">{tekstKhoda(otpravka.khod)}</p>}
       </div>
 
       {otkaz && !otkazPoPolyam && (
         <div className="kartochka-oshibka">
           <p role="alert">{tekstOtkaza(otkaz)}</p>
-          {dubl && (
+          {nuzhenChelovek && (
             <div className="kartochka-knopki">
-              <button type="button" disabled={zanyato} onClick={() => perejti('name')}>
-                Изменить название
+              <button type="button" disabled={zanyato} onClick={otpravit}>
+                Отправить ещё раз
               </button>
             </div>
           )}
         </div>
       )}
     </RamkaShaga>
+  )
+}
+
+/** Что сейчас с отправкой — словами для повара. */
+function tekstKhoda({ popytka, zhdyomZapisi }: KhodOtpravki): string {
+  // Своя же первая отправка ещё пишет строку: это не «ждите 17 минут».
+  if (zhdyomZapisi) return 'Карточка ещё записывается — ждём ответа таблицы…'
+  if (popytka === 1) return 'Отправляем карточку в таблицу — это может занять до минуты.'
+  return (
+    `Связь прервалась — отправляем ещё раз (попытка ${popytka} из ${POVTOROV_OTPRAVKI + 1})` +
+    ' — второй строки в таблице не будет.'
   )
 }
 

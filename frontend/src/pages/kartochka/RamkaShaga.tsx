@@ -152,10 +152,18 @@ const Pamyat = createContext<MutableRefObject<PamyatShagov> | null>(null)
 /**
  * Помнит, какой шаг мастер показал первым. При смене шага фокус уходит на
  * заголовок нового: кнопка, на которой он был, исчезла вместе с прежним
- * шагом, и читалка экрана замолчала бы. При первом показе фокус не трогаем.
+ * шагом, и читалка экрана замолчала бы. При первом показе фокус не трогаем —
+ * кроме `fokusSrazu`: мастер открылся после «Добавить ещё», и кнопка, на
+ * которой был фокус, исчезла вместе с экраном «Записано».
  */
-export function PamyatShagovMastera({ children }: { children: ReactNode }) {
-  const pamyat = useRef<PamyatShagov>({ pervyi: null, byloSmeny: false })
+export function PamyatShagovMastera({
+  fokusSrazu = false,
+  children,
+}: {
+  fokusSrazu?: boolean
+  children: ReactNode
+}) {
+  const pamyat = useRef<PamyatShagov>({ pervyi: null, byloSmeny: fokusSrazu })
   return <Pamyat.Provider value={pamyat}>{children}</Pamyat.Provider>
 }
 
@@ -200,6 +208,7 @@ export function RamkaShaga({
     if (!p) return
     if (p.pervyi === null) {
       p.pervyi = shag
+      if (p.byloSmeny) zagolovok.current?.focus()
       return
     }
     if (p.byloSmeny || p.pervyi !== shag) {

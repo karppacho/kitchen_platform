@@ -152,14 +152,28 @@ function ostanovitPerechityvanie(queries: QueryClient): Promise<void> {
   return queries.cancelQueries({ queryKey: KLYUCH_CHERNOVIKA })
 }
 
+/** Время правки черновика, мс. База отдаёт доли секунды до микросекунд —
+ *  они обрезаются до миллисекунд: больше трёх знаков не всякий браузер
+ *  разбирает. Не разобралось — NaN, и сравнение с ним ложно. */
+function vremyaPravki(chernovik: Draft): number {
+  return Date.parse(chernovik.updated_at.replace(/(\.\d{3})\d+/, '$1'))
+}
+
 /**
  * Ответ правки — черновик целиком, он и становится экраном. Перечитывание,
  * ушедшее до правки или пока она шла, несёт черновик старше правки: сначала
  * оно останавливается, потом ложится ответ. Остановка — здесь, при ответе, а
  * не перед запросом: так она ловит и перечитывание, начатое посреди правки.
+ *
+ * Ответ старше того, что уже лежит, не ложится: три фото продукта грузятся
+ * разом, и опоздавший ответ первой загрузки (без второго фото) иначе
+ * откатил бы экран. Сервер ставит время правки под блокировкой строки —
+ * правки одного черновика идут по времени по очереди.
  */
 async function polozhitChernovik(queries: QueryClient, chernovik: Draft): Promise<void> {
   await ostanovitPerechityvanie(queries)
+  const lezhit = queries.getQueryData<Draft | null>(KLYUCH_CHERNOVIKA)
+  if (lezhit?.id === chernovik.id && vremyaPravki(chernovik) < vremyaPravki(lezhit)) return
   queries.setQueryData(KLYUCH_CHERNOVIKA, chernovik)
 }
 
@@ -287,6 +301,20 @@ function zagruzitFoto(
   )
 }
 
+/** Убрать фото из слота черновика: файл уходит в корзину хранилища. */
+export function useUdalenieFoto() {
+  const queries = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, vid }: { id: string; vid: VidFoto }) =>
+      api<Draft>(`/cards/drafts/${encodeURIComponent(id)}/photos/${vid}`, {
+        method: 'DELETE',
+        srok: SROK_PRAVKI,
+      }),
+    onSuccess: (chernovik) => polozhitChernovik(queries, chernovik),
+    onError: (oshibka) => perechitatPosle(queries, oshibka, OTSTALI),
+  })
+}
+
 export function useZagruzkaFoto(onPovtor: (popytka: number) => void) {
   const queries = useQueryClient()
   return useMutation({
@@ -344,14 +372,82 @@ export function useRaspoznavanie() {
 
 export type Raspoznavanie = ReturnType<typeof useRaspoznavanie>
 
+/** Сколько раз ждать собственную отправку, которая ещё пишет строку. */
+export const OZHIDANIY_ZAPISI = 6
+/** Пауза между ними: строка пишется 3–15 с, всего ждём около полуминуты. */
+export const PAUZA_OZHIDANIYA_ZAPISI = 5_000
+
+/** Ход отправки для экрана: какая попытка и не ждём ли свою же отправку. */
+export type KhodOtpravki = { popytka: number; zhdyomZapisi: boolean }
+
+/** Одна попытка отправки. Ответ 200, оборванный посреди тела, — это обрыв
+ *  связи, а не отказ: строка, скорее всего, легла, и повтор её покажет. */
+async function popytkaOtpravki(id: string): Promise<Submitted> {
+  try {
+    return await api<Submitted>(`/cards/drafts/${encodeURIComponent(id)}/submit`, {
+      method: 'POST',
+      srok: SROK_OTPRAVKI,
+    })
+  } catch (oshibka) {
+    if (oshibka instanceof ApiError && oshibka.status >= 200 && oshibka.status < 300) {
+      throw new ApiError(0, 'Ответ не дошёл целиком')
+    }
+    throw oshibka
+  }
+}
+
+/**
+ * Отправка с повторами.
+ *
+ * Обрыв или срок — повтор той же отправки, до двух раз. Если связь
+ * оборвалась, пока сервер пишет строку, повтор через 2 с застаёт нашу же
+ * первую отправку ещё идущей, и сервер отвечает 409 «попробуйте через N
+ * минут» (N — предел отметки, до 17): живую отправку от умершей он не
+ * отличит, а мы — отличим: была попытка без ответа. Тогда ждём её по 5 с,
+ * до шести раз: закончилась — повтор отдаёт её строку (`already_written`);
+ * упала и сняла отметку — повтор пишет обычным путём. Только потом — текст
+ * сервера.
+ */
+async function otpravitSPovtorami(
+  id: string,
+  onKhod: (khod: KhodOtpravki) => void,
+): Promise<Submitted> {
+  let obryvov = 0
+  let ozhidaniy = 0
+  for (;;) {
+    try {
+      return await popytkaOtpravki(id)
+    } catch (oshibka) {
+      if (!(oshibka instanceof ApiError)) throw oshibka
+      if (oshibka.status === 0 && obryvov < POVTOROV_OTPRAVKI) {
+        obryvov += 1
+        onKhod({ popytka: obryvov + 1, zhdyomZapisi: false })
+        await pauza(PAUZA_PERED_POVTOROM)
+        continue
+      }
+      const svoyaPishet = oshibka.status === 409 && oshibka.row === null && obryvov > 0
+      if (svoyaPishet && ozhidaniy < OZHIDANIY_ZAPISI) {
+        ozhidaniy += 1
+        onKhod({ popytka: obryvov + 1, zhdyomZapisi: true })
+        await pauza(PAUZA_OZHIDANIYA_ZAPISI)
+        continue
+      }
+      throw oshibka
+    }
+  }
+}
+
+const NACHALO_OTPRAVKI: KhodOtpravki = { popytka: 1, zhdyomZapisi: false }
+
 /**
  * «Отправить в таблицу».
  *
  * Отправка идемпотентна: ключ записи на сервере привязан к черновику, и
  * повтор отвечает той же строкой — второй в таблице не будет. Поэтому обрыв
- * связи и срок без ответа (60 с) — повод повторить ту же отправку самим, до
- * двух раз. Отказ сервера не повторяется: дубль, «отправляется», «таблица
- * занята» повтор через 2 с не вылечит — повар решит сам.
+ * связи и срок без ответа (60 с) — повод повторить ту же отправку самим
+ * (`otpravitSPovtorami`). Отказ сервера не повторяется: дубль,
+ * «отправляется», «таблица занята» повтор через 2 с не вылечит — повар
+ * решит сам.
  *
  * Двойное касание даёт один запрос: вторая отправка не уходит, пока идёт
  * первая, — не только серой кнопкой, два касания успевают раньше
@@ -364,20 +460,11 @@ export type Raspoznavanie = ReturnType<typeof useRaspoznavanie>
  */
 export function useOtpravka() {
   const queries = useQueryClient()
-  const [popytka, zadatPopytku] = useState(1)
+  const [khod, zadatKhod] = useState(NACHALO_OTPRAVKI)
   const idyot = useRef(false)
   const mutatsiya = useMutation({
-    onMutate: () => zadatPopytku(1),
-    mutationFn: (id: string) =>
-      sPovtoramiPriObryve(
-        () =>
-          api<Submitted>(`/cards/drafts/${encodeURIComponent(id)}/submit`, {
-            method: 'POST',
-            srok: SROK_OTPRAVKI,
-          }),
-        POVTOROV_OTPRAVKI,
-        zadatPopytku,
-      ),
+    onMutate: () => zadatKhod(NACHALO_OTPRAVKI),
+    mutationFn: (chernovik: Draft) => otpravitSPovtorami(chernovik.id, zadatKhod),
     onSuccess: () => {
       void queries.invalidateQueries({ queryKey: KLYUCH_CHERNOVIKA })
       void queries.invalidateQueries({ queryKey: ['reconciliation'] })
@@ -392,15 +479,20 @@ export function useOtpravka() {
     },
   })
   return {
-    otpravit: (id: string) => {
+    otpravit: (chernovik: Draft) => {
       if (idyot.current) return
       idyot.current = true
-      mutatsiya.mutate(id)
+      mutatsiya.mutate(chernovik)
     },
     /** Отправка идёт — кнопки ждут. */
     idyot: mutatsiya.isPending,
-    /** Номер идущей попытки: 2 и 3 — повтор после обрыва связи. */
-    popytka,
+    /** Отправляемый черновик — каким он был при нажатии. Пока отправка
+     *  идёт, экран держит его итог: перечитывание может уже ответить
+     *  «черновика нет» (строка легла, ответ ещё в пути). */
+    chernovik: mutatsiya.isPending ? (mutatsiya.variables ?? null) : null,
+    /** Номер идущей попытки (2 и 3 — повтор после обрыва) и ждём ли мы
+     *  собственную отправку, которая ещё пишет строку. */
+    khod,
     oshibka: mutatsiya.error,
     /** Когда ушла последняя отправка (мс), 0 — не уходила. Шаг итога
      *  показывает отказ, только если отправка ушла при нём: вернувшись к

@@ -48,8 +48,16 @@ export function NovyiIngredient() {
   // Распознавание запускает шаг «Фото этикетки», а ждёт его итога шаг
   // «Проверка» — запрос живёт здесь, над шагами, и переживает смену шага.
   const raspoznavanie = useRaspoznavanie()
+  // Новая карточка начата с экрана «Записано»: её первый шаг получает фокус.
+  const [posleZapisi, zadatPosleZapisi] = useState(false)
+  const nachatSnachala = (prezhniy: string | null) => {
+    zadatPosleZapisi(false)
+    nachat.mutate(prezhniy)
+  }
 
-  const dannye = chernovik.data
+  // Пока идёт отправка, экран держит отправляемый черновик: перечитывание
+  // уже может ответить «черновика нет» — строка легла, а ответ ещё в пути.
+  const dannye = otpravka.chernovik ?? chernovik.data
   let ekran
   if (otpravka.otvet !== null) {
     // «Записано» держится, пока заводится новая карточка; не завелась —
@@ -57,7 +65,10 @@ export function NovyiIngredient() {
     ekran = (
       <Zapisano
         otvet={otpravka.otvet}
-        onEshche={() => nachat.mutate(null, { onError: otpravka.sbrosit })}
+        onEshche={() => {
+          zadatPosleZapisi(true)
+          nachat.mutate(null, { onError: otpravka.sbrosit })
+        }}
         zanyato={nachat.isPending}
       />
     )
@@ -66,7 +77,7 @@ export function NovyiIngredient() {
   } else if (dannye === null) {
     ekran = (
       <Nachalo
-        onNachat={() => nachat.mutate(null)}
+        onNachat={() => nachatSnachala(null)}
         zanyato={nachat.isPending}
         oshibka={oshibka}
       />
@@ -75,8 +86,11 @@ export function NovyiIngredient() {
     ekran = (
       <Vybor
         chernovik={dannye}
-        onProdolzhit={() => zadatVRabote(dannye.id)}
-        onZanovo={() => nachat.mutate(dannye.id)}
+        onProdolzhit={() => {
+          zadatPosleZapisi(false)
+          zadatVRabote(dannye.id)
+        }}
+        onZanovo={() => nachatSnachala(dannye.id)}
         zanyato={nachat.isPending}
         oshibka={oshibka}
       />
@@ -85,7 +99,7 @@ export function NovyiIngredient() {
     // Ключ — шаг: у каждого шага свой ввод, с черновика заново. Память
     // шагов — снаружи ключа: она помнит, какой шаг показан первым.
     ekran = (
-      <PamyatShagovMastera>
+      <PamyatShagovMastera fokusSrazu={posleZapisi}>
         <Master
           key={dannye.step}
           chernovik={dannye}
