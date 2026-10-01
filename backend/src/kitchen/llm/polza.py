@@ -38,7 +38,7 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
 import httpx
@@ -73,8 +73,11 @@ _GARBAGE = "Модель ответила непонятно. Попробуйт
 _FREE = Decimal("0")
 """Цена попытки, до модели не дошедшей: отказ 4xx или запрос, не ушедший в сеть."""
 
-_COST_CEILING = Decimal("100000000")
-"""С этой цены — не цена: колонка журнала ``Numeric(12,4)`` её не вместит."""
+COST_CEILING = Decimal("100000000")
+"""С этой цены — не цена: колонка журнала ``Numeric(12,4)`` её не вместит.
+Единственное определение — его же проверяет журнал вызовов."""
+_COST_STEP = Decimal("0.0001")
+"""Четыре знака после запятой — до них Postgres округлит цену в журнале."""
 _TOKENS_CEILING = 2**31 - 1
 """Больше токенов колонка ``Integer`` не вмещает."""
 
@@ -428,7 +431,7 @@ def _reason(body: str, secret: str) -> str:
     except (ValueError, RecursionError):
         payload = text
     found = (_message(payload, depth=0) or text).replace(secret, "***")
-    cleaned = " ".join(_SECRET_LIKE.sub(_masked, found).split())
+    cleaned = printable_line(_SECRET_LIKE.sub(_masked, found))
     if len(cleaned) <= _REASON_LIMIT:
         return cleaned
     return cleaned[: _REASON_LIMIT - 1].rstrip() + "…"
@@ -515,9 +518,33 @@ def _cost(value: object) -> Decimal | None:
             return None
     else:
         return None
-    if not number.is_finite() or not _FREE <= number < _COST_CEILING:
+    return storable_cost(number)
+
+
+def storable_cost(number: Decimal) -> Decimal | None:
+    """Цена как есть, если журнал её сохранит, иначе ``None`` — «не знаем».
+
+    Отрицательная, бесконечная, NaN или не влезающая в ``Numeric(12,4)`` — не
+    цена. Граница проверяется после округления до четырёх знаков (половина —
+    вверх, как у Postgres): 99999999,99995 станет 100000000,0000 и уронило бы
+    вставку, а с ней пропала бы и строка журнала.
+    """
+    if not number.is_finite() or number < _FREE or number >= COST_CEILING:
+        return None
+    if number.quantize(_COST_STEP, rounding=ROUND_HALF_UP) >= COST_CEILING:
         return None
     return number
+
+
+def printable_line(text: str) -> str:
+    """Текст в одну строку из печатаемых символов.
+
+    Управляющие символы выбрасываются: NUL роняет вставку в text-колонку
+    Postgres, ESC и прочие уходят в терминал администратора. Пробелы любого
+    вида схлопываются в один.
+    """
+    kept = "".join(char for char in text if char.isprintable() or char.isspace())
+    return " ".join(kept.split())
 
 
 def _tokens(value: object) -> int | None:

@@ -281,7 +281,56 @@ def test_record_call_keeps_exact_cost(sessions: sessionmaker[Session]) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("cost", ["100000000", "-1", "NaN"])
+def test_largest_storable_cost_is_kept(sessions: sessionmaker[Session]) -> None:
+    with sessions.begin() as session:
+        record_call(
+            session,
+            purpose=LABEL_PURPOSE,
+            model=MODEL,
+            prompt_version=LABEL_PROMPT_VERSION,
+            profile_id=None,
+            ok=True,
+            cost_rub=Decimal("99999999.99994"),
+            unpriced_attempts=0,
+        )
+    with sessions() as session:
+        [call] = session.scalars(select(LlmCall)).all()
+    assert call.cost_rub == Decimal("99999999.9999")
+
+
+@pytest.mark.integration
+def test_control_characters_do_not_break_the_journal(sessions: sessionmaker[Session]) -> None:
+    """NUL в тексте причины уронил бы вставку (Postgres не хранит его в text) —
+    и строка журнала пропала бы вместе с ценой. Причина от polza.ai приходит уже
+    очищенной; текст, переданный в ``record_call`` напрямую, чистится там."""
+    nul, esc = chr(0), chr(0x1B)
+    fake = FakePolza(refusal(402, f"bad{nul}thing {esc}[31mred"))
+    client = PolzaClient(
+        api_key=KEY, base_url=BASE_URL, timeout_seconds=60, transport=fake.transport()
+    )
+    with pytest.raises(LlmError) as caught:
+        client.vision_json(model=MODEL, system="s", prompt="p", jpeg=JPEG, max_tokens=10)
+    with sessions.begin() as session:
+        for error in (caught.value.describe(), f"garbage: поле{nul} label_name{esc}"):
+            record_call(
+                session,
+                purpose=LABEL_PURPOSE,
+                model=MODEL,
+                prompt_version=LABEL_PROMPT_VERSION,
+                profile_id=None,
+                ok=False,
+                error=error,
+                cost_rub=Decimal("0"),
+                unpriced_attempts=0,
+            )
+    with sessions() as session:
+        from_client, direct = session.scalars(select(LlmCall).order_by(LlmCall.id)).all()
+    assert from_client.error == "no_money 402: badthing [31mred"
+    assert direct.error == "garbage: поле label_name"
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("cost", ["100000000", "99999999.99995", "-1", "NaN"])
 def test_absurd_cost_is_stored_as_unknown(sessions: sessionmaker[Session], cost: str) -> None:
     """Нелепая цена не роняет вставку в Numeric(12,4) — вызов не выпадает из
     бюджета, а считается по оценке."""

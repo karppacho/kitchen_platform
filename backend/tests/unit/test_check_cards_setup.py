@@ -634,6 +634,10 @@ def test_llm_probe_failure_is_explained(
     assert "ОШИБКА" in out
     assert KEY not in out
     assert "Сообщите администратору" not in out, "скрипт читает администратор — нужна подсказка"
+    [failure] = _lines(out, "пробный вызов не прошёл")
+    if isinstance(answer, httpx.Response):
+        reason = answer.json()["error"]["message"] if answer.status_code != 200 else ""
+        assert not reason or failure.count(reason) == 1, f"причина — один раз: {failure}"
 
 
 def test_llm_probe_without_key(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:

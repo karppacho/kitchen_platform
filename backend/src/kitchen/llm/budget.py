@@ -32,6 +32,7 @@ from sqlalchemy import func, select
 from kitchen.db.models import LlmCall
 from kitchen.domain.cards import MOSCOW
 from kitchen.domain.shelf_life import plural_ru
+from kitchen.llm.polza import printable_line, storable_cost
 
 if TYPE_CHECKING:
     import uuid
@@ -43,8 +44,6 @@ if TYPE_CHECKING:
 UNKNOWN_COST_RUB = Decimal("5")
 """Во сколько бюджет считает попытку, цена которой неизвестна."""
 
-_COST_CEILING = Decimal("100000000")
-"""С этой цены — не цена: колонка ``Numeric(12,4)`` её не вместит."""
 _ERROR_LIMIT = 1000
 
 LimitKind = Literal["budget", "user_limit"]
@@ -158,9 +157,10 @@ def record_call(
     перед ней стоили неизвестно сколько. Таймаут, потом успех за 0,0123 ₽ —
     ``cost_rub=0.0123``, ``unpriced_attempts=1``; бюджет посчитает 5,0123 ₽.
     ``unpriced_attempts`` обязателен: забытый, он молча занизил бы бюджет.
-    Нелепая цена (отрицательная, бесконечная, от 10⁸ ₽) пишется как
-    неизвестная — вставка в ``Numeric(12,4)`` не падает, вызов не выпадает из
-    бюджета.
+    Нелепая цена (отрицательная, бесконечная, после округления до четырёх
+    знаков — от 10⁸ ₽) пишется как неизвестная, а из текста ошибки уходят
+    управляющие символы: вставка не падает — ни на ``Numeric(12,4)``, ни на NUL в
+    text, — и вызов не выпадает из бюджета.
 
     Строка добавляется в сессию вызывающего; фиксирует транзакцию он. Если
     остальная работа может откатиться, вызов стоит записать отдельной
@@ -168,18 +168,14 @@ def record_call(
     """
     if unpriced_attempts < 0:
         raise ValueError(f"unpriced_attempts не может быть меньше нуля: {unpriced_attempts}")
-    if cost_rub is not None and not (
-        cost_rub.is_finite() and Decimal("0") <= cost_rub < _COST_CEILING
-    ):
-        cost_rub = None
     call = LlmCall(
         purpose=purpose,
         model=model,
         prompt_version=prompt_version,
         profile_id=profile_id,
         ok=ok,
-        error=error[:_ERROR_LIMIT],
-        cost_rub=cost_rub,
+        error=printable_line(error)[:_ERROR_LIMIT],
+        cost_rub=None if cost_rub is None else storable_cost(cost_rub),
         unpriced_attempts=unpriced_attempts,
         tokens=tokens,
         duration_ms=duration_ms,

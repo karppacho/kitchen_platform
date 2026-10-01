@@ -579,19 +579,21 @@ def _llm_why(error: LlmError, settings: Settings) -> str:
     собственная причина печатается всегда: по ней видно, что случилось на самом
     деле, даже если подсказка не угадала.
     """
-    if error.kind == "bad_request":
+    detail = error.detail
+    if error.kind == "bad_request" and not (error.status == 400 and error.without_json_mode):
+        text = f"polza.ai отклонил запрос: {detail or 'причину не назвал'}"
+        detail = ""  # причина уже в тексте — в скобках только код
+    elif error.kind == "bad_request":
         text = (
             "polza.ai отклонил запрос и в режиме JSON, и без него — проверьте "
             f"LLM_VISION_MODEL (сейчас «{settings.llm_vision_model}»): модель должна "
             "принимать картинки"
-            if error.status == 400 and error.without_json_mode
-            else f"polza.ai отклонил запрос: {error.detail or 'причину не назвал'}"
         )
     elif error.kind in _LLM_HINTS:
         text = _LLM_HINTS[error.kind].format(settings=settings)
     else:
         text = str(error)
-    said = " ".join(part for part in (str(error.status or ""), error.detail) if part)
+    said = " ".join(part for part in (str(error.status or ""), detail) if part)
     return f"{text} [{said}]" if said else text
 
 

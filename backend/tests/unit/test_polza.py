@@ -265,6 +265,21 @@ def test_reason_from_polza_is_kept(answer: httpx.Response, reason: str) -> None:
     assert caught.value.describe().endswith(f": {reason}")
 
 
+def test_control_characters_are_dropped_from_reason() -> None:
+    """NUL роняет вставку в ``llm_calls`` (Postgres не хранит его в text), ESC
+    уходит в терминал администратора через ``--llm``. Из причины остаются только
+    печатаемые символы, остальной текст — на месте."""
+    nul, esc, delete = chr(0), chr(0x1B), chr(0x7F)
+    message = f"bad{nul}thing {esc}[31mred{esc}[0m end{delete}"
+
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(refusal(402, message)))
+
+    described = caught.value.describe()
+    assert all(char.isprintable() for char in described), repr(described)
+    assert caught.value.detail == "badthing [31mred[0m end"
+
+
 def test_long_reason_is_cut() -> None:
     with pytest.raises(LlmError) as caught:
         _read(FakePolza(refusal(400, "очень длинно " * 100)))
@@ -453,6 +468,8 @@ def test_no_cost_is_none(usage: str | None) -> None:
     ("usage", "cost", "tokens"),
     [
         ('{"total_tokens": 2147483647, "cost_rub": 99999999.9999}', "99999999.9999", 2147483647),
+        ('{"total_tokens": 1, "cost_rub": 99999999.99994}', "99999999.99994", 1),
+        ('{"total_tokens": 1, "cost_rub": 99999999.99995}', None, 1),
         ('{"total_tokens": 2147483648, "cost_rub": 100000000}', None, None),
         ('{"total_tokens": -1, "cost_rub": 1e20}', None, None),
     ],
@@ -461,7 +478,9 @@ def test_absurd_cost_and_tokens_are_unknown(
     usage: str, cost: str | None, tokens: int | None
 ) -> None:
     """Колонки журнала — ``Numeric(12,4)`` и ``Integer``. Нелепое число уронило
-    бы вставку, и вызов выпал бы из бюджета; лучше «не знаем» и оценка."""
+    бы вставку, и вызов выпал бы из бюджета; лучше «не знаем» и оценка. Граница
+    — после округления до четырёх знаков, как его сделает Postgres:
+    99999999,99995 станет 100000000,0000 и не влезет."""
     reply = _read(FakePolza(ok(usage=usage)))
 
     assert reply.cost_rub == (None if cost is None else Decimal(cost))
