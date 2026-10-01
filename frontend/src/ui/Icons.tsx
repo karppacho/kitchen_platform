@@ -87,3 +87,17 @@ export function KrestikIcon({ className }: SvoystvaIkonki) {
     </MalayaIkonka>
   )
 }
+
+/**
+ * Шеврон строки списка на телефоне: вправо — строка открывает карточку,
+ * вниз/вверх — раскрывает и сворачивает подробности.
+ */
+export function ShevronIcon({ className, napravlenie }: SvoystvaIkonki & { napravlenie: 'vpravo' | 'vniz' | 'vverh' }) {
+  return (
+    <MalayaIkonka className={className}>
+      {napravlenie === 'vpravo' && <path d="M7 4l6 6-6 6" />}
+      {napravlenie === 'vniz' && <path d="M4 7l6 6 6-6" />}
+      {napravlenie === 'vverh' && <path d="M4 13l6-6 6 6" />}
+    </MalayaIkonka>
+  )
+}
