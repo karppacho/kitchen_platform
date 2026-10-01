@@ -307,6 +307,8 @@ async function naUzkom() {
   const vid = narisovat()
   await u.click(screen.getByRole('button', { name: 'Сортировка и фильтры' }))
   await u.click(within(panelOtbora()).getByRole('radio', { name: 'Цена: по убыванию' }))
+  // Группа свёрнута — сначала раскрыть: в браузере свёрнутую галочку не нажать.
+  await u.click(within(panelOtbora()).getByText('Категория', { selector: 'summary' }))
   await u.click(within(panelOtbora()).getByRole('checkbox', { name: 'Соус · 2' }))
   await u.click(within(panelOtbora()).getByRole('button', { name: 'Показать 2' }))
   await u.type(poisk(), 'е')

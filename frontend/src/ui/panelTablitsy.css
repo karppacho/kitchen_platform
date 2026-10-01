@@ -90,12 +90,39 @@
   border-top: 1px solid var(--granitsa);
 }
 
+/* Маркер раскрытия браузер рисует только у display: list-item, а summary
+   здесь flex — вместо него своя стрелка справа. list-style: none на случай
+   list-item по умолчанию; Safari рисует свой маркер отдельным псевдоэлементом. */
 .panel-otbora-gruppa summary {
   min-height: 44px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: calc(var(--shag) * 2);
   font-weight: 600;
   cursor: pointer;
+  list-style: none;
+}
+
+.panel-otbora-gruppa summary::-webkit-details-marker {
+  display: none;
+}
+
+.panel-otbora-strelka {
+  flex: none;
+  color: var(--priglushyonnyy);
+  transition: transform 150ms;
+}
+
+/* Раскрыта — стрелка вверх: по ней видно, что группу можно свернуть. */
+.panel-otbora-gruppa[open] > summary .panel-otbora-strelka {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel-otbora-strelka {
+    transition: none;
+  }
 }
 
 /* Заголовок группы уже в summary — легенду галочек прячем визуально,

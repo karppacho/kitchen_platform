@@ -21,13 +21,18 @@ type Props = {
   niz?: ReactNode
 }
 
-// Куда встаёт фокус по Tab (как у Vsplyvashka).
+// Куда встаёт фокус по Tab (как у Vsplyvashka). `summary` — заголовки
+// групп галочек в панели отбора (`<details>`): браузеры ставят на него
+// фокус по Tab, и не будь его в списке, ловушка считала бы такой фокус
+// «вне круга» и с заголовка уводила бы на «Закрыть» — до галочек с
+// клавиатуры было бы не добраться.
 const TABUEMYE = [
   'button:not(:disabled)',
   'input:not(:disabled)',
   'select:not(:disabled)',
   'textarea:not(:disabled)',
   'a[href]',
+  'summary',
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ')
 

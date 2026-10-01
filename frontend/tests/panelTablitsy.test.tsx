@@ -102,6 +102,8 @@ const knopkaOtbora = () => screen.getByRole('button', { name: /^Сортиров
 const panelOtbora = () => screen.getByRole('dialog', { name: 'Сортировка и фильтры' })
 const pereklyuchatel = (tekst: string) => within(panelOtbora()).getByRole('radio', { name: tekst })
 const galochka = (tekst: string) => within(panelOtbora()).getByRole('checkbox', { name: tekst })
+// Заголовок группы — summary её details (в легенде галочек то же слово).
+const zagolovokGruppy = (tekst: string) => within(panelOtbora()).getByText(tekst, { selector: 'summary' })
 const fishka = (tekst: string) => screen.getByRole('button', { name: `Снять фильтр «${tekst}»` })
 const sbrositVsyo = () => screen.queryByRole('button', { name: 'Сбросить всё' })
 const spisokFishek = () => screen.queryByRole('list', { name: 'Активные фильтры' })
@@ -186,6 +188,8 @@ test('галочка в панели отбирает сразу: панель �
   const onVybor = vi.fn()
   render(<Stend onVybor={onVybor} />)
   await userEvent.click(knopkaOtbora())
+  // Группа не включена — свёрнута; в браузере свёрнутую галочку не нажать.
+  await userEvent.click(zagolovokGruppy('Категория'))
   await userEvent.click(galochka('Соус · 2'))
   expect(onVybor).toHaveBeenCalledWith('category', ['Соус'])
   expect(galochka('Соус · 2')).toBeChecked()
@@ -197,6 +201,7 @@ test('Escape закрывает панель и возвращает фокус 
   setViewport(360)
   render(<Stend />)
   await userEvent.click(knopkaOtbora())
+  await userEvent.click(zagolovokGruppy('Цена'))
   await userEvent.click(galochka('есть · 2'))
   expect(galochka('есть · 2')).toHaveFocus()
   await userEvent.keyboard('{Escape}')

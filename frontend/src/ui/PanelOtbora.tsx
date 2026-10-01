@@ -1,8 +1,9 @@
-import { useCallback, useId, useMemo, useState, type RefObject } from 'react'
+import { useCallback, useId, useMemo, useRef, useState, type MouseEvent, type RefObject } from 'react'
 
 import { kodSortirovki, razobratKodSortirovki } from '../domain/adres'
 import { variantySortirovki, type GruppaFiltra, type OpisanieKolonki, type Sortirovka } from '../domain/tablitsa'
 import { Galochki } from './Galochki'
+import { ShevronIcon } from './Icons'
 import { ModalnayaPanel } from './ModalnayaPanel'
 
 type Props<T> = {
@@ -27,10 +28,21 @@ type Props<T> = {
 export function PanelOtbora<T>({ knopka, kolonki, naideno, sortirovka, onSortirovka, gruppy, onVybor, onSbrositVsyo }: Props<T>) {
   const [otkryta, otkryt] = useState(false)
   const id = useId()
+  const pokazat = useRef<HTMLButtonElement>(null)
   const punkty = useMemo(() => variantySortirovki(kolonki), [kolonki])
   const vklyucheno = gruppy.filter((g) => g.aktivna).length
   const zakryt = useCallback(() => otkryt(false), [])
   const tekushchiy = sortirovka ? kodSortirovki(sortirovka) : ''
+
+  function sbrositVsyo(event: MouseEvent<HTMLButtonElement>) {
+    // Кнопка пропадёт вместе с включёнными группами, и фокус с неё упал бы
+    // на body — вон из панели: Escape до её обработчика не дошёл бы, а при
+    // закрытии фокус не вернулся бы на кнопку «Сортировка и фильтры».
+    // Переносим на «Показать N» — соседку, которая остаётся. Как у фишек:
+    // фокуса на кнопке нет (касание в iOS, щелчок в macOS) — не трогаем.
+    if (event.currentTarget === document.activeElement) pokazat.current?.focus()
+    onSbrositVsyo()
+  }
 
   return (
     <>
@@ -54,11 +66,11 @@ export function PanelOtbora<T>({ knopka, kolonki, naideno, sortirovka, onSortiro
           otkryvatel={knopka}
           niz={
             <>
-              <button type="button" className="panel-otbora-pokazat" onClick={zakryt}>
+              <button ref={pokazat} type="button" className="panel-otbora-pokazat" onClick={zakryt}>
                 {`Показать ${naideno}`}
               </button>
               {vklyucheno > 0 && (
-                <button type="button" className="panel-otbora-sbros" onClick={onSbrositVsyo}>
+                <button type="button" className="panel-otbora-sbros" onClick={sbrositVsyo}>
                   Сбросить всё
                 </button>
               )}
@@ -101,7 +113,12 @@ function GruppaOtbora({ gruppa, onVybor }: { gruppa: GruppaFiltra; onVybor: (kol
   const vybrano = gruppa.varianty.filter((v) => v.vybran).length
   return (
     <details className="panel-otbora-gruppa" open={raskryta} onToggle={(event) => raskryt(event.currentTarget.open)}>
-      <summary>{vybrano > 0 ? `${gruppa.zagolovok} · ${vybrano}` : gruppa.zagolovok}</summary>
+      {/* Свой значок раскрытия: summary у нас flex, а маркер браузер рисует
+          только у list-item; у раскрытой группы стрелка повёрнута (CSS). */}
+      <summary>
+        {vybrano > 0 ? `${gruppa.zagolovok} · ${vybrano}` : gruppa.zagolovok}
+        <ShevronIcon className="panel-otbora-strelka" napravlenie="vniz" />
+      </summary>
       <Galochki gruppa={gruppa} onVybor={onVybor} />
     </details>
   )
