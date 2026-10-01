@@ -192,6 +192,37 @@ test('на 360 px остаются название, себестоимость 
   expect(screen.queryByText('369,00 ₽')).not.toBeInTheDocument()
 })
 
+test('на 360 px строка блюда: название, id и категория подписью, UC и маржа с подписями, всё — кнопка в карточку', async () => {
+  setViewport(360)
+  narisovat()
+  const stroka = (await screen.findByText('Круасан с мортаделой')).closest('li')!
+  expect(stroka.querySelector('.stroka-podpis')).toHaveTextContent('B001 · Блюдо · 1 замечание')
+  // Между числом и единицей Num ставит неразрывный пробел; пробелы приводим
+  // к обычному — так же, как это делают getByText и toHaveTextContent.
+  const znacheniya = [...stroka.querySelectorAll('.stroka-znachenie')].map((el) =>
+    (el.textContent ?? '').replace(/\s+/g, ' '),
+  )
+  expect(znacheniya[0]).toMatch(/^UC/)
+  expect(znacheniya[0]).toContain('84,66 ₽')
+  expect(znacheniya[1]).toMatch(/^маржа/)
+  expect(znacheniya[1]).toContain('77,1 %')
+  // Статус, цена меню, UC % и выход на телефоне не показываются — они в карточке.
+  expect(stroka).not.toHaveTextContent('369,00 ₽')
+  expect(stroka).not.toHaveTextContent('22,9 %')
+  expect(screen.queryByRole('button', { name: /подробнее/i })).not.toBeInTheDocument()
+
+  await userEvent.click(within(stroka).getByRole('button'))
+  expect(put).toBe('/dishes/B001')
+})
+
+test('на 360 px красная строка — у li, а не только у tr', async () => {
+  setViewport(360)
+  narisovat()
+  const stroka = (await screen.findByText('Салат овощной')).closest('li')!
+  expect(stroka).toHaveClass('stroka--ubytok')
+  expect(stroka).toHaveTextContent('Выше цены меню')
+})
+
 test('сбой фонового обновления не стирает показанное', async () => {
   // Вернулся во вкладку на кухонном Wi-Fi — обновление упало. Прежние данные
   // верны, пока не пришли новые; стирать их — отнять экран из-за связи.

@@ -221,6 +221,29 @@ test('на 360 px остаются имя, цена и отметка карто
   expect(screen.queryByText('кг')).not.toBeInTheDocument()
 })
 
+test('на 360 px строка справочника: подпись «id · категория · ед.», цена и слова о карточке; вес и статус — тапом', async () => {
+  setViewport(360)
+  otvet = RAZNYE
+  narisovat()
+  const stroka = (await screen.findByText('Яйцо')).closest('li')!
+  // Порядок подписи — порядок колонок таблицы: id, категория, единица.
+  expect(stroka.querySelector('.stroka-podpis')).toHaveTextContent(/^12 · [^·]+ · шт$/)
+  expect(stroka).toHaveTextContent('нет карточки')
+  expect(stroka).not.toHaveTextContent('✓')
+  expect(stroka).not.toHaveTextContent('○')
+  expect(within(stroka).queryByText('Статус')).not.toBeInTheDocument()
+
+  const knopka = within(stroka).getByRole('button')
+  expect(knopka).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(knopka)
+  expect(within(stroka).getByText('Вес 1 шт')).toBeInTheDocument()
+  expect(within(stroka).getByText('Статус')).toBeInTheDocument()
+
+  const sKartochkoy = (await screen.findByText('Молоко')).closest('li')!
+  expect(sKartochkoy).toHaveTextContent('карточка есть')
+  expect(sKartochkoy.querySelector('.stroka-podpis')).toHaveTextContent(/^1000 · [^·]+ · л$/)
+})
+
 test('на 360 px сортировка по id — «по возрастанию / по убыванию», а не по алфавиту', async () => {
   // id — номера из таблицы, и «id: от А до Я» читалось бы странно.
   setViewport(360)

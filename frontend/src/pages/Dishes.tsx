@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom'
 
 import { useDishes } from '../api/queries'
 import type { Dish } from '../api/types'
+import { zamechaniyaSlovami } from '../domain/slova'
 import { estNet } from '../domain/tablitsa'
 import { dorozhe, PODPIS_DOROZHE } from '../domain/tseny'
 import type { Column } from '../ui/DataTable'
@@ -21,12 +22,17 @@ function vysheTseny(r: Dish): boolean {
  * Колонки списка блюд. Константа модуля: от неё зависят состояние таблицы
  * из адреса и пересчёт строк (`TablitsaSFiltrami`), новый массив на каждую
  * отрисовку пересчитывал бы их каждый раз.
+ *
+ * На телефоне (`uzkiy`) строка — кнопка в карточку: название, под ним id,
+ * категория и замечания словами, справа себестоимость и маржа — то, по чему
+ * блюдо выбирают из списка. Статус, цена меню, UC % и выход — `skryto`: они
+ * в карточке, а `podrobno` у строки с `onOpen` всё равно не раскрывается.
  */
 const KOLONKI_BLYUD: Column<Dish>[] = [
   {
     key: 'id',
     title: 'id',
-    uzkiy: 'podrobno',
+    uzkiy: 'podpis',
     // Текстом, но числа внутри — как числа: «B9» < «B10». Подписи — как у
     // id справочника: id — номера, а не слова.
     sort: { vid: 'tekst', znachenie: (r) => r.legacy_id, podpisi: ['по возрастанию', 'по убыванию'] },
@@ -42,7 +48,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
   {
     key: 'category',
     title: 'Категория',
-    uzkiy: 'podrobno',
+    uzkiy: 'podpis',
     sort: { vid: 'tekst', znachenie: (r) => r.category },
     filtr: { vid: 'znacheniya', znachenie: (r) => r.category },
     render: (r) => r.category,
@@ -50,7 +56,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
   {
     key: 'status',
     title: 'Статус',
-    uzkiy: 'podrobno',
+    uzkiy: 'skryto',
     sort: { vid: 'tekst', znachenie: (r) => r.status },
     // Значения — из ответа: у блюд «активное», у ингредиентов «активный»,
     // список статусов в коде не зашит.
@@ -61,7 +67,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'price',
     title: 'Цена меню',
     align: 'right',
-    uzkiy: 'podrobno',
+    uzkiy: 'skryto',
     sort: { vid: 'chislo', znachenie: (r) => r.price_menu },
     filtr: estNet((r) => r.price_menu !== null),
     render: (r) => <Num value={r.price_menu} fraction={2} unit="₽" />,
@@ -71,6 +77,8 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     title: 'UC ₽',
     align: 'right',
     uzkiy: 'znachenie',
+    // На телефоне подпись короче заголовка: рубли и так стоят при числе.
+    nazvanieUzkoe: 'UC',
     sort: { vid: 'chislo', znachenie: (r) => r.uc_rub },
     // Одно условие, а не «есть / нет»: себестоимость есть всегда, а искать
     // нужно блюда, где она выше цены, — те же, что окрашены красным.
@@ -95,7 +103,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'ucp',
     title: 'UC %',
     align: 'right',
-    uzkiy: 'podrobno',
+    uzkiy: 'skryto',
     sort: { vid: 'chislo', znachenie: (r) => r.uc_percent },
     render: (r) => <Num value={r.uc_percent} fraction={1} unit="%" />,
   },
@@ -104,6 +112,8 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     title: 'Маржа %',
     align: 'right',
     uzkiy: 'znachenie',
+    // На телефоне — «маржа»: проценты и так стоят при числе.
+    nazvanieUzkoe: 'маржа',
     // По возрастанию — сначала худшая: так шеф и ищет, где теряет. Блюда
     // без цены меню (маржи нет) — в конце в обе стороны.
     sort: {
@@ -117,7 +127,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'output',
     title: 'Выход',
     align: 'right',
-    uzkiy: 'podrobno',
+    uzkiy: 'skryto',
     sort: { vid: 'chislo', znachenie: (r) => r.output_grams },
     render: (r) => <Num value={r.output_grams} unit="г" />,
   },
@@ -127,7 +137,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'warnings',
     title: 'Замечания',
     align: 'right',
-    uzkiy: 'podrobno',
+    uzkiy: 'podpis',
     sort: { vid: 'chislo', znachenie: (r) => r.warnings },
     filtr: estNet((r) => r.warnings > 0),
     // Ноль — не «всё хорошо», а «нам не на что указать». Тревогой не
@@ -135,6 +145,12 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     render: (r) => (
       <span className={r.warnings > 0 ? 'zamechaniya' : undefined}>{r.warnings}</span>
     ),
+    // На телефоне — в подписи словами: голая «1» рядом с id ни о чём не
+    // говорит. Ноль — ничего, и точки после себя в подписи не оставляет.
+    renderUzkiy: (r) => {
+      const slova = zamechaniyaSlovami(r.warnings)
+      return slova ? <span className="zamechaniya">{slova}</span> : null
+    },
   },
 ]
 

@@ -17,12 +17,16 @@ function arhivnyy(r: Ingredient): boolean {
  * Колонки справочника. Константа модуля: от неё зависят состояние таблицы
  * из адреса и пересчёт строк (`TablitsaSFiltrami`), новый массив на каждую
  * отрисовку пересчитывал бы их каждый раз.
+ *
+ * На телефоне (`uzkiy`) карточки у позиции нет, и строка раскрывается
+ * тапом: наименование, под ним id, категория и единица, справа цена и слова
+ * о карточке; вес штуки и статус — по раскрытию (`podrobno`).
  */
 const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'id',
     title: 'id',
-    uzkiy: 'podrobno',
+    uzkiy: 'podpis',
     // Текстом, но числа внутри — как числа: «12» < «123» < «1000». id —
     // номера, поэтому и подписи числовые, а не «от А до Я».
     sort: { vid: 'tekst', znachenie: (r) => r.legacy_id, podpisi: ['по возрастанию', 'по убыванию'] },
@@ -38,7 +42,7 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'category',
     title: 'Категория',
-    uzkiy: 'podrobno',
+    uzkiy: 'podpis',
     sort: { vid: 'tekst', znachenie: (r) => r.category },
     filtr: { vid: 'znacheniya', znachenie: (r) => r.category },
     render: (r) => r.category,
@@ -46,7 +50,7 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'unit',
     title: 'Ед.',
-    uzkiy: 'podrobno',
+    uzkiy: 'podpis',
     // Цена бывает за килограмм и за штуку: единица — отдельной колонкой,
     // чтобы и отобрать по ней, и сравнивать цены одного рода.
     sort: { vid: 'tekst', znachenie: (r) => r.unit },
@@ -58,6 +62,8 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
     title: 'Цена за единицу',
     align: 'right',
     uzkiy: 'znachenie',
+    // На телефоне — «цена»: единица стоит при числе («₽/шт»).
+    nazvanieUzkoe: 'цена',
     sort: { vid: 'chislo', znachenie: (r) => r.price_per_kg },
     filtr: estNet((r) => r.price_per_kg !== null),
     // Имя поля price_per_kg врёт: при unit «шт» это цена за штуку.
@@ -88,6 +94,9 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
     key: 'card',
     title: 'Карточка',
     uzkiy: 'znachenie',
+    // На телефоне — словами и без подписи: значок «✓»/«○» без заголовка
+    // колонки над ним не прочесть, а слова говорят сами за себя.
+    nazvanieUzkoe: '',
     // По возрастанию — сначала позиции без карточки: их и ищут.
     sort: {
       vid: 'chislo',
@@ -106,6 +115,12 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
         <span aria-label="карточки нет" title="карточки нет" className="net-kartochki">
           ○
         </span>
+      ),
+    renderUzkiy: (r) =>
+      r.has_card ? (
+        <span className="kartochka-est">карточка есть</span>
+      ) : (
+        <span className="net-kartochki">нет карточки</span>
       ),
   },
 ]
