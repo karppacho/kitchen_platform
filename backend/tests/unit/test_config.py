@@ -51,15 +51,16 @@ def test_label_recognition_defaults() -> None:
     assert settings.llm_daily_budget_rub == 300
 
 
-def test_vision_timeout_fits_into_nginx() -> None:
-    """Два ожидания (запрос и один повтор) не дольше 180 с, что nginx держит
-    запрос распознавания: иначе повар получил бы 504 при живом вызове."""
+def test_vision_timeout_leaves_room_for_a_repeat() -> None:
+    """Повтор идёт, только если с ним распознавание укладывается в общий срок
+    170 с (nginx держит запрос 180 с). Таймаут больше 80 с сделал бы повтор
+    невозможным: первая попытка сама отнимает не меньше таймаута."""
     with pytest.raises(ValidationError, match="llm_vision_timeout_seconds"):
-        Settings(_env_file=None, llm_vision_timeout_seconds=90)
+        Settings(_env_file=None, llm_vision_timeout_seconds=81)
     with pytest.raises(ValidationError, match="llm_vision_timeout_seconds"):
         Settings(_env_file=None, llm_vision_timeout_seconds=0)
 
-    assert Settings(_env_file=None, llm_vision_timeout_seconds=85).llm_vision_timeout_seconds == 85
+    assert Settings(_env_file=None, llm_vision_timeout_seconds=80).llm_vision_timeout_seconds == 80
 
 
 def test_sync_defaults() -> None:

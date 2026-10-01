@@ -9,8 +9,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
+import time
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -27,7 +32,7 @@ from kitchen.llm.label import (
     parse_label_reply,
 )
 from kitchen.llm.polza import LlmGarbageError, PolzaClient
-from tests.fake_polza import BASE_URL, JPEG, KEY, MODEL, FakePolza, ok
+from tests.fake_polza import BASE_URL, JPEG, KEY, MODEL, ClosingTransport, FakePolza, ok
 
 READ = {
     "label_name": "Сыр полутвёрдый «Гауда» 45%",
@@ -172,6 +177,98 @@ def test_deep_nesting_is_garbage_not_a_crash() -> None:
         parse_label_reply(reply)
 
 
+_TIMED_PARSE = """
+import json, sys, time
+from kitchen.llm.label import parse_label_reply
+from kitchen.llm.polza import LlmGarbageError
+
+results = []
+for reply in json.load(sys.stdin):
+    started = time.perf_counter()
+    try:
+        parse_label_reply(reply)
+        kind = "ok"
+    except LlmGarbageError:
+        kind = "garbage"
+    results.append([kind, time.perf_counter() - started])
+print(json.dumps(results))
+"""
+_SRC = Path(__file__).resolve().parents[2] / "src"
+
+
+def _parse_in_child(replies: list[str], *, deadline: float = 30) -> list[tuple[str, float]]:
+    """Разбор в отдельном процессе с пределом времени.
+
+    Зависший регэксп держит GIL и из потока не прерывается, а процесс можно
+    убить: вырожденный ответ роняет тест за ``deadline`` секунд, а не вешает
+    прогон на часы.
+    """
+    env = {**os.environ, "PYTHONPATH": str(_SRC), "PYTHONIOENCODING": "utf-8"}
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", _TIMED_PARSE],
+            input=json.dumps(replies),
+            capture_output=True,
+            encoding="utf-8",
+            timeout=deadline,
+            env=env,
+            check=True,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"разбор ответа не уложился в {deadline} с — перебор с возвратами")
+    return [(kind, seconds) for kind, seconds in json.loads(done.stdout)]
+
+
+def test_degenerate_replies_are_parsed_fast() -> None:
+    """Поток пробелов и переводов строк в режиме JSON — известный сбой моделей.
+    Разбор идёт в процессе api и держит GIL: медленный разбор остановил бы
+    весь сайт. Каждый ответ до предела длины — быстрее секунды."""
+    spaces = " " * (MAX_REPLY_CHARS - 1000)
+    replies = {
+        "ограда без конца и поток переводов строк": "```json" + "\n" * 20000 + "{",
+        "пробелы внутри объекта, ограда не закрыта": "```json\n{" + spaces + '"label_name": "Сыр"}',
+        "пробелы внутри объекта в ограде": '```json\n{"label_name": "Сыр"' + spaces + "}\n```",
+        "пробелы до объекта без ограды": "Вот:" + spaces + '{"label_name": "Сыр"} готово',
+        "одни обратные кавычки": "`" * (MAX_REPLY_CHARS - 10),
+    }
+
+    results = dict(zip(replies, _parse_in_child(list(replies.values())), strict=True))
+
+    assert {name: kind for name, (kind, _) in results.items()} == {
+        "ограда без конца и поток переводов строк": "garbage",
+        "пробелы внутри объекта, ограда не закрыта": "ok",
+        "пробелы внутри объекта в ограде": "ok",
+        "пробелы до объекта без ограды": "ok",
+        "одни обратные кавычки": "garbage",
+    }
+    slow = {name: seconds for name, (_, seconds) in results.items() if seconds >= 1}
+    assert not slow, slow
+
+
+def test_longest_reading_goes_through_the_domain_fast() -> None:
+    """Регулярные выражения домена получают строки не длиннее пределов схемы;
+    на самых неудобных строках такой длины разбор всё равно мгновенный."""
+    for pattern in ("1 ", "1,", "до 1 ", "1/", "ккал 1 "):
+        for tail in ("", "ккал", " июня 2025", "°"):
+            extraction = {
+                field: (pattern * limit)[: limit - len(tail)] + tail
+                for field, limit in FIELD_LIMITS.items()
+            }
+            started = time.perf_counter()
+            label_fields_from_extraction(parse_label_reply(json.dumps(extraction)).model_dump())
+            assert time.perf_counter() - started < 1, (pattern, tail)
+
+
+def test_garbage_does_not_carry_the_parser_error() -> None:
+    """Своя ошибка без цепочки: в журнал и в лог уходит только ``describe()``."""
+    with pytest.raises(LlmGarbageError) as caught:
+        parse_label_reply('{"label_name": ["Сыр"]}')
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert caught.value.__context__ is None
+
+
 def test_extraction_feeds_the_domain() -> None:
     """Сквозной пример: что прочитала модель → поля карточки. КБЖУ — ``Decimal``,
     срок посчитан кодом из дат «как написаны», а не моделью."""
@@ -252,9 +349,34 @@ def test_garbage_reply_keeps_what_the_call_cost() -> None:
 
     assert caught.value.kind == "garbage"
     assert caught.value.cost_rub == Decimal("0.0123")
+    assert caught.value.unpriced_attempts == 0
     assert caught.value.tokens == 1200
     assert caught.value.duration_ms is not None
     assert "вручную" in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert caught.value.__context__ is None
+
+
+def test_garbage_reply_without_price_counts_as_unpriced() -> None:
+    fake = FakePolza(ok("Не могу прочитать этикетку.", usage=None))
+
+    with pytest.raises(LlmGarbageError) as caught:
+        _reader(fake).read(JPEG)
+
+    assert caught.value.cost_rub is None
+    assert caught.value.unpriced_attempts == 1
+
+
+def test_reader_closes_its_client() -> None:
+    fake = FakePolza(ok(json.dumps(READ, ensure_ascii=False)))
+    transport = ClosingTransport(fake)
+    client = PolzaClient(api_key=KEY, base_url=BASE_URL, timeout_seconds=60, transport=transport)
+
+    with LabelReader(client, model=MODEL) as reader:
+        reader.read(JPEG)
+
+    assert transport.closed
 
 
 def test_reader_from_settings() -> None:

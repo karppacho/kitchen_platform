@@ -67,3 +67,31 @@ class FakePolza:
     def bodies(self) -> list[dict[str, object]]:
         """Тела запросов — как их разобрал бы polza.ai."""
         return [json.loads(request.content) for request in self.requests]
+
+
+class ClosingTransport(httpx.MockTransport):
+    """Транспорт, который помнит, что его закрыли: закрыт клиент — закрыт и он."""
+
+    closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class Clock:
+    """Монотонные часы в наносекундах, которые двигает тест, а не время."""
+
+    def __init__(self) -> None:
+        self.ns = 0
+
+    def __call__(self) -> int:
+        return self.ns
+
+    def slow(self, fake: FakePolza, seconds: int) -> httpx.MockTransport:
+        """Транспорт, на котором каждый запрос «идёт» ``seconds`` секунд."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.ns += seconds * 1_000_000_000
+            return fake(request)
+
+        return httpx.MockTransport(handler)

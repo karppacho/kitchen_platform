@@ -2,24 +2,33 @@
 
 polza.ai — OpenAI-совместимый шлюз, единственный путь к моделям: прямой
 доступ к OpenAI и Anthropic из РФ закрыт. Запрос идёт через SDK OpenAI с
-адресом polza.ai поверх нашего ``httpx.Client``. Четыре вещи клиент решает
+адресом polza.ai поверх нашего ``httpx.Client``. Пять вещей клиент решает
 сам, а не SDK:
 
 * **Повторы.** Встроенные повторы SDK выключены (``max_retries=0``): SDK
   повторил бы и 429, и таймаут ещё дважды с паузами — повар ждал бы
   минутами, а каждая попытка могла стоить денег. Свой повтор — ровно один и
   только там, где он может помочь: таймаут, обрыв связи, ответ 5xx.
+* **Общий срок.** Таймаут чтения отсчитывается от последнего полученного
+  байта, и попытка может идти дольше таймаута. Поэтому ещё одна попытка
+  (повтор или запрос без режима JSON) делается, только если прошедшее время
+  плюс таймаут не больше :data:`TOTAL_DEADLINE_SECONDS`: nginx держит запрос
+  распознавания 180 с.
 * **Режим JSON.** ``response_format={"type": "json_object"}``; модель, которая
   его не знает, отвечает 400 — тогда тот же запрос уходит без него. Ответ
   всё равно проверяет схема того, кто звал.
 * **Стоимость.** polza.ai кладёт ``cost_rub`` в ``usage``. SDK разобрал бы
   тело через ``float``; клиент читает сырое тело сам, дробные числа — через
-  ``Decimal``, с теми цифрами, что прислал polza.ai.
+  ``Decimal``, с теми цифрами, что прислал polza.ai. Попытки, цена которых
+  неизвестна (таймаут, обрыв после отправки, 5xx, ответ без цены), клиент
+  считает: журнал вызовов добавляет за каждую оценку.
 * **Таймауты** — свои, из настроек, на каждую фазу запроса. У SDK по
   умолчанию десять минут ожидания ответа.
 
 Отказ — :class:`LlmError`: вид — для кода, текст — для человека (его видит
-повар), цена и время — для журнала вызовов.
+повар), цена и время — для журнала вызовов. Исключение SDK наружу не уходит
+даже цепочкой: в нём запрос с заголовком ``Authorization: Bearer <ключ>``, и
+любой ``logger.exception`` унёс бы ключ в лог.
 """
 
 from __future__ import annotations
@@ -35,6 +44,8 @@ import httpx
 import openai
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from openai.types.chat import ChatCompletionMessageParam
     from openai.types.shared_params import ResponseFormatJSONObject
 
@@ -43,6 +54,9 @@ if TYPE_CHECKING:
 LlmErrorKind = Literal[
     "key", "no_money", "not_found", "rate", "unavailable", "bad_request", "bad_reply", "garbage"
 ]
+
+TOTAL_DEADLINE_SECONDS = 170
+"""Дольше этого вызов не затягивается повтором: nginx ждёт распознавание 180 с."""
 
 _KEY = "polza.ai не принял ключ платформы. Сообщите администратору."
 _NO_MONEY = "На счёте polza.ai кончились деньги. Сообщите администратору."
@@ -55,8 +69,16 @@ _BAD_REPLY = (
 )
 _GARBAGE = "Модель ответила непонятно. Попробуйте ещё раз или заполните поля вручную."
 
-_REFUSED_COST = Decimal("0")
-"""Цена отказа 4xx: polza.ai отказал до работы модели, списывать не за что."""
+_FREE = Decimal("0")
+"""Цена попытки, до модели не дошедшей: отказ 4xx или запрос, не ушедший в сеть."""
+
+_COST_CEILING = Decimal("100000000")
+"""С этой цены — не цена: колонка журнала ``Numeric(12,4)`` её не вместит."""
+_TOKENS_CEILING = 2**31 - 1
+"""Больше токенов колонка ``Integer`` не вмещает."""
+
+_NOT_SENT = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+"""Сбои до отправки запроса: соединения не было — и списывать не за что."""
 
 _JSON_MODE: ResponseFormatJSONObject = {"type": "json_object"}
 
@@ -71,9 +93,11 @@ class LlmError(RuntimeError):
     человека.
 
     ``status`` — код ответа polza.ai (``None`` — ответа не было); ``detail`` —
-    подробность для журнала. ``cost_rub``, ``tokens``, ``duration_ms`` — что
-    известно о вызове для журнала: ``cost_rub=None`` — цена неизвестна
-    (таймаут: модель могла поработать), ``0`` — polza.ai отказал сразу.
+    подробность для журнала. Для журнала же — ``cost_rub``: известная цена
+    последней попытки (``0`` — polza.ai отказал сразу или запрос не ушёл,
+    ``None`` — неизвестна); ``unpriced_attempts`` — сколько попыток могли
+    стоить денег, а сколько — неизвестно (последняя с ``cost_rub=None`` в их
+    числе); ``tokens``, ``duration_ms``.
     """
 
     def __init__(
@@ -84,6 +108,7 @@ class LlmError(RuntimeError):
         status: int | None = None,
         detail: str = "",
         cost_rub: Decimal | None = None,
+        unpriced_attempts: int = 0,
         tokens: int | None = None,
         duration_ms: int | None = None,
     ) -> None:
@@ -92,6 +117,7 @@ class LlmError(RuntimeError):
         self.status = status
         self.detail = detail
         self.cost_rub = cost_rub
+        self.unpriced_attempts = unpriced_attempts
         self.tokens = tokens
         self.duration_ms = duration_ms
 
@@ -110,6 +136,7 @@ class LlmGarbageError(LlmError):
         detail: str,
         *,
         cost_rub: Decimal | None = None,
+        unpriced_attempts: int = 0,
         tokens: int | None = None,
         duration_ms: int | None = None,
     ) -> None:
@@ -118,6 +145,7 @@ class LlmGarbageError(LlmError):
             _GARBAGE,
             detail=detail,
             cost_rub=cost_rub,
+            unpriced_attempts=unpriced_attempts,
             tokens=tokens,
             duration_ms=duration_ms,
         )
@@ -127,6 +155,7 @@ class LlmGarbageError(LlmError):
         return LlmGarbageError(
             self.detail,
             cost_rub=reply.cost_rub,
+            unpriced_attempts=reply.unpriced_attempts,
             tokens=reply.tokens,
             duration_ms=reply.duration_ms,
         )
@@ -140,10 +169,13 @@ class LlmReply:
     """Текст ответа как есть; пустой — модель промолчала."""
     model: str
     cost_rub: Decimal | None
-    """Сколько списал polza.ai; ``None`` — не сообщил."""
+    """Сколько списал polza.ai за ответившую попытку; ``None`` — не сообщил."""
     tokens: int | None
     duration_ms: int
     """Сколько ждал повар — вместе с повтором, если он был."""
+    unpriced_attempts: int = 0
+    """Попытки с неизвестной ценой: неудачные до ответа (таймаут, обрыв после
+    отправки, 5xx) и сам ответ, если polza.ai не сообщил цену."""
 
 
 def parse_json(text: str) -> object:
@@ -159,12 +191,27 @@ def _not_a_number(name: str) -> object:
     raise ValueError(f"{name} — не число")
 
 
+@dataclass(frozen=True, slots=True)
+class _Attempt:
+    """Чем кончилась одна попытка — без исключения SDK и его запроса с ключом."""
+
+    body: str | None = None
+    """Тело ответа 2xx."""
+    status: int | None = None
+    """Код отказа polza.ai."""
+    maybe_sent: bool = False
+    """Сбой связи, при котором запрос мог дойти до модели."""
+    detail: str = ""
+
+
 class PolzaClient:
     """Вызовы модели через polza.ai.
 
-    ``transport`` — транспорт httpx: в бою ``None`` (сеть), в тестах —
-    ``httpx.MockTransport``. Ключ хранится только внутри SDK и не попадает
-    ни в текст ошибок, ни в журнал.
+    Держит пул соединений: заводите один на процесс или закрывайте
+    (:meth:`close`, ``with``). ``transport`` — транспорт httpx: в бою ``None``
+    (сеть), в тестах — ``httpx.MockTransport``; ``clock`` — монотонные часы в
+    наносекундах, для тестов общего срока. Ключ хранится только внутри SDK и не
+    попадает ни в текст ошибок, ни в журнал.
     """
 
     def __init__(
@@ -174,10 +221,13 @@ class PolzaClient:
         base_url: str,
         timeout_seconds: float,
         transport: httpx.BaseTransport | None = None,
+        clock: Callable[[], int] = time.monotonic_ns,
     ) -> None:
         if not api_key:
             raise ValueError("Не задан ключ polza.ai — POLZA_API_KEY")
         self.base_url = base_url
+        self._clock = clock
+        self._timeout_ns = round(timeout_seconds * 1_000_000_000)
         self._openai = openai.OpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -188,6 +238,16 @@ class PolzaClient:
             # в тестах тот же клиент ходит через httpx.MockTransport.
             http_client=httpx.Client(transport=transport),  # type: ignore[arg-type]
         )
+
+    def close(self) -> None:
+        """Закрыть соединения; дальше клиент не работает."""
+        self._openai.close()
+
+    def __enter__(self) -> PolzaClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def vision_json(
         self, *, model: str, system: str, prompt: str, jpeg: bytes, max_tokens: int
@@ -208,50 +268,71 @@ class PolzaClient:
                 ],
             },
         ]
-        started = time.monotonic_ns()
+        started = self._clock()
         json_mode = True
         repeated = False
+        unpriced = 0
         while True:
-            try:
-                body = self._send(model, messages, max_tokens, json_mode=json_mode)
-            except openai.APIConnectionError as error:  # в том числе APITimeoutError
-                if not repeated:
+            attempt = self._attempt(model, messages, max_tokens, json_mode=json_mode)
+            if attempt.body is not None:
+                return _reply(attempt.body, model, self._elapsed_ms(started), unpriced)
+            if attempt.status is None:
+                unpriced += int(attempt.maybe_sent)
+                if not repeated and self._time_for_another(started):
                     repeated = True
                     continue
                 raise LlmError(
                     "unavailable",
                     _UNAVAILABLE,
-                    detail=type(error).__name__,
-                    duration_ms=_since(started),
-                ) from error
-            except openai.APIStatusError as error:
-                status = error.status_code
-                if status == 400 and json_mode:
-                    json_mode = False
-                    continue
-                if _worth_repeating(status) and not repeated:
+                    detail=attempt.detail,
+                    cost_rub=None if attempt.maybe_sent else _FREE,
+                    unpriced_attempts=unpriced,
+                    duration_ms=self._elapsed_ms(started),
+                ) from None
+            if attempt.status == 400 and json_mode and self._time_for_another(started):
+                json_mode = False
+                continue
+            if _worth_repeating(attempt.status):
+                unpriced += 1
+                if not repeated and self._time_for_another(started):
                     repeated = True
                     continue
-                raise _refusal(status, model, _since(started)) from error
-            return _reply(body, model, _since(started))
+            raise _refusal(attempt.status, model, self._elapsed_ms(started), unpriced) from None
 
-    def _send(
+    def _attempt(
         self,
         model: str,
         messages: list[ChatCompletionMessageParam],
         max_tokens: int,
         *,
         json_mode: bool,
-    ) -> str:
+    ) -> _Attempt:
         """Один запрос; сырое тело ответа — чтобы цену не разобрал ``float``."""
-        raw = self._openai.chat.completions.with_raw_response.create(
-            model=model,
-            messages=messages,
-            temperature=0,
-            max_tokens=max_tokens,
-            response_format=_JSON_MODE if json_mode else openai.omit,
-        )
-        return raw.text
+        try:
+            raw = self._openai.chat.completions.with_raw_response.create(
+                model=model,
+                messages=messages,
+                temperature=0,
+                max_tokens=max_tokens,
+                response_format=_JSON_MODE if json_mode else openai.omit,
+            )
+            return _Attempt(body=raw.text)
+        except openai.APIStatusError as error:
+            return _Attempt(status=error.status_code)
+        except openai.APIConnectionError as error:  # в том числе APITimeoutError
+            cause = error.__cause__
+            return _Attempt(
+                maybe_sent=not isinstance(cause, _NOT_SENT),
+                detail=type(cause or error).__name__,
+            )
+
+    def _time_for_another(self, started: int) -> bool:
+        """Уложится ли ещё одна попытка целиком в общий срок."""
+        spent = self._clock() - started
+        return spent + self._timeout_ns <= TOTAL_DEADLINE_SECONDS * 1_000_000_000
+
+    def _elapsed_ms(self, started: int) -> int:
+        return (self._clock() - started) // 1_000_000
 
 
 def polza_from_settings(
@@ -274,10 +355,15 @@ def _worth_repeating(status: int) -> bool:
     return status >= 500 or status == 408
 
 
-def _refusal(status: int, model: str, duration_ms: int) -> LlmError:
+def _refusal(status: int, model: str, duration_ms: int, unpriced: int) -> LlmError:
     if _worth_repeating(status):
+        # Модель могла успеть поработать — цена неизвестна, попытка в unpriced.
         return LlmError(
-            "unavailable", _UNAVAILABLE, status=status, detail="", duration_ms=duration_ms
+            "unavailable",
+            _UNAVAILABLE,
+            status=status,
+            unpriced_attempts=unpriced,
+            duration_ms=duration_ms,
         )
     kind: LlmErrorKind
     if status in (401, 403):
@@ -290,43 +376,62 @@ def _refusal(status: int, model: str, duration_ms: int) -> LlmError:
         kind, message = "rate", _RATE
     else:
         kind, message = "bad_request", _BAD_REQUEST
-    return LlmError(kind, message, status=status, cost_rub=_REFUSED_COST, duration_ms=duration_ms)
+    return LlmError(
+        kind,
+        message,
+        status=status,
+        cost_rub=_FREE,
+        unpriced_attempts=unpriced,
+        duration_ms=duration_ms,
+    )
 
 
-def _reply(body: str, model: str, duration_ms: int) -> LlmReply:
-    """Тело ответа chat/completions → :class:`LlmReply`."""
+def _reply(body: str, model: str, duration_ms: int, unpriced: int) -> LlmReply:
+    """Тело ответа chat/completions → :class:`LlmReply`.
+
+    Ответ, который не разобрать, — тоже попытка с неизвестной ценой.
+    """
 
     def bad(detail: str) -> LlmError:
-        return LlmError("bad_reply", _BAD_REPLY, detail=detail, duration_ms=duration_ms)
+        return LlmError(
+            "bad_reply",
+            _BAD_REPLY,
+            detail=detail,
+            unpriced_attempts=unpriced + 1,
+            duration_ms=duration_ms,
+        )
 
     try:
         payload = parse_json(body)
-    except (ValueError, RecursionError) as error:
-        raise bad("тело ответа — не JSON") from error
+    except (ValueError, RecursionError):
+        payload = None
     if not isinstance(payload, dict):
-        raise bad("тело ответа — не объект")
+        raise bad("тело ответа — не JSON-объект") from None
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise bad("в ответе нет choices")
+        raise bad("в ответе нет choices") from None
     message = choices[0].get("message")
     if not isinstance(message, dict):
-        raise bad("в ответе нет message")
+        raise bad("в ответе нет message") from None
     content = message.get("content")
     usage = payload.get("usage")
     usage = usage if isinstance(usage, dict) else {}
     tokens = usage.get("total_tokens")
     answered = payload.get("model")
+    cost = _cost(usage.get("cost_rub"))
     return LlmReply(
         text=content if isinstance(content, str) else "",
         model=answered if isinstance(answered, str) and answered else model,
-        cost_rub=_cost(usage.get("cost_rub")),
-        tokens=tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None,
+        cost_rub=cost,
+        tokens=_tokens(tokens),
         duration_ms=duration_ms,
+        unpriced_attempts=unpriced + int(cost is None),
     )
 
 
 def _cost(value: object) -> Decimal | None:
-    """``usage.cost_rub`` → рубли. Непонятное или отрицательное — ``None``: не знаем."""
+    """``usage.cost_rub`` → рубли. Непонятное, отрицательное или нелепо большое
+    — ``None``: не знаем, журнал посчитает по оценке."""
     if isinstance(value, bool):
         return None
     if isinstance(value, Decimal | int):
@@ -338,10 +443,12 @@ def _cost(value: object) -> Decimal | None:
             return None
     else:
         return None
-    if not number.is_finite() or number < 0:
+    if not number.is_finite() or not _FREE <= number < _COST_CEILING:
         return None
     return number
 
 
-def _since(started_ns: int) -> int:
-    return (time.monotonic_ns() - started_ns) // 1_000_000
+def _tokens(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value <= _TOKENS_CEILING else None

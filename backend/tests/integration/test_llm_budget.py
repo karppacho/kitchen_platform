@@ -239,6 +239,39 @@ def test_record_call_keeps_exact_cost(sessions: sessionmaker[Session]) -> None:
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize(
+    ("cost", "unpriced", "stored"),
+    [
+        ("0.0123", 1, "5.0123"),
+        (None, 2, "10"),
+        ("0", 1, "5"),
+        ("0", 0, "0"),
+        (None, 0, None),
+    ],
+)
+def test_record_call_adds_estimate_for_unpriced_attempts(
+    sessions: sessionmaker[Session], cost: str | None, unpriced: int, stored: str | None
+) -> None:
+    """Таймаут, потом успех: вторая попытка стоила 0,0123 ₽, первая — неизвестно
+    сколько, считается в 5 ₽. Журнал видит одну строку на распознавание, и цена
+    первой попытки в ней не теряется."""
+    with sessions.begin() as session:
+        record_call(
+            session,
+            purpose=LABEL_PURPOSE,
+            model="qwen/qwen3.6-plus",
+            prompt_version=LABEL_PROMPT_VERSION,
+            profile_id=None,
+            ok=True,
+            cost_rub=None if cost is None else Decimal(cost),
+            unpriced_attempts=unpriced,
+        )
+    with sessions() as session:
+        [call] = session.scalars(select(LlmCall)).all()
+    assert call.cost_rub == (None if stored is None else Decimal(stored))
+
+
+@pytest.mark.integration
 def test_deleting_a_profile_keeps_the_journal(sessions: sessionmaker[Session]) -> None:
     """Повара удалили — траты остались: деньги потрачены, бюджет их помнит."""
     with sessions.begin() as session:

@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING
@@ -127,7 +126,9 @@ LABEL_SYSTEM_PROMPT = """\
 
 LABEL_USER_TEXT = "Перепиши эту этикетку в JSON-объект по правилам выше."
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_FENCE = "```"
+_FENCE_LANGUAGE = "json"
+_NOT_JSON = object()
 
 
 # Any здесь не наш: его вносит конструктор, который pydantic объявляет любой
@@ -191,30 +192,46 @@ def parse_label_reply(text: str) -> LabelExtraction:
 
     Обёртка ```json … ``` и проза вокруг объекта снимаются — модели так
     отвечают, даже когда их просят не делать этого. Дробные числа JSON
-    читаются через ``Decimal``.
+    читаются через ``Decimal``. Всё за линейное время: разбор идёт в процессе
+    сайта, и вырожденный ответ (поток пробелов — известный сбой режима JSON)
+    не должен его останавливать.
+
+    Ошибка поднимается без цепочки: в журнал идёт только ``describe()``.
     """
     if len(text) > MAX_REPLY_CHARS:
-        raise LlmGarbageError(f"ответ длиннее {MAX_REPLY_CHARS} символов")
+        raise LlmGarbageError(f"ответ длиннее {MAX_REPLY_CHARS} символов") from None
     try:
         data = parse_json(_json_part(text))
-    except (ValueError, RecursionError) as error:
-        raise LlmGarbageError("ответ — не JSON") from error
+    except (ValueError, RecursionError):
+        data = _NOT_JSON
+    if data is _NOT_JSON:
+        raise LlmGarbageError("ответ — не JSON") from None
     if not isinstance(data, dict):
-        raise LlmGarbageError(f"ответ — не JSON-объект, а {type(data).__name__}")
+        raise LlmGarbageError(f"ответ — не JSON-объект, а {type(data).__name__}") from None
+    problem = ""
     try:
         return LabelExtraction.model_validate(data)
     except ValidationError as error:
-        problem = error.errors()[0]
-        where = ".".join(str(part) for part in problem["loc"])
-        raise LlmGarbageError(f"поле {where}: {problem['type']}") from error
+        first = error.errors()[0]
+        problem = f"поле {'.'.join(str(part) for part in first['loc'])}: {first['type']}"
+    raise LlmGarbageError(problem) from None
 
 
 def _json_part(text: str) -> str:
-    """Объект из ответа: внутри ```-ограды, иначе от первой «{» до последней «}»."""
+    """Объект из ответа: внутри ```-ограды, иначе от первой «{» до последней «}».
+
+    Поиском подстрок, а не регулярным выражением: ленивая группа между ``\\s*``
+    на потоке переводов строк перебирала бы варианты кубически — часы на
+    одном ответе.
+    """
     stripped = text.strip()
-    fence = _FENCE.search(stripped)
-    if fence is not None:
-        return fence.group(1)
+    opening = stripped.find(_FENCE)
+    closing = stripped.find(_FENCE, opening + len(_FENCE)) if opening != -1 else -1
+    if closing != -1:
+        inside = stripped[opening + len(_FENCE) : closing]
+        if inside[: len(_FENCE_LANGUAGE)].lower() == _FENCE_LANGUAGE:
+            inside = inside[len(_FENCE_LANGUAGE) :]
+        return inside.strip()
     start, end = stripped.find("{"), stripped.rfind("}")
     if start != -1 and end > start:
         return stripped[start : end + 1]
@@ -230,13 +247,26 @@ class LabelReading:
 
 
 class LabelReader:
-    """Читает этикетку по фото: промпт, модель, разбор ответа схемой."""
+    """Читает этикетку по фото: промпт, модель, разбор ответа схемой.
+
+    Держит клиента polza.ai с пулом соединений: один на процесс или закрывать
+    (:meth:`close`, ``with``).
+    """
 
     def __init__(self, client: PolzaClient, *, model: str) -> None:
         self._client = client
         self.model = model
         self.purpose = LABEL_PURPOSE
         self.prompt_version = LABEL_PROMPT_VERSION
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> LabelReader:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def read(self, jpeg: bytes) -> LabelReading:
         """Фото этикетки (JPEG) → прочитанное.
@@ -255,8 +285,10 @@ class LabelReader:
         try:
             extraction = parse_label_reply(reply.text)
         except LlmGarbageError as error:
-            raise error.priced(reply) from error
-        return LabelReading(extraction=extraction, reply=reply)
+            garbage = error.priced(reply)
+        else:
+            return LabelReading(extraction=extraction, reply=reply)
+        raise garbage from None
 
 
 def label_reader_from_settings(

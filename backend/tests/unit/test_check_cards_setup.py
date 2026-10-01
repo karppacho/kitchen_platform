@@ -24,7 +24,16 @@ from kitchen.config import Settings
 from kitchen.llm.polza import PolzaClient, polza_from_settings
 from kitchen.sync.drive import INSPECT_SCOPE, SCOPES, DriveClient
 from tests.fake_drive import FOLDER_ID, ROBOT, SHEET_MIME, FakeDrive, FakeFile
-from tests.fake_polza import BASE_URL, KEY, MODEL, Answer, FakePolza, ok, refusal
+from tests.fake_polza import (
+    BASE_URL,
+    KEY,
+    MODEL,
+    Answer,
+    ClosingTransport,
+    FakePolza,
+    ok,
+    refusal,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,7 +103,8 @@ class Setup:
 
     def _polza(self, settings: Settings) -> PolzaClient | None:
         """Тот же клиент, что в бою, только вместо сети — фальшивый polza.ai."""
-        return polza_from_settings(settings, transport=self.polza.transport())
+        self.polza_transport = ClosingTransport(self.polza)
+        return polza_from_settings(settings, transport=self.polza_transport)
 
     def scopes(self) -> list[str]:
         """Охваты открытых сессий по порядку."""
@@ -511,6 +521,29 @@ def test_bot_key_not_in_utf8(setup: Setup, capsys: pytest.CaptureFixture[str]) -
     assert "UTF-8" in out
 
 
+def test_platform_key_with_bom(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    """Блокнот сохраняет «UTF-8 с BOM»: метка в начале файла ломает разбор JSON и
+    у Google, поэтому это ошибка — с понятной причиной, а не «не JSON»."""
+    _key(setup.tmp_path / "platform.json", ROBOT, encoding="utf-8-sig")
+
+    code, out = setup.run(capsys)
+
+    assert code == 1
+    assert "BOM" in out
+    assert "не JSON" not in out
+    assert setup.opened == []
+
+
+def test_bot_key_with_bom(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    bot_key = _key(setup.tmp_path / "bot.json", BOT, encoding="utf-8-sig")
+
+    code, out = setup.run(capsys, "--bot-key", str(bot_key))
+
+    assert code == 0
+    assert "ключ бота не прочитан" in out
+    assert "BOM" in out
+
+
 def test_bot_key_from_stdin_not_in_utf8(
     setup: Setup, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -555,6 +588,7 @@ def test_llm_probe(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
     assert len(jpeg) < 1024
     height, width = _jpeg_size(jpeg)
     assert min(height, width) > 10, "картинку меньше 11 пикселей модели Qwen не принимают"
+    assert setup.polza_transport.closed, "клиент закрыт после пробы"
 
 
 def test_no_llm_call_without_the_flag(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
@@ -574,6 +608,8 @@ def test_no_llm_call_without_the_flag(setup: Setup, capsys: pytest.CaptureFixtur
         (refusal(404), "модель не найдена"),
         (httpx.ConnectError, "нет связи"),
         (httpx.ReadTimeout, "нет связи"),
+        (refusal(400), "LLM_VISION_MODEL"),
+        (httpx.Response(200, content=b"<html>login</html>"), "POLZA_BASE_URL"),
     ],
 )
 def test_llm_probe_failure_is_explained(
@@ -587,6 +623,7 @@ def test_llm_probe_failure_is_explained(
     assert text in out
     assert "ОШИБКА" in out
     assert KEY not in out
+    assert "Сообщите администратору" not in out, "скрипт читает администратор — нужна подсказка"
 
 
 def test_llm_probe_without_key(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:

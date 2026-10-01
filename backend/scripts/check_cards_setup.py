@@ -150,6 +150,9 @@ NOT_UTF8 = (
     "файл не в кодировке UTF-8 — похоже, его пересохранили Блокнотом как «Юникод» "
     "(UTF-16); сохраните ключ в UTF-8"
 )
+WITH_BOM = (
+    "в начале файла метка BOM — так Блокнот сохраняет «UTF-8 с BOM»; сохраните ключ в UTF-8 без BOM"
+)
 
 
 class Report:
@@ -307,6 +310,9 @@ def _client_email(text: str | None, problem: str) -> tuple[str | None, str]:
     if "\x00" in text:
         # UTF-16 без метки порядка байтов — формально UTF-8, но с нулями.
         return None, NOT_UTF8
+    if text.startswith("﻿"):
+        # Разбор JSON у Google на этой метке падает так же, как здесь.
+        return None, WITH_BOM
     try:
         data = json.loads(text)
     except ValueError:
@@ -542,13 +548,14 @@ def _check_llm(settings: Settings, report: Report) -> None:
         report.fail("не задан POLZA_API_KEY — распознавание этикеток не заработает")
         return
     try:
-        reply = client.vision_json(
-            model=settings.llm_vision_model,
-            system=LLM_PROBE_SYSTEM,
-            prompt=LLM_PROBE_PROMPT,
-            jpeg=LLM_PROBE_IMAGE,
-            max_tokens=LLM_PROBE_MAX_TOKENS,
-        )
+        with client:
+            reply = client.vision_json(
+                model=settings.llm_vision_model,
+                system=LLM_PROBE_SYSTEM,
+                prompt=LLM_PROBE_PROMPT,
+                jpeg=LLM_PROBE_IMAGE,
+                max_tokens=LLM_PROBE_MAX_TOKENS,
+            )
     except LlmError as error:
         report.fail(f"пробный вызов не прошёл — {_llm_why(error, settings)}")
         return
@@ -575,6 +582,15 @@ def _llm_why(error: LlmError, settings: Settings) -> str:
             "сервера, повторите запуск"
         ),
         "rate": "polza.ai просит подождать — повторите запуск через минуту",
+        "bad_request": (
+            "polza.ai отклонил запрос и в режиме JSON, и без него — проверьте "
+            f"LLM_VISION_MODEL (сейчас «{settings.llm_vision_model}»): модель должна "
+            "принимать картинки"
+        ),
+        "bad_reply": (
+            "ответ не похож на API polza.ai — проверьте POLZA_BASE_URL (сейчас "
+            f"«{settings.polza_base_url}»): нужен адрес API, обычно https://api.polza.ai/v1"
+        ),
     }
     text = hints.get(error.kind, str(error))
     return text if error.status is None else f"{text} [{error.status}]"
