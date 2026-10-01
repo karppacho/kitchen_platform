@@ -7,9 +7,13 @@
   display: flex;
 }
 
+/* Запасные значения для Safari 15.5–16.1 (ещё без color-mix и dvh) стоят
+   строкой выше современного свойства — здесь, у тени и у max-height ниже:
+   кто не понял вторую строку, останется с первой. rgba — это --tekst. */
 .modalnaya-fon {
   position: absolute;
   inset: 0;
+  background: rgba(26, 27, 29, 0.4);
   background: color-mix(in srgb, var(--tekst) 40%, transparent);
 }
 
@@ -19,6 +23,7 @@
   flex-direction: column;
   min-height: 0;
   background: var(--poverhnost);
+  box-shadow: 0 0 24px rgba(26, 27, 29, 0.25);
   box-shadow: 0 0 24px color-mix(in srgb, var(--tekst) 25%, transparent);
   outline: none;
 }
@@ -40,6 +45,7 @@
 
 .modalnaya--snizu .modalnaya-panel {
   width: 100%;
+  max-height: 85vh;
   max-height: 85dvh;
   border-radius: calc(var(--radius) * 4) calc(var(--radius) * 4) 0 0;
   padding-bottom: env(safe-area-inset-bottom);

@@ -140,17 +140,6 @@ test('неизвестный адрес не даёт пустой экран', 
   expect(screen.getByRole('link', { name: 'Блюда' })).toHaveAttribute('aria-current', 'page')
 })
 
-test('строка свежести стоит над экраном', async () => {
-  narisovat()
-  const stroka = await screen.findByText(/^Данные из таблицы на /)
-  const soderzhimoe = screen.getByRole('main')
-  const zagolovok = await within(soderzhimoe).findByRole('heading', { level: 1, name: 'Блюда' })
-
-  // В содержимом раздела и раньше заголовка экрана — не в шапке и не под ним.
-  expect(soderzhimoe).toContainElement(stroka)
-  expect(stroka.compareDocumentPosition(zagolovok) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-})
-
 test('на телефоне меню — шторка поверх страницы: открывается кнопкой, закрывается по пункту', async () => {
   setViewport(360)
   narisovat()
@@ -192,6 +181,36 @@ test('на телефоне шторка закрывается по Escape и �
   // иначе синтезированный после touchend click попал бы в то, что под ним.
   await userEvent.click(baseElement.querySelector('.modalnaya-fon')!)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+})
+
+test('на телефоне смена адреса закрывает шторку', async () => {
+  // Системная «Назад» на Android при открытой шторке меняет страницу под
+  // затемнением, минуя пункт шторки, — шторка должна закрыться и по этому
+  // пути, иначе остаётся открытой с `inert` на всей странице. Смену адреса
+  // мимо шторки даёт ссылка во вкладках внизу: они под затемнением `inert`,
+  // но jsdom этот атрибут не применяет — щелчок проходит.
+  setViewport(360)
+  narisovat()
+  await screen.findByRole('heading', { name: 'Блюда' })
+
+  await userEvent.click(screen.getByRole('button', { name: 'Разделы' }))
+  expect(screen.getByRole('dialog', { name: 'Разделы' })).toBeInTheDocument()
+
+  const vkladki = screen.getByRole('navigation', { name: 'Основные разделы' })
+  await userEvent.click(within(vkladki).getByRole('link', { name: 'Справочник' }))
+  expect(await screen.findByRole('heading', { name: 'Справочник ингредиентов' })).toBeInTheDocument()
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+})
+
+test('строка свежести стоит над экраном', async () => {
+  narisovat()
+  const stroka = await screen.findByText(/^Данные из таблицы на /)
+  const soderzhimoe = screen.getByRole('main')
+  const zagolovok = await within(soderzhimoe).findByRole('heading', { level: 1, name: 'Блюда' })
+
+  // В содержимом раздела и раньше заголовка экрана — не в шапке и не под ним.
+  expect(soderzhimoe).toContainElement(stroka)
+  expect(stroka.compareDocumentPosition(zagolovok) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 })
 
 test('на телефоне имя, роли и «Выйти» — в шторке, а в шапке — название раздела', async () => {
@@ -240,11 +259,16 @@ test('на телефоне внизу вкладки живых раздело�
 
 test('сломавшийся экран не роняет оболочку', async () => {
   // Ответ карточки, от которого экран падает при отрисовке: components не
-  // массив. Граница показывает сообщение, шапка и меню остаются.
+  // массив. Граница показывает сообщение, шапка и меню остаются. Заглушку
+  // console.error снимаем в finally: упади проверка раньше — она осталась бы
+  // висеть на соседних тестах.
   vi.spyOn(console, 'error').mockImplementation(() => {})
-  server.use(http.get('/api/dishes/B001', () => HttpResponse.json({ legacy_id: 'B001', name: 'Сломанное', components: null })))
-  narisovat('/dishes/B001')
-  expect(await screen.findByRole('alert')).toHaveTextContent('Экран не открылся')
-  expect(screen.getByRole('button', { name: 'Выйти' })).toBeInTheDocument()
-  vi.restoreAllMocks()
+  try {
+    server.use(http.get('/api/dishes/B001', () => HttpResponse.json({ legacy_id: 'B001', name: 'Сломанное', components: null })))
+    narisovat('/dishes/B001')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Экран не открылся')
+    expect(screen.getByRole('button', { name: 'Выйти' })).toBeInTheDocument()
+  } finally {
+    vi.restoreAllMocks()
+  }
 })

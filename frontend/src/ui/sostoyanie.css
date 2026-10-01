@@ -39,3 +39,11 @@
   background: var(--poverhnost);
   color: var(--vnimanie);
 }
+
+/* Под палец: на сенсорном экране кнопка «Повторить» не ниже 44 px. */
+@media (pointer: coarse) {
+  .sostoyanie button,
+  .sostoyanie-polosa button {
+    min-height: 44px;
+  }
+}

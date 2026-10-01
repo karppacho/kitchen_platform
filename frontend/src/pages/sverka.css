@@ -89,3 +89,10 @@
   color: var(--priglushyonnyy);
   font-size: 12px;
 }
+
+/* Под палец: на сенсорном экране кнопки действий не ниже 44 px. */
+@media (pointer: coarse) {
+  .deystviya button {
+    min-height: 44px;
+  }
+}

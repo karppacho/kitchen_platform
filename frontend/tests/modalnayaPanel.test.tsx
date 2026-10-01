@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useRef, useState } from 'react'
 import { expect, test } from 'vitest'
@@ -86,6 +86,22 @@ test('щелчок по затемнению закрывает панель', a
   await userEvent.click(screen.getByRole('button', { name: 'Открыть' }))
   const fon = baseElement.querySelector('.modalnaya-fon')!
   await userEvent.click(fon)
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+})
+
+test('нажатие без отпускания не закрывает затемнение — закрывает щелчок', async () => {
+  // На телефоне после touchend браузер синтезирует click по тому, что под
+  // пальцем: убери панель уже на pointerdown — click пришёл бы в строку
+  // списка под затемнением. Поэтому затемнение слушает click, а не
+  // pointerdown; тест закрепляет это, чтобы не вернулось при правке.
+  const { baseElement } = render(<Stend />)
+  await userEvent.click(screen.getByRole('button', { name: 'Открыть' }))
+  const fon = baseElement.querySelector('.modalnaya-fon')!
+
+  fireEvent.pointerDown(fon)
+  expect(screen.getByRole('dialog', { name: 'Разделы' })).toBeInTheDocument()
+
+  fireEvent.click(fon)
   expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
 

@@ -32,6 +32,14 @@ export function Layout() {
     if (wide) otkryt(false)
   }, [wide])
 
+  // Адрес сменился мимо пункта шторки: системная «Назад» на Android при
+  // открытой шторке меняет страницу под затемнением, и шторка оставалась бы
+  // открытой с `inert` на всей странице. `onGo` у Nav при этом нужен: он
+  // закрывает и при нажатии на текущий раздел, когда адрес не меняется.
+  useEffect(() => {
+    otkryt(false)
+  }, [pathname])
+
   const razdel = razdelPoAdresu(pathname, RAZDELY)
   const roli = me?.roles.map((kod) => ROLI[kod] ?? kod).join(', ')
 

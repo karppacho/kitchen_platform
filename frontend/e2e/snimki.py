@@ -180,7 +180,9 @@ class Proverki:
                     .map(x => `${x.t} ${Math.round(x.r.width)}×${Math.round(x.r.height)}`)"""
             )
             if melkie:
-                self.provaly.append(f"{imya}: цели меньше 44 px — {melkie[:6]}")
+                # Весь список и его длина: срез скрыл бы, сколько целей на самом
+                # деле мелких и какие именно за первыми шестью.
+                self.provaly.append(f"{imya}: цели меньше 44 px ({len(melkie)}) — {melkie}")
 
     def strok(self, page: Page, imya: str, minimum: int) -> None:
         # Строки, чей верх помещается в первый экран.

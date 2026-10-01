@@ -1,6 +1,8 @@
 /* Оболочка. Ширина ветвится классом obolochka--telefon (ставит Layout по
    useWide), а не медиазапросом: порог живёт в одном месте — ui/useWide.ts. */
 .obolochka {
+  /* Запасное значение для Safari 15.5–16.1 (ещё без dvh) строкой выше. */
+  min-height: 100vh;
   min-height: 100dvh;
 }
 
@@ -54,7 +56,6 @@
   border: 1px solid var(--granitsa);
   border-radius: var(--radius);
   background: none;
-  color: inherit;
   padding: var(--shag) calc(var(--shag) * 2);
   font: inherit;
   cursor: pointer;
@@ -62,7 +63,9 @@
 }
 
 /* Кнопка меню — цель 44 px, но строка шапки не растёт: отрицательное поле
-   возвращает место. */
+   возвращает место. Цвет наследует, чтобы значок шёл цветом текста шапки;
+   «Выйти» на компьютере остаётся цветом кнопки по умолчанию, как до
+   шторки. */
 .shapka-menyu {
   display: inline-flex;
   align-items: center;
@@ -71,6 +74,7 @@
   min-height: 44px;
   margin: calc(var(--shag) * -1) 0;
   padding: 0;
+  color: inherit;
 }
 
 .obolochka-telo {
