@@ -24,14 +24,14 @@ const KOLONKI: Column<Stroka>[] = [
   {
     key: 'name',
     title: 'Название',
-    priority: 'always',
+    uzkiy: 'zagolovok',
     sort: { vid: 'tekst', znachenie: (r) => r.nazvanie },
     render: (r) => r.nazvanie,
   },
   {
     key: 'category',
     title: 'Категория',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'tekst', znachenie: (r) => r.kategoriya },
     filtr: { vid: 'znacheniya', znachenie: (r) => r.kategoriya },
     render: (r) => r.kategoriya,
@@ -39,7 +39,7 @@ const KOLONKI: Column<Stroka>[] = [
   {
     key: 'price',
     title: 'Цена',
-    priority: 'always',
+    uzkiy: 'znachenie',
     align: 'right',
     sort: { vid: 'chislo', znachenie: (r) => r.tsena },
     filtr: {
@@ -52,7 +52,7 @@ const KOLONKI: Column<Stroka>[] = [
     render: (r) => r.tsena ?? '—',
   },
   // Ни сортировки, ни фильтра — просто заголовок.
-  { key: 'id', title: 'Код', priority: 'wide', render: (r) => r.id },
+  { key: 'id', title: 'Код', uzkiy: 'podrobno', render: (r) => r.id },
 ]
 
 type SvoystvaStenda = {

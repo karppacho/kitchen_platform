@@ -72,8 +72,7 @@
   fill: currentColor;
 }
 
-.tablitsa .vpravo,
-.spisok .vpravo {
+.tablitsa .vpravo {
   text-align: right;
 }
 
@@ -97,9 +96,11 @@
   padding: calc(var(--shag) * 4) calc(var(--shag) * 2);
 }
 
-/* Себестоимость выше цены меню. Почти всегда это перепутанная единица
-   измерения, а не убыток, — поэтому подпись направляет к причине. */
-.stroka--ubytok {
+/* Себестоимость выше цены меню — красный фон и у строки таблицы, и у
+   строки списка, и при наведении: селекторы той же силы, что фон строки. */
+.tablitsa tbody tr.stroka--ubytok,
+.tablitsa tbody tr.stroka--ubytok:hover,
+.spisok > li.stroka--ubytok {
   background: var(--oshibka-fon);
 }
 
@@ -112,64 +113,94 @@
 .spisok > li {
   background: var(--poverhnost);
   border-bottom: 1px solid var(--granitsa);
-  padding: calc(var(--shag) * 2);
 }
 
-.spisok-glavnoe {
+/* Строка — кнопка во всю ширину: заголовок и подпись слева, значения
+   справа, шеврон. Высота около 64 px — 8–10 строк на 360×780. */
+.stroka-telo {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: var(--shag);
-  align-items: baseline;
-}
-
-/* Когда карточку можно открыть (передан onOpen), это настоящая <button> —
-   доступность с клавиатуры даром. Снимаем с неё вид кнопки, оставляя
-   только сетку выше. */
-button.spisok-glavnoe {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0 calc(var(--shag) * 2);
   width: 100%;
+  min-height: 56px;
   margin: 0;
-  padding: 0;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 2) calc(var(--shag) * 2) calc(var(--shag) * 3);
   border: 0;
   background: none;
-  font: inherit;
   color: inherit;
-  text-align: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+button.stroka-telo {
   cursor: pointer;
 }
 
-.spisok-glavnoe > span:first-child {
-  /* Имена бывают по 53 символа — «Контейнер бумажный без крышки
-     207х127х55 крафт/чёрный». Перенос обязателен, обрезка недопустима. */
+.stroka-levo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.stroka-zagolovok {
+  font-size: 15px;
+  line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
-.raskryt {
-  margin-top: var(--shag);
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--aktsent);
-  font: inherit;
-  cursor: pointer;
+.stroka-podpis {
+  color: var(--priglushyonnyy);
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
-.spisok-podrobno {
-  margin: var(--shag) 0 0;
+.stroka-pravo {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
 }
 
-.spisok-podrobno > div {
+.stroka-znachenie {
+  display: flex;
+  align-items: baseline;
+  gap: var(--shag);
+  white-space: nowrap;
+}
+
+.stroka-znachenie-podpis {
+  color: var(--priglushyonnyy);
+  font-size: 11px;
+}
+
+.stroka-shevron {
+  flex: none;
+  color: var(--priglushyonnyy);
+}
+
+.stroka-podrobno {
+  margin: 0;
+  padding: 0 calc(var(--shag) * 3) calc(var(--shag) * 2);
+}
+
+.stroka-podrobno > div {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: var(--shag);
   padding: calc(var(--shag) / 2) 0;
 }
 
-.spisok-podrobno dt {
+.stroka-podrobno dt {
   color: var(--priglushyonnyy);
 }
 
-.spisok-podrobno dd {
+.stroka-podrobno dd {
   margin: 0;
+  text-align: right;
 }
 
 .pusto {

@@ -27,14 +27,14 @@ const KOLONKI: Column<Blyudo>[] = [
   {
     key: 'name',
     title: 'Название',
-    priority: 'always',
+    uzkiy: 'zagolovok',
     sort: { vid: 'tekst', znachenie: (r) => r.nazvanie },
     render: (r) => r.nazvanie,
   },
   {
     key: 'category',
     title: 'Категория',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'tekst', znachenie: (r) => r.kategoriya },
     filtr: { vid: 'znacheniya', znachenie: (r) => r.kategoriya },
     render: (r) => r.kategoriya,
@@ -42,7 +42,7 @@ const KOLONKI: Column<Blyudo>[] = [
   {
     key: 'price',
     title: 'Цена',
-    priority: 'always',
+    uzkiy: 'znachenie',
     align: 'right',
     sort: { vid: 'chislo', znachenie: (r) => r.tsena },
     filtr: {
@@ -54,7 +54,7 @@ const KOLONKI: Column<Blyudo>[] = [
     },
     render: (r) => r.tsena ?? '—',
   },
-  { key: 'id', title: 'id', priority: 'wide', render: (r) => r.id },
+  { key: 'id', title: 'id', uzkiy: 'podrobno', render: (r) => r.id },
 ]
 
 const POISK_PO = (r: Blyudo) => [r.nazvanie, r.id]

@@ -22,7 +22,7 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'id',
     title: 'id',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     // Текстом, но числа внутри — как числа: «12» < «123» < «1000». id —
     // номера, поэтому и подписи числовые, а не «от А до Я».
     sort: { vid: 'tekst', znachenie: (r) => r.legacy_id, podpisi: ['по возрастанию', 'по убыванию'] },
@@ -31,14 +31,14 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'name',
     title: 'Наименование',
-    priority: 'always',
+    uzkiy: 'zagolovok',
     sort: { vid: 'tekst', znachenie: (r) => r.name },
     render: (r) => <span className={arhivnyy(r) ? 'arhivnyy' : undefined}>{r.name}</span>,
   },
   {
     key: 'category',
     title: 'Категория',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'tekst', znachenie: (r) => r.category },
     filtr: { vid: 'znacheniya', znachenie: (r) => r.category },
     render: (r) => r.category,
@@ -46,7 +46,7 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'unit',
     title: 'Ед.',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     // Цена бывает за килограмм и за штуку: единица — отдельной колонкой,
     // чтобы и отобрать по ней, и сравнивать цены одного рода.
     sort: { vid: 'tekst', znachenie: (r) => r.unit },
@@ -57,7 +57,7 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
     key: 'price',
     title: 'Цена за единицу',
     align: 'right',
-    priority: 'always',
+    uzkiy: 'znachenie',
     sort: { vid: 'chislo', znachenie: (r) => r.price_per_kg },
     filtr: estNet((r) => r.price_per_kg !== null),
     // Имя поля price_per_kg врёт: при unit «шт» это цена за штуку.
@@ -68,7 +68,7 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
     key: 'ves',
     title: 'Вес 1 шт',
     align: 'right',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'chislo', znachenie: (r) => r.weight_per_piece_g },
     filtr: estNet((r) => r.weight_per_piece_g !== null),
     // У весовых weight_per_piece_g — null, и это норма, а не пропуск:
@@ -78,7 +78,7 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'status',
     title: 'Статус',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'tekst', znachenie: (r) => r.status },
     // Значения — из ответа: список статусов в коде не зашит.
     filtr: { vid: 'znacheniya', znachenie: (r) => r.status },
@@ -87,7 +87,7 @@ const KOLONKI_INGREDIENTOV: Column<Ingredient>[] = [
   {
     key: 'card',
     title: 'Карточка',
-    priority: 'always',
+    uzkiy: 'znachenie',
     // По возрастанию — сначала позиции без карточки: их и ищут.
     sort: {
       vid: 'chislo',

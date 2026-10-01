@@ -13,9 +13,9 @@ const stroki: Blyudo[] = [
 ]
 
 const kolonki: Column<Blyudo>[] = [
-  { key: 'nazvanie', title: 'Название', priority: 'always', render: (r) => r.nazvanie },
-  { key: 'uc', title: 'Себестоимость', priority: 'always', align: 'right', render: (r) => r.uc },
-  { key: 'kategoriya', title: 'Категория', priority: 'wide', render: (r) => r.kategoriya },
+  { key: 'nazvanie', title: 'Название', uzkiy: 'zagolovok', render: (r) => r.nazvanie },
+  { key: 'uc', title: 'Себестоимость', uzkiy: 'znachenie', align: 'right', render: (r) => r.uc },
+  { key: 'kategoriya', title: 'Категория', uzkiy: 'podrobno', render: (r) => r.kategoriya },
 ]
 
 function narisovat() {
@@ -49,16 +49,13 @@ test('на 360 px видно только главное', () => {
   expect(screen.queryByText('Соус-топпинг')).not.toBeInTheDocument()
 })
 
-test('остальное раскрывается по тапу', async () => {
+test('остальное раскрывается тапом по строке', async () => {
   setViewport(360)
   narisovat()
-
-  // До тапа второстепенного нет — иначе тест прошла бы и реализация,
-  // рисующая всё сразу.
   expect(screen.queryByText('Соус-топпинг')).not.toBeInTheDocument()
-
-  await userEvent.click(screen.getByRole('button', { name: /подробнее/i }))
-
+  // Отдельной ссылки «Подробнее» нет — раскрывает сама строка.
+  expect(screen.queryByRole('button', { name: /подробнее/i })).not.toBeInTheDocument()
+  await userEvent.click(screen.getByRole('button', { name: /Кетчуп/ }))
   expect(screen.getByText('Соус-топпинг')).toBeInTheDocument()
 })
 

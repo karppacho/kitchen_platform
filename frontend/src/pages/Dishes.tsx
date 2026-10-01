@@ -26,7 +26,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
   {
     key: 'id',
     title: 'id',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     // Текстом, но числа внутри — как числа: «B9» < «B10». Подписи — как у
     // id справочника: id — номера, а не слова.
     sort: { vid: 'tekst', znachenie: (r) => r.legacy_id, podpisi: ['по возрастанию', 'по убыванию'] },
@@ -35,14 +35,14 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
   {
     key: 'name',
     title: 'Название',
-    priority: 'always',
+    uzkiy: 'zagolovok',
     sort: { vid: 'tekst', znachenie: (r) => r.name },
     render: (r) => r.name,
   },
   {
     key: 'category',
     title: 'Категория',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'tekst', znachenie: (r) => r.category },
     filtr: { vid: 'znacheniya', znachenie: (r) => r.category },
     render: (r) => r.category,
@@ -50,7 +50,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
   {
     key: 'status',
     title: 'Статус',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'tekst', znachenie: (r) => r.status },
     // Значения — из ответа: у блюд «активное», у ингредиентов «активный»,
     // список статусов в коде не зашит.
@@ -61,7 +61,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'price',
     title: 'Цена меню',
     align: 'right',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'chislo', znachenie: (r) => r.price_menu },
     filtr: estNet((r) => r.price_menu !== null),
     render: (r) => <Num value={r.price_menu} fraction={2} unit="₽" />,
@@ -70,7 +70,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'uc',
     title: 'UC ₽',
     align: 'right',
-    priority: 'always',
+    uzkiy: 'znachenie',
     sort: { vid: 'chislo', znachenie: (r) => r.uc_rub },
     // Одно условие, а не «есть / нет»: себестоимость есть всегда, а искать
     // нужно блюда, где она выше цены, — те же, что окрашены красным.
@@ -95,7 +95,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'ucp',
     title: 'UC %',
     align: 'right',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'chislo', znachenie: (r) => r.uc_percent },
     render: (r) => <Num value={r.uc_percent} fraction={1} unit="%" />,
   },
@@ -103,7 +103,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'margin',
     title: 'Маржа %',
     align: 'right',
-    priority: 'always',
+    uzkiy: 'znachenie',
     // По возрастанию — сначала худшая: так шеф и ищет, где теряет. Блюда
     // без цены меню (маржи нет) — в конце в обе стороны.
     sort: {
@@ -117,7 +117,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'output',
     title: 'Выход',
     align: 'right',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'chislo', znachenie: (r) => r.output_grams },
     render: (r) => <Num value={r.output_grams} unit="г" />,
   },
@@ -127,7 +127,7 @@ const KOLONKI_BLYUD: Column<Dish>[] = [
     key: 'warnings',
     title: 'Замечания',
     align: 'right',
-    priority: 'wide',
+    uzkiy: 'podrobno',
     sort: { vid: 'chislo', znachenie: (r) => r.warnings },
     filtr: estNet((r) => r.warnings > 0),
     // Ноль — не «всё хорошо», а «нам не на что указать». Тревогой не
