@@ -118,7 +118,7 @@ pretty = true
 # секциях для несуществующих пакетов, и этот шум в логах вреден — к нему
 # быстро привыкают и перестают читать вывод целиком.
 [[tool.mypy.overrides]]
-module = ["kitchen.domain.*", "kitchen.sync.*"]
+module = ["kitchen.domain.*", "kitchen.sync.*", "kitchen.llm.*", "kitchen.cards.*"]
 strict = true
 disallow_any_explicit = true
 
@@ -138,7 +138,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "scripts"]
-addopts = "-q --strict-markers -m 'not live and not e2e and not integration'"
+addopts = "-q --strict-markers -m 'not live and not e2e and not integration and not llm'"
 markers = [
     "live: ходит в настоящие Google Sheets и требует кредов (запуск: make test-live)",
     "integration: требует поднятого Postgres",
@@ -151,6 +151,10 @@ filterwarnings = [
     "default",
     # Своё устаревание чиним сразу.
     "error::DeprecationWarning:kitchen",
+    # Давнее, исправится обновлением starlette; источник — starlette/testclient.py
+    # (anyio переименовал BlockingPortal). Только оно и только оттуда — не
+    # общее подавление: тест в tests/unit/test_infra.py.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
 ]
 
 
@@ -179,7 +183,15 @@ include_external_packages = true
 [[tool.importlinter.contracts]]
 name = "Слои: web и worker сверху, domain снизу"
 type = "layers"
-layers = ["kitchen.web | kitchen.worker", "kitchen.sync", "kitchen.db", "kitchen.domain"]
+layers = [
+    "kitchen.web | kitchen.worker",
+    # Слой приложения карточек: ручки и воркер зовут его, а он — обмен с
+    # Google, модель и базу. Решения живут здесь, а не в ручках.
+    "kitchen.cards",
+    "kitchen.sync | kitchen.llm",
+    "kitchen.db",
+    "kitchen.domain",
+]
 
 [[tool.importlinter.contracts]]
 name = "domain не знает ни про транспорт, ни про хранилище"

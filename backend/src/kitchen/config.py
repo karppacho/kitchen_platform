@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from kitchen.domain.cards import DRIVE_FILE_ID
 
 
 class Settings(BaseSettings):
@@ -47,10 +49,22 @@ class Settings(BaseSettings):
 
     # Таймауты обязательны: у google-auth их по умолчанию нет вообще, и
     # зависший запрос вешает воркер молча. Числа взяты из kitchen_bot, где
-    # они появились после реального зависания.
+    # они появились после реального зависания. Отдельного таймаута
+    # обновления токена нет: google-auth 2.57 обновляет токен с таймаутом
+    # самого запроса, а свой refresh_timeout не применяет. Прежняя
+    # GOOGLE_REFRESH_TIMEOUT в .env сервера ничего не ломает — лишнее в
+    # окружении пропускается (extra="ignore").
     google_connect_timeout: int = 10
     google_read_timeout: int = 60
-    google_refresh_timeout: int = 15
+
+    # Фото карточек ингредиентов — папка на «Моём диске» владельца (место —
+    # у сервисного аккаунта) или на общем диске; открыть её на изменение по
+    # ссылке нельзя. Пусто — загрузка фото не настроена.
+    drive_cards_folder_id: str = ""
+    # Охват доступа к Drive. «drive.file» — только файлы, созданные самой
+    # платформой; «drive» — всё, что открыто сервисному аккаунту. Какого
+    # хватает, показывает scripts/check_cards_setup.py; по умолчанию узкий.
+    drive_scope: Literal["drive", "drive.file"] = "drive.file"
 
     # Синхронизация «лист → база»: воркер раз в столько секунд читает книги.
     # Не чаще раза в минуту: меньшее число — почти наверняка минуты вместо
@@ -65,7 +79,19 @@ class Settings(BaseSettings):
     polza_api_key: SecretStr = SecretStr("")
     polza_base_url: str = "https://api.polza.ai/v1"
     llm_model: str = "gpt-4o-mini"
+    # Суточный потолок расходов на модель — на всех вместе; сутки — по Москве.
     llm_daily_budget_rub: int = 300
+    # Распознавание этикеток: своя модель, умеющая читать фото. Та же, что у
+    # бота карточек, — на ней промпт и проверялся.
+    llm_vision_model: str = "qwen/qwen3.6-plus"
+    # Сколько ждать ответа модели (таймаут чтения — от последнего байта, так
+    # что попытка может идти и дольше). Повтор один и только если с ним вызов
+    # укладывается в общий срок 170 с (nginx держит запрос 180 с). Больше 80 с
+    # — и на повтор после таймаута не осталось бы времени.
+    llm_vision_timeout_seconds: int = Field(default=60, ge=5, le=80)
+    # Этикеток на одного повара в сутки. Защита бюджета от зацикленной
+    # кнопки, а не норма работы: столько новых ингредиентов за день не бывает.
+    llm_label_calls_per_user_daily: int = Field(default=40, ge=1)
 
     # --- Приложение ---------------------------------------------------------
     app_env: str = "development"
@@ -78,6 +104,20 @@ class Settings(BaseSettings):
     @property
     def google_timeout(self) -> tuple[int, int]:
         return (self.google_connect_timeout, self.google_read_timeout)
+
+    @field_validator("drive_cards_folder_id")
+    @classmethod
+    def check_folder_id(cls, value: str) -> str:
+        # Скопировать ссылку на папку вместо id — самая вероятная ошибка
+        # настройки. Ловится при старте понятным текстом, а не трассировкой
+        # при первой загрузке фото.
+        if value and not DRIVE_FILE_ID.fullmatch(value):
+            msg = (
+                "DRIVE_CARDS_FOLDER_ID — нужен id папки (часть ссылки после /folders/), "
+                "а не ссылка целиком"
+            )
+            raise ValueError(msg)
+        return value
 
     @model_validator(mode="after")
     def check_sync_thresholds(self) -> Self:

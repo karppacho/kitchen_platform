@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from kitchen.config import load_settings
 from kitchen.db.session import make_session_factory
+from kitchen.logs import configure_logging
 from kitchen.sync.cycle import SyncCycle, reader_from
 
 if TYPE_CHECKING:
@@ -123,9 +124,7 @@ class ChangeLog:
 
 
 def main() -> int:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    configure_logging()
     settings = load_settings()
     cycle = SyncCycle(reader_from(settings), make_session_factory(settings.database_url))
     changes = ChangeLog()

@@ -13,9 +13,12 @@ Supabase пулер и шлюз по умолчанию публикуются �
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
+import tomllib
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -251,6 +254,111 @@ def test_api_location_exists() -> None:
     assert re.search(r"location\s+/api/\s*\{", text), "location /api/ пропал из конфига"
 
 
+def _location_body(path: str) -> str:
+    """Тело блока ``location <path> { … }`` — ровно этого префикса."""
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    for start, end in _location_block_spans(text):
+        opening = text.rfind("location", 0, start)
+        if re.fullmatch(rf"location\s+{re.escape(path)}\s*\{{", text[opening:start]):
+            return text[start:end]
+    raise AssertionError(f"в конфиге nginx нет location {path}")
+
+
+def _server_level(text: str) -> str:
+    """Конфиг без тел всех location и server — то, что лежит в http-контексте
+    (conf.d подключается именно туда)."""
+    outside = text
+    for start, end in sorted(_location_block_spans(text), reverse=True):
+        outside = outside[:start] + outside[end:]
+    return re.sub(r"server\s*\{.*?\n\}", "", outside, flags=re.DOTALL)
+
+
+def test_recognize_location_limits_calls_to_the_model() -> None:
+    """Распознавание этикетки — вызов модели, а каждый вызов стоит денег.
+
+    Частоту держит зона ``llm`` с ответом 429 (а не 503 по умолчанию: «слишком
+    часто» — не «сервер лёг», фронтенд показывает разное). Таймаут — не меньше
+    180 с: клиент polza.ai укладывает вызов с повтором в 170 с, и nginx не
+    должен оборвать его раньше, оставив повара без ответа, а деньги — списанными.
+    """
+    body = _location_body("/api/cards/recognize/")
+
+    assert re.search(r"^\s*limit_req\s+zone=llm\s+burst=3\s+nodelay;", body, re.MULTILINE)
+    assert re.search(r"^\s*limit_req_status\s+429;", body, re.MULTILINE)
+    timeout = re.search(r"^\s*proxy_read_timeout\s+(\d+)s;", body, re.MULTILINE)
+    assert timeout and int(timeout.group(1)) >= 180, "nginx оборвёт распознавание раньше модели"
+    assert re.search(r"^\s*proxy_pass\s+http://api:8080;", body, re.MULTILINE)
+    assert "add_header" not in body
+
+
+def test_llm_zone_is_declared_in_http_context() -> None:
+    """Зона ``limit_req_zone`` объявляется только в http-контексте: внутри
+    server или location nginx не стартует вовсе."""
+    text = NGINX_CONF.read_text(encoding="utf-8")
+
+    assert re.search(r"^limit_req_zone\s+\S+\s+zone=llm:\S+\s+rate=", _server_level(text), re.M)
+
+
+def test_draft_uploads_are_capped_before_login_check() -> None:
+    """Тело multipart разбирается до проверки входа: без своего предела запрос
+    без входа с телом до 25 МБ целиком писался бы во временный файл. Сервер
+    принимает фото не больше 8 МБ — nginx режет на 9 МБ."""
+    body = _location_body("/api/cards/drafts/")
+
+    assert re.search(r"^\s*client_max_body_size\s+9m;", body, re.MULTILINE)
+    assert re.search(r"^\s*proxy_pass\s+http://api:8080;", body, re.MULTILINE)
+    timeout = re.search(r"^\s*proxy_read_timeout\s+(\d+)s;", body, re.MULTILINE)
+    assert timeout and int(timeout.group(1)) >= 300, "отправка в лист идёт до минут"
+    assert "add_header" not in body
+
+
+def test_recognize_takes_no_body() -> None:
+    """У распознавания тела нет — большое nginx не примет и не будет писать
+    во временный файл."""
+    body = _location_body("/api/cards/recognize/")
+
+    size = re.search(r"^\s*client_max_body_size\s+(\d+)k;", body, re.MULTILINE)
+    assert size and int(size.group(1)) <= 16
+
+
+@pytest.mark.parametrize(
+    ("path", "code", "detail"),
+    [
+        ("/api/cards/recognize/", 429, "Слишком часто — подождите минуту"),
+        ("/api/cards/drafts/", 413, "Фото больше 8 МБ — сфотографируйте ещё раз"),
+    ],
+)
+def test_nginx_refusals_on_card_paths_are_json(path: str, code: int, detail: str) -> None:
+    """Отказ самого nginx — тем же JSON ``{"detail": …}``, что у API: экран
+    показывает detail, а HTML-страница nginx ему ничего не скажет.
+
+    Через именованный location без ``add_header`` — иначе пропали бы CSP и
+    HSTS server (это проверяет и общий тест на add_header)."""
+    body = _location_body(path)
+    target = re.search(rf"^\s*error_page\s+{code}\s+=\s+(@\w+);", body, re.MULTILINE)
+    assert target, f"{path}: нет error_page {code} = @…"
+
+    named = _location_body(target.group(1))
+    assert re.search(r'^\s*default_type\s+"application/json; charset=utf-8";', named, re.M)
+    answer = re.search(rf"^\s*return\s+{code}\s+'(.*)';", named, re.MULTILINE)
+    assert answer, f"{target.group(1)}: нет return {code}"
+    assert json.loads(answer.group(1)) == {"detail": detail}
+    assert "add_header" not in named
+
+
+@pytest.mark.parametrize("path", ["/api/cards/recognize/", "/api/cards/drafts/"])
+def test_card_locations_pass_the_same_headers_as_api(path: str) -> None:
+    """Свой location — своя копия proxy_set_header: без X-Forwarded-Proto
+    защита от подделки запросов не узнала бы свой адрес."""
+    api = _location_body("/api/")
+    wanted = re.findall(r"^\s*(proxy_set_header\s+.+;)$", api, re.MULTILINE)
+    body = _location_body(path)
+
+    assert wanted
+    for header in wanted:
+        assert header in body, f"{path}: нет «{header}»"
+
+
 def test_cache_control_header_is_at_server_level() -> None:
     """Cache-Control объявлен один раз на server, а не раскидан по location.
 
@@ -363,6 +471,70 @@ def test_integratsiya_idyot_i_posle_krasnyh_oflayn_testov() -> None:
     assert " ".join(condition.split()) == expected, (
         f"условие шага интеграции: {condition!r}, ожидалось {expected!r}"
     )
+
+
+CI_JOBS = {
+    "lint": "ruff",
+    "types": "mypy",
+    "arch": "слои (import-linter)",
+    "test": "тесты",
+    "secrets": "секреты (gitleaks)",
+    "deps": "зависимости",
+    "frontend": "фронтенд",
+    "nginx": "образ nginx (живая проверка)",
+}
+"""Имена задач CI. На них настроена защита ``main``: переименованная задача —
+обязательная проверка, которая никогда не придёт, и PR не сольётся."""
+
+
+def test_ci_job_names_are_what_branch_protection_waits_for() -> None:
+    jobs = _load_ci()["jobs"]
+
+    assert {key: job.get("name") for key, job in jobs.items()} == CI_JOBS
+
+
+def _uv_sync_steps() -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (key, step)
+        for key, job in _load_ci()["jobs"].items()
+        for step in job["steps"]
+        if "uv sync" in str(step.get("run", ""))
+    ]
+
+
+def test_uv_sync_has_its_own_limit_and_one_retry() -> None:
+    """01.10 установка зависимостей зависла на десять минут и съела весь
+    предел задания. У шага — свой предел, у каждой попытки — свой ``timeout``,
+    и попыток две: зависшая первая не съедает всё, вторая идёт заново."""
+    steps = _uv_sync_steps()
+
+    assert {key for key, _ in steps} == {"lint", "types", "arch", "test", "deps"}
+    for key, step in steps:
+        run = " ".join(str(step["run"]).split())
+        limit = step.get("timeout-minutes")
+        attempts = re.findall(r"timeout -k (\d+) (\d+) uv sync --all-extras --dev", run)
+        assert isinstance(limit, int) and 0 < limit <= 5, f"{key}: у uv sync нет своего предела"
+        assert len(attempts) == 2, f"{key}: у uv sync не две попытки под timeout: {run}"
+        assert " || " in run, f"{key}: вторая попытка — только после неудачи первой"
+        worst = sum(int(kill) + int(seconds) for kill, seconds in attempts)
+        assert worst < limit * 60, f"{key}: две попытки ({worst} с) не влезают в предел шага"
+
+
+def test_nginx_check_waits_for_the_api_stub() -> None:
+    """30.09 заглушка API ещё не слушала порт, и nginx отдал на /api/ 502.
+    Прежде чем проверять ответы API через nginx, ждём, пока заглушка сама
+    начнёт отвечать, — с пределом и понятной ошибкой."""
+    steps = _load_ci()["jobs"]["nginx"]["steps"]
+    names = [str(step.get("name", "")) for step in steps]
+    wait = names.index("Ждём, пока заглушка API начнёт отвечать")
+    first_api_check = next(i for i, name in enumerate(names) if "/api" in name)
+    run = str(steps[wait]["run"])
+
+    assert names.index("Сеть и заглушка API") < wait < first_api_check
+    assert "docker exec api python3 /ready.py" in run
+    assert re.search(r"timeout \d+ bash -c", run), "ожидание без предела повисло бы"
+    assert "::error::" in run
+    assert "-v /tmp/stub_ready.py:/ready.py:ro" in str(steps[names.index("Сеть и заглушка API")])
 
 
 # ---------------------------------------------------------------------------
@@ -664,3 +836,37 @@ def test_security_headers_are_sent_always(name: str) -> None:
     assert lines, f"add_header {name} пропал из конфига"
     for line in lines:
         assert line.rstrip(";").endswith(" always"), f"«{line}»: без always"
+
+
+# ---------------------------------------------------------------------------
+# Прогон тестов: чужие предупреждения
+# ---------------------------------------------------------------------------
+PYPROJECT = REPO / "backend" / "pyproject.toml"
+PORTAL_WARNING = "The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread instead."
+
+
+def _warned(message: str, module: str) -> list[str]:
+    """Что из предупреждения дойдёт до вывода pytest при фильтрах из pyproject.
+
+    pytest ставит фильтры ``filterwarnings`` на каждый тест; ``catch_warnings``
+    их наследует. Реестр свой — повтор не прячется за «уже показано»."""
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.warn_explicit(message, DeprecationWarning, "x.py", 1, module=module, registry={})
+    return [str(w.message) for w in seen]
+
+
+def test_only_the_starlette_portal_warning_is_silenced() -> None:
+    """Давнее предупреждение starlette об ``anyio.abc.BlockingPortal`` глушится
+    точечно — только оно и только из ``starlette.testclient``. Общего
+    подавления нет: то же сообщение из другого модуля и другое устаревание
+    из того же модуля по-прежнему видны."""
+    options = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
+    ignored = [line for line in options["filterwarnings"] if line.startswith("ignore")]
+
+    assert ignored == [
+        "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:"
+        "starlette.testclient"
+    ]
+    assert _warned(PORTAL_WARNING, "starlette.testclient") == []
+    assert _warned(PORTAL_WARNING, "anyio.other") == [PORTAL_WARNING]
+    assert _warned("Другое устаревание", "starlette.testclient") == ["Другое устаревание"]

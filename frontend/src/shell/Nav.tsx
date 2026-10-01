@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router-dom'
 
-import { RAZDELY } from './razdely'
+import { useSession } from '../auth/session'
+import { dostupnye, RAZDELY } from './razdely'
 
 const BUDUSHCHIY_OPISANIE_ID = 'menyu-budushchiy-opisanie'
 
@@ -18,11 +19,15 @@ const BUDUSHCHIY_OPISANIE_ID = 'menyu-budushchiy-opisanie'
  *
  * Приглушённый цвет пункта (`menyu-punkt--budushchiy`) остаётся как
  * дополнительный, необязательный сигнал.
+ *
+ * Пункты — только разделы ролей человека: повар не видит ни справочника,
+ * ни заглушек будущих разделов — сервер ответил бы ему отказом.
  */
 export function Nav({ onGo }: { onGo?: () => void }) {
+  const { me } = useSession()
   return (
     <nav className="menyu" aria-label="Разделы">
-      {RAZDELY.map((razdel) => (
+      {dostupnye(RAZDELY, me?.roles ?? []).map((razdel) => (
         <NavLink
           key={razdel.put}
           to={razdel.put}

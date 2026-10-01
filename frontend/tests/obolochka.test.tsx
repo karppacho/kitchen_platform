@@ -7,7 +7,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
 
 import { App } from '../src/App'
-import { RAZDELY } from '../src/shell/razdely'
+import { dostupnye, RAZDELY } from '../src/shell/razdely'
 import { setViewport } from './setup'
 
 const server = setupServer(
@@ -195,4 +195,33 @@ test('шапка показывает обе роли по-русски, вкл�
   // тест. Тест подтверждает то, что можно: обе роли по-русски видны
   // одновременно, а не срезаны логикой рендера.
   expect(await screen.findByText('бренд-шеф, разработчик')).toBeInTheDocument()
+})
+
+test('доступные разделы отбираются только по ролям, «скоро» — отдельный фильтр', () => {
+  // Меню и вкладки телефона берут разделы из одной функции. Будущие разделы
+  // она не выкидывает: меню показывает их заглушками, а вкладки отсеивают
+  // их сами — по faza.
+  expect(dostupnye(RAZDELY, ['cook']).map((r) => r.put)).toEqual(['/cards'])
+  expect(dostupnye(RAZDELY, ['chef'])).toEqual(RAZDELY)
+  expect(dostupnye(RAZDELY, ['developer'])).toEqual(RAZDELY)
+
+  const kommertsiya = dostupnye(RAZDELY, ['commerce'])
+  expect(kommertsiya.map((r) => r.put)).not.toContain('/cards')
+  expect(kommertsiya.some((r) => r.faza)).toBe(true)
+
+  expect(dostupnye(RAZDELY, [])).toEqual([])
+})
+
+test('без единой роли — понятный текст, а не переадресация по кругу', async () => {
+  server.use(
+    http.get('/api/me', () =>
+      HttpResponse.json({ email: 'new@example.com', display_name: 'Новичок', roles: [] }),
+    ),
+  )
+  narisovat('/dishes')
+
+  expect(await screen.findByRole('heading', { name: 'Разделов нет' })).toBeInTheDocument()
+  expect(screen.getByText(/обратитесь к администратору/)).toBeInTheDocument()
+  // Выйти можно и отсюда — общий планшет.
+  expect(screen.getByRole('button', { name: 'Выйти' })).toBeInTheDocument()
 })

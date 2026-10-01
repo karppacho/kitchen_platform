@@ -1,4 +1,4 @@
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest'
 
@@ -212,6 +212,159 @@ test('login 401 не запускает продление', async () => {
   expect(prodleniya).toHaveBeenCalledTimes(0)
 })
 
+test.each(['POST', 'PUT', 'PATCH', 'DELETE'])(
+  '%s несёт заголовок против подделки запросов',
+  async (metod) => {
+    // Без него сервер отвечает на изменяющий запрос с кукой сессии 403.
+    let zagolovok: string | null = null
+    server.use(
+      http.all('/api/primer', ({ request }) => {
+        zagolovok = request.headers.get('X-Kitchen-Csrf')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+
+    await api('/primer', { method: metod })
+
+    expect(zagolovok).toBe('1')
+  },
+)
+
+test('GET заголовка против подделки не несёт', async () => {
+  let zagolovok: string | null = 'ещё не спрашивали'
+  server.use(
+    http.get('/api/dishes', ({ request }) => {
+      zagolovok = request.headers.get('X-Kitchen-Csrf')
+      return HttpResponse.json([])
+    }),
+  )
+
+  await api('/dishes')
+
+  expect(zagolovok).toBeNull()
+})
+
+test('вход несёт и заголовок против подделки, и свой Content-Type', async () => {
+  // В браузере может лежать просроченная кука сессии — тогда вход без
+  // заголовка сервер отклонил бы. А свой Content-Type вызывающего не должен
+  // потеряться при добавлении нашего заголовка.
+  let zagolovki: Headers | null = null
+  server.use(
+    http.post('/api/auth/login', ({ request }) => {
+      zagolovki = request.headers
+      return HttpResponse.json({ email: 'chef@example.com' })
+    }),
+  )
+
+  await api('/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'chef@example.com', password: 'пароль' }),
+  })
+
+  expect(zagolovki!.get('X-Kitchen-Csrf')).toBe('1')
+  expect(zagolovki!.get('Content-Type')).toBe('application/json')
+})
+
+test('продление несёт заголовок против подделки запросов', async () => {
+  // Продление едет с кукой продления — без заголовка сервер ответил бы 403,
+  // и каждый истёкший доступ выкидывал бы человека на форму входа.
+  let dano = false
+  let zagolovok: string | null = null
+  server.use(
+    http.get('/api/dishes', () =>
+      dano ? HttpResponse.json([]) : new HttpResponse(null, { status: 401 }),
+    ),
+    http.post('/api/auth/refresh', ({ request }) => {
+      zagolovok = request.headers.get('X-Kitchen-Csrf')
+      dano = true
+      return HttpResponse.json({})
+    }),
+  )
+
+  await api('/dishes')
+
+  expect(zagolovok).toBe('1')
+})
+
+test('повтор после продления тоже несёт заголовок против подделки', async () => {
+  // PATCH → 401 → продление → повтор. Без заголовка на повторе сервер
+  // ответил бы 403, и правка терялась бы ровно тогда, когда истёк доступ.
+  let dano = false
+  const zagolovki: (string | null)[] = []
+  server.use(
+    http.patch('/api/primer', ({ request }) => {
+      zagolovki.push(request.headers.get('X-Kitchen-Csrf'))
+      return new HttpResponse(null, { status: dano ? 204 : 401 })
+    }),
+    http.post('/api/auth/refresh', () => {
+      dano = true
+      return HttpResponse.json({})
+    }),
+  )
+
+  await api('/primer', { method: 'PATCH' })
+
+  expect(zagolovki).toEqual(['1', '1'])
+})
+
+const OTKAZ_ZASHCHITY = 'Запрос отклонён — обновите страницу'
+
+test('отказ защиты на самом запросе доходит до экрана текстом сервера', async () => {
+  const prodleniya = vi.fn()
+  server.use(
+    http.patch('/api/primer', () =>
+      HttpResponse.json({ detail: OTKAZ_ZASHCHITY }, { status: 403 }),
+    ),
+    http.post('/api/auth/refresh', () => {
+      prodleniya()
+      return HttpResponse.json({})
+    }),
+  )
+
+  await expect(api('/primer', { method: 'PATCH' })).rejects.toMatchObject({
+    status: 403,
+    message: OTKAZ_ZASHCHITY,
+  })
+  expect(prodleniya).not.toHaveBeenCalled()
+})
+
+test('отказ защиты на продлении показывает «обновите страницу», а не «не удалось»', async () => {
+  // Так бывает на вкладке, открытой со старым кодом до выкладки: продление
+  // уходит без заголовка. «Не удалось получить данные» не подсказало бы,
+  // что делать, — а сделать нужно ровно одно: обновить страницу.
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () =>
+      HttpResponse.json({ detail: OTKAZ_ZASHCHITY }, { status: 403 }),
+    ),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 403, message: OTKAZ_ZASHCHITY })
+})
+
+test('403 продления без тела — тоже «обновите страницу»', async () => {
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () => new HttpResponse(null, { status: 403 })),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 403, message: OTKAZ_ZASHCHITY })
+})
+
+test('403 продления со своим текстом показывает текст сервера', async () => {
+  // Продление отвечает 403 и когда учётку отключили. «Обновите страницу»
+  // тут отправило бы человека по кругу — нужен текст сервера.
+  server.use(
+    http.get('/api/dishes', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', () =>
+      HttpResponse.json({ detail: 'доступ отключён' }, { status: 403 }),
+    ),
+  )
+
+  await expect(api('/dishes')).rejects.toMatchObject({ status: 403, message: 'доступ отключён' })
+})
+
 test('200 с нечитаемым телом даёт ApiError, а не голый SyntaxError', async () => {
   // Экраны различают ошибки по ApiError.status. Необработанный SyntaxError
   // для них вообще не ошибка API — упадёт мимо любого catch на этот тип.
@@ -222,4 +375,148 @@ test('200 с нечитаемым телом даёт ApiError, а не голы
     status: 200,
     message: 'Не удалось получить данные',
   })
+})
+
+test('отказ несёт поле, строку и чего не хватает — экрану, а не только текст', async () => {
+  server.use(
+    http.patch('/api/cards/drafts/1', () =>
+      HttpResponse.json({ detail: 'Белки: «abc» — не число', field: 'protein' }, { status: 422 }),
+    ),
+    http.post('/api/cards/drafts/1/submit', () =>
+      HttpResponse.json({ detail: '«Томаты» уже есть в таблице — строка 3.', row: 3 }, { status: 409 }),
+    ),
+    http.post('/api/cards/drafts/2/submit', () =>
+      HttpResponse.json(
+        { detail: 'Чтобы отправить карточку, заполните: Поставщик', missing: ['Поставщик'] },
+        { status: 422 },
+      ),
+    ),
+  )
+
+  await expect(api('/cards/drafts/1', { method: 'PATCH' })).rejects.toMatchObject({
+    status: 422,
+    message: 'Белки: «abc» — не число',
+    field: 'protein',
+  })
+  await expect(api('/cards/drafts/1/submit', { method: 'POST' })).rejects.toMatchObject({
+    status: 409,
+    row: 3,
+  })
+  await expect(api('/cards/drafts/2/submit', { method: 'POST' })).rejects.toMatchObject({
+    status: 422,
+    missing: ['Поставщик'],
+  })
+})
+
+test('отказ без поля — поля пустые, а не мусор из тела', async () => {
+  server.use(
+    http.post('/api/cards/recognize/1', () =>
+      HttpResponse.json({ detail: 'Этикетка уже распознаётся — подождите', field: 7 }, { status: 409 }),
+    ),
+  )
+
+  const oshibka = await api('/cards/recognize/1', { method: 'POST' }).catch((e: unknown) => e)
+
+  expect(oshibka).toBeInstanceOf(ApiError)
+  expect(oshibka).toMatchObject({ field: null, row: null, missing: null })
+})
+
+test.each([
+  [429, 'Слишком часто — подождите минуту'],
+  [413, 'Фото больше 8 МБ — сфотографируйте ещё раз'],
+])('%s от nginx без JSON — свой текст по коду', async (kod, tekst) => {
+  server.use(
+    http.put(
+      '/api/cards/drafts/1/photos/label',
+      () =>
+        new HttpResponse('<html><body>nginx</body></html>', {
+          status: kod,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+    ),
+  )
+
+  await expect(api('/cards/drafts/1/photos/label', { method: 'PUT' })).rejects.toMatchObject({
+    status: kod,
+    message: tekst,
+  })
+})
+
+test('429 приложения — его текст, а не общий', async () => {
+  // Дневной бюджет и лимит повара приходят с тем же кодом, что частота nginx,
+  // но со своим объяснением — оно важнее.
+  const tekst = 'Вы сегодня распознали уже 40 этикеток — это предел на день. Заполните поля вручную.'
+  server.use(
+    http.post('/api/cards/recognize/1', () => HttpResponse.json({ detail: tekst }, { status: 429 })),
+  )
+
+  await expect(api('/cards/recognize/1', { method: 'POST' })).rejects.toMatchObject({
+    status: 429,
+    message: tekst,
+  })
+})
+
+test('запрос со сроком: сервер не ответил вовремя — ошибка связи, а не вечное ожидание', async () => {
+  server.use(
+    http.get('/api/cards/drafts/current', async () => {
+      await delay(1000)
+      return HttpResponse.json(null)
+    }),
+  )
+
+  await expect(api('/cards/drafts/current', { srok: 50 })).rejects.toMatchObject({
+    status: 0,
+    message: 'Сервер не ответил вовремя — проверьте связь',
+  })
+})
+
+test('срок не мешает запросу, ответившему вовремя', async () => {
+  server.use(http.get('/api/cards/options', () => HttpResponse.json({ categories: [], suppliers: [] })))
+
+  await expect(api('/cards/options', { srok: 5000 })).resolves.toEqual({
+    categories: [],
+    suppliers: [],
+  })
+})
+
+test('отмена вызывающим прерывает запрос', async () => {
+  server.use(
+    http.get('/api/cards/name-check', async () => {
+      await delay(1000)
+      return HttpResponse.json({})
+    }),
+  )
+  const otmena = new AbortController()
+  const zapros = api('/cards/name-check?name=x', { signal: otmena.signal, srok: 5000 })
+  otmena.abort()
+
+  await expect(zapros).rejects.toMatchObject({ status: 0 })
+})
+
+test('срок покрывает и продление сессии: зависшее продление не держит запрос дольше срока', async () => {
+  // Токен истёк, а продление застряло в сети. Без срока на него кнопка
+  // оставалась бы серой, пока телефон ловит сеть, сколько бы ни было в srok.
+  let otpustit: () => void = () => {}
+  const prodlenieZhdyot = new Promise<void>((gotovo) => {
+    otpustit = gotovo
+  })
+  server.use(
+    http.get('/api/cards/drafts/current', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', async () => {
+      await prodlenieZhdyot
+      return new HttpResponse(null, { status: 401 })
+    }),
+  )
+
+  try {
+    await expect(api('/cards/drafts/current', { srok: 50 })).rejects.toMatchObject({
+      status: 0,
+      message: 'Сервер не ответил вовремя — проверьте связь',
+    })
+  } finally {
+    // Продление общее на все запросы — отпускаем, чтобы следующий тест
+    // не унаследовал зависшее.
+    otpustit()
+    await api('/auth/refresh', { method: 'POST' }).catch(() => undefined)
+  }
 })

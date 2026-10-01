@@ -25,7 +25,7 @@ format:  ## ruff: починить что чинится
 	cd $(BACKEND) && uv run ruff check --fix .
 	cd $(BACKEND) && uv run ruff format .
 
-types:  ## mypy (strict в domain/sync)
+types:  ## mypy (strict в domain/sync/llm)
 	cd $(BACKEND) && uv run mypy src
 
 arch:  ## import-linter: слои не перепутаны
@@ -42,8 +42,8 @@ test-live:  ## Живые тесты: настоящие Sheets, нужны кр
 
 cov:  ## Покрытие с порогом на ядре. Нужен поднятый Postgres: часть кода
       ## осмысленно покрывается только интеграционными тестами
-	cd $(BACKEND) && uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov-report=
-	cd $(BACKEND) && uv run pytest -m integration --cov=kitchen.domain --cov=kitchen.sync --cov-append --cov-report=term-missing --cov-fail-under=85
+	cd $(BACKEND) && uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov=kitchen.llm --cov=kitchen.cards --cov-report=
+	cd $(BACKEND) && uv run pytest -m integration --cov=kitchen.domain --cov=kitchen.sync --cov=kitchen.llm --cov=kitchen.cards --cov-append --cov-report=term-missing --cov-fail-under=85
 
 eval:  ## LLM-евалы. Стоят денег, в CI не входят
 	cd $(BACKEND) && uv run pytest -m llm

@@ -41,6 +41,28 @@ def test_settings_errors_hide_input_values() -> None:
     assert "SEKRET" not in str(caught.value)
 
 
+def test_label_recognition_defaults() -> None:
+    """Модель распознавания — своя, не модель чата; минута на ответ; 40 этикеток
+    на повара в сутки."""
+    settings = Settings(_env_file=None)
+    assert settings.llm_vision_model == "qwen/qwen3.6-plus"
+    assert settings.llm_vision_timeout_seconds == 60
+    assert settings.llm_label_calls_per_user_daily == 40
+    assert settings.llm_daily_budget_rub == 300
+
+
+def test_vision_timeout_leaves_room_for_a_repeat() -> None:
+    """Повтор идёт, только если с ним распознавание укладывается в общий срок
+    170 с (nginx держит запрос 180 с). Таймаут больше 80 с сделал бы повтор
+    невозможным: первая попытка сама отнимает не меньше таймаута."""
+    with pytest.raises(ValidationError, match="llm_vision_timeout_seconds"):
+        Settings(_env_file=None, llm_vision_timeout_seconds=81)
+    with pytest.raises(ValidationError, match="llm_vision_timeout_seconds"):
+        Settings(_env_file=None, llm_vision_timeout_seconds=0)
+
+    assert Settings(_env_file=None, llm_vision_timeout_seconds=80).llm_vision_timeout_seconds == 80
+
+
 def test_sync_defaults() -> None:
     """Раз в пять минут; «устарело» — три пропущенных цикла."""
     fields = Settings.model_fields
