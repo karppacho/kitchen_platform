@@ -42,9 +42,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from datetime import timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, NoReturn, Protocol
+from typing import TYPE_CHECKING, NoReturn
 
 from kitchen.db.journal import (
     FAILED,
@@ -62,10 +61,34 @@ from kitchen.sync import specs
 from kitchen.sync.ownership import Kind
 from kitchen.sync.reader import check_header, describe_error, row_hash
 
+# Общая механика писателей (очередь, ошибки, числа, сверка ячейки) живёт в
+# sheet_write; здесь она видна под прежними именами — ими пользуются слой
+# карточек и тесты писателя.
+from kitchen.sync.sheet_write import FORMATTED as FORMATTED
+from kitchen.sync.sheet_write import LOCK_TIMEOUT as LOCK_TIMEOUT
+from kitchen.sync.sheet_write import SHEET_WRITE_LOCK_KEY as SHEET_WRITE_LOCK_KEY
+from kitchen.sync.sheet_write import UNFORMATTED as UNFORMATTED
+from kitchen.sync.sheet_write import SentValue as SentValue
+from kitchen.sync.sheet_write import SheetBusyError as SheetBusyError
+from kitchen.sync.sheet_write import SheetJournal as SheetJournal
+from kitchen.sync.sheet_write import SheetUnavailableError as SheetUnavailableError
+from kitchen.sync.sheet_write import WriteNotConfirmedError as WriteNotConfirmedError
+from kitchen.sync.sheet_write import WriteRefusedError as WriteRefusedError
+from kitchen.sync.sheet_write import WritersLock as WritersLock
+from kitchen.sync.sheet_write import (
+    hold_limit_for,
+    joined,
+    quoted,
+    read_ranges,
+    same_cell,
+    trouble,
+)
+from kitchen.sync.sheet_write import sheet_number as sheet_number
+
 if TYPE_CHECKING:
     import uuid
     from collections.abc import Callable, Mapping, Sequence
-    from contextlib import AbstractContextManager
+    from datetime import timedelta
 
     from kitchen.config import Settings
     from kitchen.sync.client import Cells, SheetsClient, Spreadsheet
@@ -73,21 +96,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-SHEET_WRITE_LOCK_KEY = 20260930
-"""Ключ advisory-блокировки писателей — свой, не импортный.
-
-Перенос листов в базу стоит в своей очереди (``IMPORT_LOCK_KEY``): запись в
-лист его не ждёт, и он — её. Друг друга ждут только писатели."""
-
-LOCK_TIMEOUT = timedelta(seconds=30)
-"""Сколько ждать другого писателя. Запись со сверкой — секунды; дольше —
-«Таблица занята, попробуйте ещё раз»."""
-
 _WORST_REQUESTS = 12
 """Запросов к Google в худшей записи — с запасом: открыть таблицу и лист,
 прочитать, дописать сетку, записать, перечитать дважды, очистить, перечитать
 ещё раз — около одиннадцати."""
-_HOLD_MARGIN = timedelta(seconds=60)
 
 
 def hold_limit(settings: Settings) -> timedelta:
@@ -98,11 +110,10 @@ def hold_limit(settings: Settings) -> timedelta:
     При (10, 60) — 15 минут. Дольше — процесс завис, и база вправе оборвать
     его транзакцию, отпустив очередь.
     """
-    per_request = timedelta(seconds=settings.google_connect_timeout + settings.google_read_timeout)
-    return _WORST_REQUESTS * per_request + _HOLD_MARGIN
+    return hold_limit_for(_WORST_REQUESTS, settings)
 
 
-HOLD_LIMIT = _WORST_REQUESTS * timedelta(seconds=10 + 60) + _HOLD_MARGIN
+HOLD_LIMIT = hold_limit_for(_WORST_REQUESTS)
 """:func:`hold_limit` для таймаутов Google по умолчанию (10 и 60 с)."""
 
 SPEC = specs.INGREDIENT_CARDS
@@ -123,26 +134,16 @@ _WIDTH = len(SPEC.columns)
 """A–V: столько колонок сверяется и хешируется, как у импорта."""
 _LAST = SPEC.columns[-1].letter
 
-_TITLE = "'" + SPEC.title.replace("'", "''") + "'"
-FORMATTED = "FORMATTED_VALUE"
-"""Как видит шеф: раскладка листа, снимки, хеш."""
-UNFORMATTED = "UNFORMATTED_VALUE"
-"""Числа числами: так сверяются записанные значения."""
+_TITLE = quoted(SPEC.title)
 
 PRIOR_ATTEMPT = "найдена прежняя попытка: строка уже в таблице"
 
-SentValue = str | int | float | None
-"""Значение ячейки в теле записи: текст, число JSON или ``None`` — null, «эту
-ячейку не трогать»."""
-
 
 # ---------------------------------------------------------------------------
-# Ошибки. Текст каждой — для повара: его показывает экран отправки.
+# Ошибки. Текст каждой — для повара: его показывает экран отправки. Общие
+# (WriteRefusedError, WriteNotConfirmedError, SheetBusyError,
+# SheetUnavailableError) — в sheet_write.
 # ---------------------------------------------------------------------------
-class WriteRefusedError(RuntimeError):
-    """Запись не состоялась или не подтверждена. Черновик повара цел."""
-
-
 class HeaderDriftError(WriteRefusedError):
     """Колонки листа съехали — писать по позиции нельзя."""
 
@@ -162,29 +163,6 @@ class DuplicateNameError(WriteRefusedError):
         self.row = row
 
 
-class WriteNotConfirmedError(WriteRefusedError):
-    """Запрос записи ушёл, но записанное не подтверждено.
-
-    ``layout_confirmed`` — лист на месте, как при чтении: строка N−1 та же,
-    а наша строка либо не легла, либо её правили и наши ячейки убраны.
-    Иначе (False) строки сдвигали, очистка не подтвердилась или исход
-    неизвестен — нужен разбор по журналу ``journal_id``.
-    """
-
-    def __init__(self, message: str, *, row: int, journal_id: int, layout_confirmed: bool) -> None:
-        super().__init__(message)
-        self.row = row
-        self.journal_id = journal_id
-        self.layout_confirmed = layout_confirmed
-
-
-class SheetBusyError(WriteRefusedError):
-    """Очередь писателей недоступна: занята дольше предела или потеряна."""
-
-    def __init__(self, message: str = "Таблица занята, попробуйте ещё раз.") -> None:
-        super().__init__(message)
-
-
 class LockLostError(SheetBusyError):
     """Базу, державшую очередь писателей, оборвали до записи в лист."""
 
@@ -193,10 +171,6 @@ class LockLostError(SheetBusyError):
             "Связь с базой платформы прервалась до записи — в таблице ничего не изменилось. "
             "Черновик сохранён, попробуйте ещё раз."
         )
-
-
-class SheetUnavailableError(WriteRefusedError):
-    """Google отказал до записи — карточка в лист не ушла."""
 
 
 _NOTHING_CHANGED = (
@@ -224,76 +198,8 @@ def _resumed_unconfirmed_text(row: int, journal_id: int) -> str:
 
 
 def _trouble(error: Exception) -> str:
-    """Что ответил Google — словами для повара.
-
-    «Не ответил» чинится повтором, «доступ закрыт» и «лист переименован» —
-    нет: их путать нельзя. Исходный текст — в лог и журнал.
-    """
-    raw = describe_error(error)
-    lowered = raw.lower()
-    if "[errno" in lowered:
-        # Ошибка ОС: сеть или файл ключа — не ответ Google о таблице.
-        return "Google-таблица не ответила"
-    if "[403]" in raw or lowered.startswith("permissionerror"):
-        return "Доступ платформы к таблице закрыт"
-    if "worksheetnotfound" in lowered or ("[400]" in raw and "parse range" in lowered):
-        return f"Лист «{SPEC.title}» не найден — возможно, его переименовали"
-    if "[404]" in raw or "spreadsheetnotfound" in lowered:
-        return "Таблица не найдена"
-    if "[429]" in raw or "quota" in lowered:
-        return "Google ограничил число запросов"
-    return "Google-таблица не ответила"
-
-
-# ---------------------------------------------------------------------------
-# Журнал, на который опирается писатель
-# ---------------------------------------------------------------------------
-class WritersLock(Protocol):
-    """Очередь писателей, которую держит писатель."""
-
-    def alive(self) -> bool:
-        """Держится ли она ещё — не оборвала ли её база."""
-        ...
-
-
-class SheetJournal(Protocol):
-    """Журнал записей и очередь писателей — ``kitchen.db.journal.DbJournal``.
-
-    Протоколом, а не классом: писатель проверяется офлайн на журнале в
-    памяти, а настоящий — на Postgres."""
-
-    def writers_lock(
-        self, key: int, wait: timedelta, hold: timedelta
-    ) -> AbstractContextManager[WritersLock]: ...
-
-    def find_open(self, request_key: str) -> OpenWrite | None: ...
-
-    def unconfirmed_attempts(self, request_key: str) -> tuple[SentWrite, ...]: ...
-
-    def start(self, write: NewWrite) -> int: ...
-
-    def found(
-        self,
-        write: NewWrite,
-        *,
-        content_hash: str,
-        note: str,
-        after: Mapping[str, object] | None = None,
-    ) -> int: ...
-
-    def finish(
-        self,
-        write_id: int,
-        *,
-        status: str,
-        content_hash: str | None = None,
-        error: str | None = None,
-        note: str | None = None,
-        before: Mapping[str, object] | None = None,
-        after: Mapping[str, object] | None = None,
-    ) -> None: ...
-
-    def annotate(self, write_id: int, *, error: str) -> None: ...
+    """Что ответил Google — словами для повара (:func:`~kitchen.sync.sheet_write.trouble`)."""
+    return trouble(error, SPEC.title)
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,25 +228,6 @@ class AppendResult:
 # ---------------------------------------------------------------------------
 # Значения строки
 # ---------------------------------------------------------------------------
-def sheet_number(value: Decimal) -> int | float:
-    """Число для тела записи: JSON-число без потери точности.
-
-    ``RAW`` кладёт JSON-число числом — шеф сортирует и считает формулами. Но
-    ``json.dumps`` не знает ``Decimal``, а через ``float`` число может тихо
-    стать другим. Поэтому ``float`` — только на этой границе и только если
-    число возвращается из него тем же: ``Decimal(repr(float(d))) == d``.
-    Целое уходит целым. Иначе — :class:`WriteRefusedError`.
-    """
-    if value.is_finite():
-        number: int | float = int(value) if value == value.to_integral_value() else float(value)
-        if Decimal(repr(float(number))) == value:
-            return number
-    shown = format(value, "f").replace(".", ",")
-    raise WriteRefusedError(
-        f"число {shown} не записать в таблицу точно — проверьте его. Черновик сохранён."
-    )
-
-
 def _serialise(values: Mapping[str, str | Decimal]) -> dict[str, SentValue]:
     """Проверить строку и перевести её в значения тела записи.
 
@@ -459,24 +346,10 @@ def _snapshot(raw: Cells, number: int) -> list[str]:
     return _padded(line, max(_WIDTH, len(line)))
 
 
-def _matrix(block: object) -> list[list[object]]:
-    if not isinstance(block, dict):
-        return []
-    values = block.get("values")
-    if not isinstance(values, list):
-        return []
-    return [list(line) if isinstance(line, list) else [] for line in values]
-
-
 def _read(book: Spreadsheet, cells: str, render: str) -> list[list[object]]:
-    """Один диапазон листа. ``params`` — свежий словарь: gspread дописывает
-    в него ``ranges``."""
+    """Один диапазон листа (:func:`~kitchen.sync.sheet_write.read_ranges`)."""
     where = f"{_TITLE}!{cells}" if cells else _TITLE
-    payload = book.values_batch_get([where], {"valueRenderOption": render})
-    blocks = payload.get("valueRanges")
-    if not isinstance(blocks, list) or not blocks:
-        raise RuntimeError(f"Google не вернул диапазон {where}")
-    return _matrix(blocks[0])
+    return read_ranges(book, [where], render)[0]
 
 
 def _whole_sheet(book: Spreadsheet) -> Cells:
@@ -497,26 +370,9 @@ def _row_values(book: Spreadsheet, row: int) -> list[object]:
     return [*line, *[""] * (_WIDTH - len(line))]
 
 
-def _same(sent: SentValue, got: object) -> bool:
-    """Лежит ли в ячейке ровно отправленное.
-
-    ``None`` (null) — ячейка должна быть пустой: чужое в ней — чужое. Текст —
-    ``==``, без обрезки пробелов: ``convert_cell`` их срезал бы и спрятал
-    правку. Число — ``Decimal(repr(x))``: так сравниваются значения, а не их
-    запись.
-    """
-    if sent is None:
-        return got is None or got == ""
-    if isinstance(sent, str):
-        return isinstance(got, str) and got == sent
-    if isinstance(got, bool) or not isinstance(got, int | float):
-        return False
-    return Decimal(repr(got)) == Decimal(repr(sent))
-
-
 def _differing(sent: Mapping[str, SentValue], cells: Sequence[object]) -> tuple[Column, ...]:
     """Колонки, где в строке листа не то, что в ``sent``."""
-    return tuple(c for c in _WRITTEN if not _same(sent[c.field], cells[c.index]))
+    return tuple(c for c in _WRITTEN if not same_cell(sent[c.field], cells[c.index]))
 
 
 def _letters(columns: Sequence[Column]) -> str:
@@ -775,7 +631,7 @@ class CardSheetWriter:
         cooks = _cook_edits(sent, landed, cells)
         line = _snapshot(raw, row)
         twins = ", ".join(str(number) for number in rows) if len(rows) > 1 else ""
-        note = _joined(
+        note = joined(
             PRIOR_ATTEMPT,
             f"ссылка этикетки этой отправки в нескольких строках листа: {twins} — сверена "
             f"строка {row}; остальные — дубль карточки, покажите шефу"
@@ -841,7 +697,7 @@ class CardSheetWriter:
             formatted=formatted,
             values=values,
             previous_holds=previous_holds,
-            layout_confirmed=previous_holds and _same(attempt.sent[_P.field], values[_P.index]),
+            layout_confirmed=previous_holds and same_cell(attempt.sent[_P.field], values[_P.index]),
             untouched=previous_holds and formatted == attempt.snapshot(row)[:_WIDTH],
         )
 
@@ -860,7 +716,7 @@ class CardSheetWriter:
             strangers = _differing(attempt.sent, seen.values)
             if strangers:
                 self._roll_back(book, attempt, seen, strangers)
-            note = _joined(
+            note = joined(
                 "" if failure is None else f"{cause}, но строка перечитана — легла",
                 _shifted_note(shifted),
             )
@@ -917,7 +773,7 @@ class CardSheetWriter:
         row = attempt.row
         if seen.layout_confirmed:
             cooks = _cook_edits(sent, attempt.sent, seen.values)
-            note = _joined(
+            note = joined(
                 f"{cause}; строка перечитана — легла",
                 _chef_note(_differing(attempt.sent, seen.values)),
                 f"в лист не записаны правки повара: {_letters(_columns(cooks))}" if cooks else "",
@@ -982,7 +838,7 @@ class CardSheetWriter:
             c
             for c in _WRITTEN
             if attempt.sent[c.field] is not None
-            and _same(attempt.sent[c.field], seen.values[c.index])
+            and same_cell(attempt.sent[c.field], seen.values[c.index])
         ]
         after: dict[str, object] = {"rows": seen.rows(row), "cleared": [c.letter for c in ours]}
         try:
@@ -1172,8 +1028,8 @@ def _cook_edits(
     return tuple(
         c.field
         for c in _WRITTEN
-        if not _same(sent[c.field], _as_cell(landed[c.field]))
-        and not _same(sent[c.field], cells[c.index])
+        if not same_cell(sent[c.field], _as_cell(landed[c.field]))
+        and not same_cell(sent[c.field], cells[c.index])
     )
 
 
@@ -1189,10 +1045,6 @@ def _shifted_note(shifted: UnconfirmedWrite | None) -> str:
     if shifted is None:
         return ""
     return f"раскладка прежней попытки не подтверждена — журнал №{shifted.id}, строка {shifted.row}"
-
-
-def _joined(*parts: str) -> str:
-    return "; ".join(part for part in parts if part)
 
 
 def _google[T](what: str, call: Callable[[], T], template: str = _NOTHING_CHANGED) -> T:

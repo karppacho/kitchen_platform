@@ -302,9 +302,23 @@ ANCHOR_MISSING = (
     "проверьте формулу QUERY в колонке B"
 )
 
+ANCHOR_BROKEN = (
+    "Формула, которая подтягивает карточки в справочник, сломана — сообщите разработчику"
+)
+"""Якорь есть, но на него нельзя опереться: в колонке B вторая формула
+``QUERY`` или формула показывает ошибку («#REF!», «#N/A» — например,
+``IMPORTRANGE`` потерял доступ). Это поломка листа, а не задержка: «строка ещё
+не появилась» заставило бы ждать вечно."""
+
 
 class ReferenceLayoutError(ValueError):
     """Лист ING устроен не так, как ждали, — писать в него нельзя."""
+
+
+def is_query_formula(cell: object) -> bool:
+    """Стоит ли в ячейке формула с ``QUERY`` — так якорь выглядит в
+    FORMULA-чтении, в том числе обёрнутый (``=IFERROR(QUERY(…);"")``)."""
+    return _is_formula(cell) and "QUERY(" in str(cell).upper()
 
 
 def find_query_anchor(formula_rows: Sequence[Sequence[object]]) -> int:
@@ -312,13 +326,20 @@ def find_query_anchor(formula_rows: Sequence[Sequence[object]]) -> int:
 
     ``formula_rows`` — лист ING в FORMULA-чтении с первой строки: формулу
     видно только в нём. С этой строки ``QUERY`` выводит карточки «Да» по
-    порядку. Нет такой формулы — :class:`ReferenceLayoutError`.
+    порядку. Нет такой формулы — :class:`ReferenceLayoutError` с
+    :data:`ANCHOR_MISSING`; их в колонке несколько — с :data:`ANCHOR_BROKEN`:
+    место строки считалось бы от любой из них.
     """
-    for number, row in enumerate(formula_rows, start=1):
-        cell = _cell(row, ANCHOR_LETTER)
-        if _is_formula(cell) and "QUERY(" in str(cell).upper():
-            return number
-    raise ReferenceLayoutError(ANCHOR_MISSING)
+    anchors = [
+        number
+        for number, row in enumerate(formula_rows, start=1)
+        if is_query_formula(_cell(row, ANCHOR_LETTER))
+    ]
+    if not anchors:
+        raise ReferenceLayoutError(ANCHOR_MISSING)
+    if len(anchors) > 1:
+        raise ReferenceLayoutError(ANCHOR_BROKEN)
+    return anchors[0]
 
 
 # ---------------------------------------------------------------------------

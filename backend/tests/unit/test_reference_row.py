@@ -17,6 +17,7 @@ import pytest
 from kitchen.domain.cards import TEXT_LIMITS
 from kitchen.domain.reference_row import (
     ACTIVE_STATUS,
+    ANCHOR_BROKEN,
     ANCHOR_LETTER,
     ID_LETTER,
     LOSSES_TOTAL_LETTER,
@@ -31,6 +32,7 @@ from kitchen.domain.reference_row import (
     ReferenceLayoutError,
     find_query_anchor,
     formula_cells,
+    is_query_formula,
     locate_row,
     next_reference_id,
 )
@@ -365,6 +367,38 @@ def test_anchor_survives_how_the_formula_is_written(cell: str) -> None:
 def test_no_anchor_is_refused(rows: Rows) -> None:
     with pytest.raises(ReferenceLayoutError, match="формула подтягивания карточек не найдена"):
         find_query_anchor(rows)
+
+
+def test_second_query_in_b_is_a_broken_anchor() -> None:
+    """Вторая формула QUERY в колонке B — не понять, с какой строки идёт зона
+    карточек: место строки считалось бы от любой из них. Это поломка листа,
+    а не «строка ещё не появилась»."""
+    rows: Rows = [list(_HEADER), ["1", "Овощи", "Лук"], ["", _QUERY_B, ""], ["", _QUERY_B, ""]]
+
+    with pytest.raises(ReferenceLayoutError) as caught:
+        find_query_anchor(rows)
+
+    assert str(caught.value) == ANCHOR_BROKEN
+    assert ANCHOR_BROKEN == (
+        "Формула, которая подтягивает карточки в справочник, сломана — сообщите разработчику"
+    )
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected"),
+    [
+        (_QUERY_B, True),
+        ('=IFERROR(QUERY(A1:C;"select *");"")', True),
+        ("QUERY(A1:C)", False),
+        ("=M7/6", False),
+        ("Соусы", False),
+        (131, False),
+        ("", False),
+    ],
+)
+def test_query_formula_is_recognised_in_a_cell(cell: object, expected: bool) -> None:
+    """Так писатель после записи проверяет, что якорь на месте."""
+    assert is_query_formula(cell) is expected
 
 
 # ---------------------------------------------------------------------------
