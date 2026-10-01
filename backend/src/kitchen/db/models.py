@@ -485,3 +485,35 @@ class SheetWrite(Base):
             postgresql_where=text("status in ('pending', 'verified')"),
         ),
     )
+
+
+class LlmCall(Base):
+    """Один вызов модели через polza.ai — и удачный, и нет.
+
+    Из журнала считается дневной бюджет и лимит на повара, поэтому строка
+    пишется на каждый вызов, даже неудачный: таймаут мог стоить денег.
+    Стоимость — сколько списал polza.ai плюс оценка 5 ₽ за каждую попытку с
+    неизвестной ценой (таймаут, обрыв, 5xx); ``None`` — не известно ничего,
+    бюджет считает такой вызов той же оценкой. Повара удалили — траты
+    остаются, ссылка на него пустеет.
+    """
+
+    __tablename__ = "llm_calls"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(32))
+    """Зачем звали модель: ``label`` — распознавание этикетки."""
+    model: Mapped[str] = mapped_column(Text)
+    prompt_version: Mapped[str] = mapped_column(String(32))
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("profiles.id", ondelete="SET NULL"), index=True
+    )
+    ok: Mapped[bool] = mapped_column()
+    error: Mapped[str] = mapped_column(Text, default="")
+    # Четыре знака после запятой: вызов стоит копейки и доли копеек.
+    cost_rub: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    tokens: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)

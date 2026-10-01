@@ -564,6 +564,31 @@ def test_per_hundred_basis_keeps_numbers(basis: str | None) -> None:
     assert values["protein"] == _D("1.2")
 
 
+@pytest.mark.parametrize("basis", ["", None, "   "])
+def test_missing_basis_keeps_numbers_but_says_so(basis: str | None) -> None:
+    """Модель не сказала, на что даны КБЖУ, — числа остаются как прочитаны (без
+    пересчёта), но повар узнаёт об этом: числа на порцию иначе тихо ушли бы в
+    колонку «на 100 г»."""
+    values, warnings = label_fields_from_extraction(_extraction(nutrition_basis=basis))
+    assert [values[f] for f in ("protein", "fat", "carbs", "kcal")] == [
+        _D("1.2"),
+        _D("0.5"),
+        _D("30"),
+        _D("130"),
+    ]
+    assert len(warnings) == 1
+    assert "не указано, на что даны" in warnings[0]
+    assert "на 100 г или на порцию" in warnings[0]
+
+
+def test_missing_basis_without_numbers_is_quiet() -> None:
+    values, warnings = label_fields_from_extraction(
+        _extraction(nutrition_basis=None, proteins=None, fats="", carbohydrates=None, kcal=None)
+    )
+    assert values["protein"] is None
+    assert warnings == ()
+
+
 def test_period_on_the_label_wins() -> None:
     values, _ = label_fields_from_extraction(
         _extraction(shelf_life_period="180 суток", storage_conditions="при t -18°C")

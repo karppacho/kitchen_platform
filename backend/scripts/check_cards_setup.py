@@ -12,6 +12,15 @@
     docker compose -f infra/docker-compose.yml exec -T api \\
         python scripts/check_cards_setup.py --bot-key - < /путь/к/ключу-бота.json
 
+С ``--llm`` — ещё и пробный вызов модели распознавания через polza.ai тем же
+клиентом и той же моделью (``LLM_VISION_MODEL``), что распознают этикетки.
+Печатаются адрес, модель, цена вызова в рублях и время; ключ — никогда.
+Картинка пробы — серый квадрат, собранный самим скриптом, не фото. Вызов
+стоит денег (копейки), поэтому только по флагу::
+
+    docker compose -f infra/docker-compose.yml exec api \\
+        python scripts/check_cards_setup.py --llm
+
 Что проверяется:
 
 * адрес сервисного аккаунта платформы — печатается: его вписывают в доступ
@@ -24,11 +33,13 @@
 * пробная загрузка 1 КБ JPEG → скачивание → корзина: сначала с узким доступом
   ``drive.file``; если ему не хватает прав или он не видит папку — с
   ``drive``. Проба прошла только с ``drive``, а выставлен ``drive.file`` —
-  ошибка: фото не сохранятся. Выставлено шире нужного — предупреждение.
+  ошибка: фото не сохранятся. Выставлено шире нужного — предупреждение;
+* с ``--llm`` — пробный вызов модели: ключ принят, деньги на счёте есть,
+  модель найдена, связь есть.
 
 Скрипт ничего не меняет в доступах и таблицах — только читает (кроме самой
 пробы в папке фото); исправляет человек. Код выхода 0 — всё обязательное
-прошло; предупреждения его не портят.
+прошло (с ``--llm`` — и пробный вызов); предупреждения его не портят.
 """
 
 from __future__ import annotations
@@ -37,6 +48,7 @@ import argparse
 import json
 import sys
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -45,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pydantic import ValidationError
 
 from kitchen.config import Settings, load_settings
+from kitchen.llm.polza import LlmError, polza_from_settings
 from kitchen.sync.drive import (
     API_DISABLED_REASONS,
     INSPECT_SCOPE,
@@ -93,6 +106,53 @@ def _probe_jpeg() -> bytes:
 
 
 PROBE = _probe_jpeg()
+
+
+def _probe_image(side: int = 64) -> bytes:
+    """Серый квадрат ``side``×``side`` — настоящий JPEG, собранный здесь же.
+
+    Модели нужна картинка, которую она сможет открыть; фото для этого не
+    нужно, а библиотек для картинок у платформы нет. Базовый JPEG в оттенках
+    серого, все пиксели 128: после сдвига уровня у каждого блока 8×8 один
+    коэффициент — нулевой DC — и сразу «конец блока». Таблицы Хаффмана — по
+    одному коду длиной в бит: «0» — DC без изменения, «0» — конец блока. Блок
+    — два нулевых бита, вся картинка — (side/8)² × 2 бит нулей. 64 пикселя —
+    с запасом: совсем крошечные картинки (у Qwen — меньше 11 пикселей по
+    стороне) модели зрения отвергают.
+    """
+
+    def segment(marker: int, body: bytes) -> bytes:
+        return bytes((0xFF, marker)) + (len(body) + 2).to_bytes(2, "big") + body
+
+    one_code = bytes((1, *([0] * 15)))  # один код длиной в один бит
+    blocks = (side // 8) ** 2
+    return b"".join(
+        (
+            b"\xff\xd8",
+            segment(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"),
+            segment(0xDB, b"\x00" + b"\x01" * 64),  # таблица квантования из единиц
+            segment(0xC0, b"\x08" + side.to_bytes(2, "big") * 2 + b"\x01\x01\x11\x00"),
+            segment(0xC4, b"\x00" + one_code + b"\x00"),  # DC: «0» — разница 0
+            segment(0xC4, b"\x10" + one_code + b"\x00"),  # AC: «0» — конец блока
+            segment(0xDA, b"\x01\x01\x00\x00\x3f\x00"),
+            bytes(blocks * 2 // 8),
+            b"\xff\xd9",
+        )
+    )
+
+
+LLM_PROBE_IMAGE = _probe_image()
+LLM_PROBE_SYSTEM = 'Это проверка связи платформы с моделью. Ответь JSON-объектом {"ok": true}.'
+LLM_PROBE_PROMPT = 'Верни {"ok": true}.'
+LLM_PROBE_MAX_TOKENS = 50
+
+NOT_UTF8 = (
+    "файл не в кодировке UTF-8 — похоже, его пересохранили Блокнотом как «Юникод» "
+    "(UTF-16); сохраните ключ в UTF-8"
+)
+WITH_BOM = (
+    "в начале файла метка BOM — так Блокнот сохраняет «UTF-8 с BOM»; сохраните ключ в UTF-8 без BOM"
+)
 
 
 class Report:
@@ -153,6 +213,11 @@ def main(argv: list[str] | None = None) -> int:
             "--bot-key - < bot.json"
         ),
     )
+    parser.add_argument(
+        "--llm",
+        action="store_true",
+        help="ещё и пробный вызов модели распознавания через polza.ai (стоит копейки)",
+    )
     args = parser.parse_args(argv)
     report = Report()
 
@@ -175,8 +240,8 @@ def main(argv: list[str] | None = None) -> int:
         except _DriveOff as off:
             report.fail(_why(off.error))
 
-    # Здесь встанет пробный вызов модели распознавания (флаг --llm: цена и
-    # адрес polza.ai) — тем же клиентом, которым распознаёт платформа.
+    if args.llm:
+        _check_llm(settings, report)
 
     return report.finish()
 
@@ -196,16 +261,16 @@ def _settings_errors(error: ValidationError, report: Report) -> None:
 # ---------------------------------------------------------------------------
 def _account(path: Path, bot_key: str | None, report: Report) -> str | None:
     report.section("СЕРВИСНЫЙ АККАУНТ")
-    email = _client_email(_read(path))
+    email, problem = _client_email(*_read(path))
     if email is None:
-        report.fail(f"ключ не прочитан — проверьте GOOGLE_CREDENTIALS_PATH ({path})")
+        report.fail(f"ключ не прочитан — проверьте GOOGLE_CREDENTIALS_PATH ({path}): {problem}")
         return None
     report.ok(f"адрес: {email}")
     report.note("этот адрес вписывают в доступ папки фото и таблиц")
     if bot_key is not None:
-        bot = _client_email(sys.stdin.read() if bot_key == "-" else _read(Path(bot_key)))
+        bot, problem = _client_email(*(_read_stdin() if bot_key == "-" else _read(Path(bot_key))))
         if bot is None:
-            report.warn("ключ бота не прочитан — сравнить аккаунты не вышло")
+            report.warn(f"ключ бота не прочитан — сравнить аккаунты не вышло: {problem}")
         elif bot == email:
             report.ok("ключ бота: тот же аккаунт — доступы бота у платформы уже есть")
         else:
@@ -213,21 +278,49 @@ def _account(path: Path, bot_key: str | None, report: Report) -> str | None:
     return email
 
 
-def _read(path: Path) -> str:
+def _read(path: Path) -> tuple[str | None, str]:
+    """Текст ключа или ``None`` и почему не прочитан."""
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8"), ""
+    except UnicodeDecodeError:
+        return None, NOT_UTF8
     except OSError:
-        return ""
+        return None, "файла нет или его не открыть на чтение"
 
 
-def _client_email(text: str) -> str | None:
+def _read_stdin() -> tuple[str | None, str]:
+    """Ключ из stdin — байтами и строго в UTF-8.
+
+    Текстовый stdin в контейнере разбирает непонятные байты молча (режим
+    UTF-8 Python), и ключ в UTF-16 превратился бы в мусор без объяснения.
+    """
+    raw = getattr(sys.stdin, "buffer", None)
+    try:
+        return (sys.stdin.read() if raw is None else raw.read().decode("utf-8")), ""
+    except UnicodeDecodeError:
+        return None, NOT_UTF8
+    except OSError:
+        return None, "stdin не прочитан"
+
+
+def _client_email(text: str | None, problem: str) -> tuple[str | None, str]:
     """Только адрес из ключа; остальное содержимое ключа не выходит отсюда."""
+    if text is None:
+        return None, problem
+    if "\x00" in text:
+        # UTF-16 без метки порядка байтов — формально UTF-8, но с нулями.
+        return None, NOT_UTF8
+    if text.startswith("﻿"):
+        # Разбор JSON у Google на этой метке падает так же, как здесь.
+        return None, WITH_BOM
     try:
         data = json.loads(text)
     except ValueError:
-        return None
+        return None, "в файле не JSON — это не ключ сервисного аккаунта"
     email = data.get("client_email") if isinstance(data, dict) else None
-    return email if isinstance(email, str) and email else None
+    if isinstance(email, str) and email:
+        return email, ""
+    return None, "в файле нет client_email — это не ключ сервисного аккаунта"
 
 
 # ---------------------------------------------------------------------------
@@ -395,9 +488,11 @@ def _try_probe(client: DriveClient, scope: DriveScope, report: Report) -> Outcom
     try:
         client.trash(file_id)
     except DriveError as error:
+        # Роль — только когда корзину запретил сам Google (403). Отказ клиента
+        # «файл не из папки фото» и непринятый ключ ролью не лечатся.
         role = (
             " Сервисному аккаунту нужна роль «Менеджер контента»."
-            if error.kind == "forbidden"
+            if error.kind == "forbidden" and error.status == 403
             else ""
         )
         report.warn(
@@ -434,6 +529,71 @@ def _advise(working: DriveScope, configured: DriveScope, report: Report) -> None
             f"хватает узкого доступа: выставьте DRIVE_SCOPE={working} в .env сервера "
             f"(сейчас «{configured}») и перезапустите api"
         )
+
+
+# ---------------------------------------------------------------------------
+# Модель распознавания (--llm)
+# ---------------------------------------------------------------------------
+def _check_llm(settings: Settings, report: Report) -> None:
+    """Пробный вызов тем же клиентом и той же моделью, что распознают этикетки.
+
+    Код 0 — только если вызов прошёл: без модели повар заполняет все поля
+    руками, и это надо знать до приёмки, а не от повара.
+    """
+    report.section("МОДЕЛЬ РАСПОЗНАВАНИЯ: пробный вызов polza.ai")
+    report.note(f"адрес:  {settings.polza_base_url}")
+    report.note(f"модель: {settings.llm_vision_model}")
+    client = polza_from_settings(settings)
+    if client is None:
+        report.fail("не задан POLZA_API_KEY — распознавание этикеток не заработает")
+        return
+    try:
+        with client:
+            reply = client.vision_json(
+                model=settings.llm_vision_model,
+                system=LLM_PROBE_SYSTEM,
+                prompt=LLM_PROBE_PROMPT,
+                jpeg=LLM_PROBE_IMAGE,
+                max_tokens=LLM_PROBE_MAX_TOKENS,
+            )
+    except LlmError as error:
+        report.fail(f"пробный вызов не прошёл — {_llm_why(error, settings)}")
+        return
+    price = (
+        "polza.ai цену не сообщил"
+        if reply.cost_rub is None
+        else f"{format(reply.cost_rub, 'f').replace('.', ',')} ₽"
+    )
+    seconds = f"{Decimal(reply.duration_ms) / 1000:.1f}".replace(".", ",")
+    report.ok(f"пробный вызов прошёл: цена {price}, время {seconds} с")
+
+
+def _llm_why(error: LlmError, settings: Settings) -> str:
+    """Что чинить администратору — и код ответа polza.ai, если он был."""
+    hints = {
+        "key": "ключ не принят — проверьте POLZA_API_KEY",
+        "no_money": "нет денег на счёте polza.ai — пополните баланс",
+        "not_found": (
+            f"модель не найдена — проверьте LLM_VISION_MODEL (сейчас «{settings.llm_vision_model}»)"
+        ),
+        "unavailable": (
+            "нет связи с polza.ai или ответа нет дольше "
+            f"{settings.llm_vision_timeout_seconds} с — проверьте POLZA_BASE_URL и сеть "
+            "сервера, повторите запуск"
+        ),
+        "rate": "polza.ai просит подождать — повторите запуск через минуту",
+        "bad_request": (
+            "polza.ai отклонил запрос и в режиме JSON, и без него — проверьте "
+            f"LLM_VISION_MODEL (сейчас «{settings.llm_vision_model}»): модель должна "
+            "принимать картинки"
+        ),
+        "bad_reply": (
+            "ответ не похож на API polza.ai — проверьте POLZA_BASE_URL (сейчас "
+            f"«{settings.polza_base_url}»): нужен адрес API, обычно https://api.polza.ai/v1"
+        ),
+    }
+    text = hints.get(error.kind, str(error))
+    return text if error.status is None else f"{text} [{error.status}]"
 
 
 # ---------------------------------------------------------------------------
