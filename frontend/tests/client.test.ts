@@ -492,3 +492,31 @@ test('отмена вызывающим прерывает запрос', async 
 
   await expect(zapros).rejects.toMatchObject({ status: 0 })
 })
+
+test('срок покрывает и продление сессии: зависшее продление не держит запрос дольше срока', async () => {
+  // Токен истёк, а продление застряло в сети. Без срока на него кнопка
+  // оставалась бы серой, пока телефон ловит сеть, сколько бы ни было в srok.
+  let otpustit: () => void = () => {}
+  const prodlenieZhdyot = new Promise<void>((gotovo) => {
+    otpustit = gotovo
+  })
+  server.use(
+    http.get('/api/cards/drafts/current', () => new HttpResponse(null, { status: 401 })),
+    http.post('/api/auth/refresh', async () => {
+      await prodlenieZhdyot
+      return new HttpResponse(null, { status: 401 })
+    }),
+  )
+
+  try {
+    await expect(api('/cards/drafts/current', { srok: 50 })).rejects.toMatchObject({
+      status: 0,
+      message: 'Сервер не ответил вовремя — проверьте связь',
+    })
+  } finally {
+    // Продление общее на все запросы — отпускаем, чтобы следующий тест
+    // не унаследовал зависшее.
+    otpustit()
+    await api('/auth/refresh', { method: 'POST' }).catch(() => undefined)
+  }
+})

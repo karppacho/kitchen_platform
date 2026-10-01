@@ -1,13 +1,23 @@
 import {
+  useIsMutating,
   useMutation,
   useQuery,
   useQueryClient,
   type QueryClient,
   type UseQueryResult,
 } from '@tanstack/react-query'
+import { useRef, useState } from 'react'
 
 import { ApiError, api } from './client'
-import type { CardOptions, Draft, DraftPatch, NameCheck, Shag, VidFoto } from './types'
+import type {
+  CardOptions,
+  Draft,
+  DraftPatch,
+  NameCheck,
+  Shag,
+  Submitted,
+  VidFoto,
+} from './types'
 
 /** Шаги мастера по порядку — те же, что у сервера. По ним «Шаг N из 9». */
 export const SHAGI: readonly Shag[] = [
@@ -46,28 +56,45 @@ const JSON_ZAGOLOVKI = { 'Content-Type': 'application/json' }
  */
 /** Правка, начало и отмена черновика — быстрые ручки. */
 const SROK_PRAVKI = 20_000
+/** Чтение черновика: зависшее чтение держало бы и опрос распознавания —
+ *  следующее не уходит, пока не кончилось прежнее. */
+const SROK_CHTENIYA = 20_000
 /** Проверка названия; не ответила — «Далее» доступна с замечанием. */
 const SROK_PROVERKI_IMENI = 10_000
 /** Одна попытка загрузки фото. */
 export const SROK_ZAGRUZKI = 60_000
 /** Распознавание: модель читает до трёх минут, столько же ждёт nginx. */
 const SROK_RASPOZNAVANIYA = 180_000
+/** Одна попытка отправки в таблицу: запись и перенос на сайт — обычно
+ *  секунды; сервер отвечает не позже чем через ~10 с после записи. */
+export const SROK_OTPRAVKI = 60_000
 /** Сколько раз загрузка фото повторяется сама после обрыва связи. */
 export const POVTOROV_ZAGRUZKI = 2
-/** Пауза перед повтором загрузки: дать сети вернуться. */
+/** Сколько раз отправка повторяется сама после обрыва связи или срока. */
+export const POVTOROV_OTPRAVKI = 2
+/** Пауза перед повтором загрузки и отправки: дать сети вернуться. */
 export const PAUZA_PERED_POVTOROM = 2_000
 /** Как часто опрашивать черновик, пока распознавание идёт. */
 export const OPROS_RASPOZNAVANIYA = 3_000
 
-/** Черновик повара. Пока на сервере идёт распознавание этикетки, он
- *  опрашивается сам раз в 3 с: итог ляжет в черновик, даже если ответ на
- *  запуск распознавания до телефона не дошёл. */
+const KLYUCH_RASPOZNAVANIYA = ['kartochki', 'raspoznavanie'] as const
+
+/**
+ * Черновик повара. Пока распознавание этикетки идёт — в черновике
+ * `running` или запрос на запуск ещё в пути, — он опрашивается сам раз в
+ * 3 с: итог ляжет в черновик, даже если ответ на запуск до телефона не
+ * дошёл (телефон уснул, связь пропала).
+ */
 export function useChernovik(): UseQueryResult<Draft | null> {
+  const raspoznayotsya = useIsMutating({ mutationKey: KLYUCH_RASPOZNAVANIYA }) > 0
   return useQuery({
     queryKey: KLYUCH_CHERNOVIKA,
-    queryFn: () => api<Draft | null>('/cards/drafts/current'),
+    queryFn: ({ signal }) =>
+      api<Draft | null>('/cards/drafts/current', { signal, srok: SROK_CHTENIYA }),
     refetchInterval: (query) =>
-      query.state.data?.recognition_status === 'running' ? OPROS_RASPOZNAVANIYA : false,
+      raspoznayotsya || query.state.data?.recognition_status === 'running'
+        ? OPROS_RASPOZNAVANIYA
+        : false,
   })
 }
 
@@ -169,7 +196,6 @@ export function usePravkaChernovika() {
 export function useNachatChernovik(onNachato: (chernovik: Draft) => void) {
   const queries = useQueryClient()
   return useMutation({
-    onMutate: () => ostanovitPerechityvanie(queries),
     mutationFn: async (prezhniy: string | null): Promise<Draft> => {
       if (prezhniy !== null) {
         try {
@@ -184,11 +210,17 @@ export function useNachatChernovik(onNachato: (chernovik: Draft) => void) {
       try {
         return await api<Draft>('/cards/drafts', { method: 'POST', srok: SROK_PRAVKI })
       } catch (oshibka) {
-        if (prezhniy !== null) queries.setQueryData(KLYUCH_CHERNOVIKA, null)
+        if (prezhniy !== null) {
+          await ostanovitPerechityvanie(queries)
+          queries.setQueryData(KLYUCH_CHERNOVIKA, null)
+        }
         throw oshibka
       }
     },
-    onSuccess: (chernovik) => {
+    // Как у правки: перечитывание, ушедшее до ответа, несёт прежний
+    // черновик (или «нет черновика») — сначала оно останавливается.
+    onSuccess: async (chernovik) => {
+      await ostanovitPerechityvanie(queries)
       onNachato(chernovik)
       queries.setQueryData(KLYUCH_CHERNOVIKA, chernovik)
     },
@@ -203,39 +235,56 @@ function pauza(ms: number): Promise<void> {
 }
 
 /**
- * Фото в слот черновика — с двумя автоповторами того же фото.
+ * Запрос с автоповторами после обрыва связи или срока без ответа.
  *
- * Мобильная сеть у плиты рвётся: обрыв или срок без ответа — повод
- * повторить, а не бросить загрузку. Повторяется то же уменьшенное фото: с
- * камеры второй раз его не выбрать. Отказ сервера (не JPEG, идёт отправка,
- * хранилище недоступно) повтором не лечится — сразу наверх. Повтор
- * безопасен: дошедшее без ответа фото просто заменится тем же.
- *
- * `onPovtor` — номер начатой попытки (2, 3): повар видит, что загрузка не
- * брошена.
+ * Мобильная сеть у плиты рвётся: обрыв — повод повторить, а не бросить.
+ * Отказ сервера повтором не лечится — сразу наверх. `onPovtor` — номер
+ * начатой попытки (2, 3): повар видит, что работа не брошена.
  */
-async function zagruzitFoto(
-  { id, vid, foto }: ZagruzkaFoto,
+async function sPovtoramiPriObryve<T>(
+  zapros: () => Promise<T>,
+  povtorov: number,
   onPovtor: (popytka: number) => void,
-): Promise<Draft> {
+): Promise<T> {
   for (let popytka = 1; ; popytka += 1) {
-    // Поле `photo` — так его ждёт сервер. Заголовок против подделки ставит
-    // api(): PUT — изменяющий запрос.
-    const forma = new FormData()
-    forma.append('photo', foto, 'foto.jpg')
     try {
-      return await api<Draft>(`/cards/drafts/${encodeURIComponent(id)}/photos/${vid}`, {
-        method: 'PUT',
-        body: forma,
-        srok: SROK_ZAGRUZKI,
-      })
+      return await zapros()
     } catch (oshibka) {
       const obryv = oshibka instanceof ApiError && oshibka.status === 0
-      if (!obryv || popytka > POVTOROV_ZAGRUZKI) throw oshibka
+      if (!obryv || popytka > povtorov) throw oshibka
       onPovtor(popytka + 1)
       await pauza(PAUZA_PERED_POVTOROM)
     }
   }
+}
+
+/**
+ * Фото в слот черновика — с двумя автоповторами того же фото.
+ *
+ * Повторяется то же уменьшенное фото: с камеры второй раз его не выбрать.
+ * Отказ сервера (не JPEG, идёт отправка, хранилище недоступно) не
+ * повторяется. Повтор безопасен: дошедшее без ответа фото просто заменится
+ * тем же.
+ */
+function zagruzitFoto(
+  { id, vid, foto }: ZagruzkaFoto,
+  onPovtor: (popytka: number) => void,
+): Promise<Draft> {
+  return sPovtoramiPriObryve(
+    () => {
+      // Поле `photo` — так его ждёт сервер. Заголовок против подделки ставит
+      // api(): PUT — изменяющий запрос.
+      const forma = new FormData()
+      forma.append('photo', foto, 'foto.jpg')
+      return api<Draft>(`/cards/drafts/${encodeURIComponent(id)}/photos/${vid}`, {
+        method: 'PUT',
+        body: forma,
+        srok: SROK_ZAGRUZKI,
+      })
+    },
+    POVTOROV_ZAGRUZKI,
+    onPovtor,
+  )
 }
 
 export function useZagruzkaFoto(onPovtor: (popytka: number) => void) {
@@ -251,23 +300,117 @@ export function useZagruzkaFoto(onPovtor: (popytka: number) => void) {
  * Распознать этикетку черновика: поля и замечания — в черновик.
  *
  * Ответ может не дойти: телефон уснул, nginx не дождался модели (504),
- * вышел срок, распознавание уже идёт (409). Это не ошибка распознавания —
- * сервер дочитает этикетку и положит итог в черновик. Поэтому после любого
- * отказа черновик перечитывается — до того, как отказ дойдёт до экрана: идёт
- * — черновик опрашивается сам (`useChernovik`), готово или не удалось — экран
+ * вышел срок. Это не ошибка распознавания — сервер дочитает этикетку и
+ * положит итог в черновик. Поэтому после любого отказа черновик
+ * перечитывается — до того, как отказ дойдёт до экрана: идёт — черновик
+ * опрашивается сам (`useChernovik`), готово или не удалось — экран
  * показывает итог из черновика.
+ *
+ * 409 при том, что в черновике «идёт», — распознавание уже запущено
+ * (другой вкладкой, до сна телефона): это не отказ, а ожидание. Прочие 409
+ * («Карточка отправляется», «Фото этикетки заменили») — отказы с текстом.
+ *
+ * Контекст — `updated_at` черновика при запуске: итог, легший позже,
+ * меняет его, и экран узнаёт итог, не дожидаясь ответа на запуск.
  */
 export function useRaspoznavanie() {
   const queries = useQueryClient()
   return useMutation({
-    mutationFn: (id: string) =>
-      api<Draft>(`/cards/recognize/${encodeURIComponent(id)}`, {
-        method: 'POST',
-        srok: SROK_RASPOZNAVANIYA,
-      }),
+    mutationKey: KLYUCH_RASPOZNAVANIYA,
+    onMutate: () => ({
+      versiya: queries.getQueryData<Draft | null>(KLYUCH_CHERNOVIKA)?.updated_at ?? null,
+    }),
+    mutationFn: async (id: string) => {
+      try {
+        return await api<Draft>(`/cards/recognize/${encodeURIComponent(id)}`, {
+          method: 'POST',
+          srok: SROK_RASPOZNAVANIYA,
+        })
+      } catch (oshibka) {
+        await queries.invalidateQueries({ queryKey: KLYUCH_CHERNOVIKA })
+        const chernovik = queries.getQueryData<Draft | null>(KLYUCH_CHERNOVIKA)
+        const uzheIdyot =
+          oshibka instanceof ApiError &&
+          oshibka.status === 409 &&
+          chernovik?.id === id &&
+          chernovik.recognition_status === 'running'
+        if (uzheIdyot) return chernovik
+        throw oshibka
+      }
+    },
     onSuccess: (chernovik) => polozhitChernovik(queries, chernovik),
-    onError: () => queries.invalidateQueries({ queryKey: KLYUCH_CHERNOVIKA }),
   })
 }
 
 export type Raspoznavanie = ReturnType<typeof useRaspoznavanie>
+
+/**
+ * «Отправить в таблицу».
+ *
+ * Отправка идемпотентна: ключ записи на сервере привязан к черновику, и
+ * повтор отвечает той же строкой — второй в таблице не будет. Поэтому обрыв
+ * связи и срок без ответа (60 с) — повод повторить ту же отправку самим, до
+ * двух раз. Отказ сервера не повторяется: дубль, «отправляется», «таблица
+ * занята» повтор через 2 с не вылечит — повар решит сам.
+ *
+ * Двойное касание даёт один запрос: вторая отправка не уходит, пока идёт
+ * первая, — не только серой кнопкой, два касания успевают раньше
+ * перерисовки. Защита живёт здесь, над шагами: она переживает и смену шага.
+ *
+ * Успех: черновика больше нет (он отправлен) — он перечитывается, а не
+ * стирается из кэша сразу: экран «Записано» держится по ответу отправки, и
+ * пустой кэш до него мелькнул бы экраном «Начать». Справочник и сверка
+ * устарели — в них новая карточка, в подсказках — её поставщик и категория.
+ */
+export function useOtpravka() {
+  const queries = useQueryClient()
+  const [popytka, zadatPopytku] = useState(1)
+  const idyot = useRef(false)
+  const mutatsiya = useMutation({
+    onMutate: () => zadatPopytku(1),
+    mutationFn: (id: string) =>
+      sPovtoramiPriObryve(
+        () =>
+          api<Submitted>(`/cards/drafts/${encodeURIComponent(id)}/submit`, {
+            method: 'POST',
+            srok: SROK_OTPRAVKI,
+          }),
+        POVTOROV_OTPRAVKI,
+        zadatPopytku,
+      ),
+    onSuccess: () => {
+      void queries.invalidateQueries({ queryKey: KLYUCH_CHERNOVIKA })
+      void queries.invalidateQueries({ queryKey: ['reconciliation'] })
+      void queries.invalidateQueries({ queryKey: ['ingredients'] })
+      void queries.invalidateQueries({ queryKey: ['kartochki', 'varianty'] })
+    },
+    // 404 — черновик отправили или сбросили в другой вкладке; 422 — чего не
+    // хватает, пересчитано по черновику на сервере.
+    onError: (oshibka) => perechitatPosle(queries, oshibka, [...OTSTALI, 422]),
+    onSettled: () => {
+      idyot.current = false
+    },
+  })
+  return {
+    otpravit: (id: string) => {
+      if (idyot.current) return
+      idyot.current = true
+      mutatsiya.mutate(id)
+    },
+    /** Отправка идёт — кнопки ждут. */
+    idyot: mutatsiya.isPending,
+    /** Номер идущей попытки: 2 и 3 — повтор после обрыва связи. */
+    popytka,
+    oshibka: mutatsiya.error,
+    /** Когда ушла последняя отправка (мс), 0 — не уходила. Шаг итога
+     *  показывает отказ, только если отправка ушла при нём: вернувшись к
+     *  итогу после «Изменить название», повар не видит прежний отказ. */
+    nachataV: mutatsiya.submittedAt,
+    /** Карточка в листе — экран «Записано в таблицу». */
+    otvet: mutatsiya.data ?? null,
+    /** Забыть отправку: «Добавить ещё». */
+    sbrosit: mutatsiya.reset,
+  }
+}
+
+export type Otpravka = ReturnType<typeof useOtpravka>

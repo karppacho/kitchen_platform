@@ -755,3 +755,109 @@ test('проверка названия не ответила за 10 с — «�
   expect(await screen.findByText(/это проверится при отправке/)).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Далее' })).toBeEnabled()
 })
+
+// ---------------------------------------------------------------------------
+// Мелочи ревью задачи 10: срок чтения, «Начать» и перечитывание, фокус
+// ---------------------------------------------------------------------------
+
+test('чтение черновика не ответило за 20 с — понятный текст и «Повторить»', async () => {
+  // Зависшее чтение держало бы и опрос распознавания: следующее не уходит,
+  // пока не кончилось прежнее.
+  server.use(
+    http.get('/api/cards/drafts/current', async () => {
+      await delay('infinite')
+      return HttpResponse.json(null)
+    }),
+  )
+  const { vperyod } = chasy()
+  narisovat()
+  expect(await screen.findByRole('heading', { name: 'Новый ингредиент' })).toBeInTheDocument()
+  expect(screen.getByText('Загрузка…')).toBeInTheDocument()
+
+  await vperyod(20_000)
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'Сервер не ответил вовремя — проверьте связь',
+  )
+  expect(screen.getByRole('button', { name: 'Повторить' })).toBeInTheDocument()
+})
+
+test('перечитывание, начатое во время «Начать», не откатывает экран после него', async () => {
+  const { queries } = narisovat()
+  const nachat = await screen.findByRole('button', { name: 'Начать' })
+  const sozdanie = otlozhennyi()
+  const chtenie = otlozhennyi()
+  let chitaem = false
+  let prochitano = false
+  server.use(
+    http.post('/api/cards/drafts', async () => {
+      await sozdanie.zhdat
+      sozdano += 1
+      chernovik = novyi(VTOROI)
+      return HttpResponse.json(chernovik, { status: 201 })
+    }),
+    http.get('/api/cards/drafts/current', async () => {
+      chitaem = true
+      const kakBylo = chernovik
+      await chtenie.zhdat
+      prochitano = true
+      return HttpResponse.json(kakBylo)
+    }),
+  )
+
+  await userEvent.click(nachat)
+  // Черновик ещё заводится — а повар вернулся во вкладку, и он перечитывается.
+  void queries.invalidateQueries({ queryKey: KLYUCH_CHERNOVIKA })
+  await waitFor(() => expect(chitaem).toBe(true))
+
+  sozdanie.otpustit()
+  expect(await screen.findByText('Шаг 1 из 9')).toBeInTheDocument()
+
+  // Опоздавшее «черновика нет» приходит только теперь — экран на шаге 1.
+  chtenie.otpustit()
+  await waitFor(() => expect(prochitano).toBe(true))
+  await waitFor(() => expect(queries.isFetching({ queryKey: KLYUCH_CHERNOVIKA })).toBe(0))
+  expect(screen.getByText('Шаг 1 из 9')).toBeInTheDocument()
+})
+
+test('отказ правки категории (422) — фокус на списке категорий', async () => {
+  server.use(
+    http.patch('/api/cards/drafts/:id', () =>
+      HttpResponse.json(
+        { detail: 'Категория: не больше 100 знаков', field: 'category' },
+        { status: 422 },
+      ),
+    ),
+  )
+  await prodolzhit({ supplier: 'Метро', step: 'category' })
+
+  await userEvent.click(await screen.findByRole('radio', { name: 'Сыры' }))
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+
+  expect(await screen.findByText('Категория: не больше 100 знаков')).toBeInTheDocument()
+  const spisok = screen.getByRole('radiogroup')
+  expect(spisok).toHaveFocus()
+  expect(spisok).toHaveAttribute('aria-invalid', 'true')
+})
+
+test('отказ своей категории (422) — фокус и пометка на поле «Своя категория»', async () => {
+  server.use(
+    http.patch('/api/cards/drafts/:id', () =>
+      HttpResponse.json(
+        { detail: 'Категория: не больше 100 знаков', field: 'category' },
+        { status: 422 },
+      ),
+    ),
+  )
+  await prodolzhit({ supplier: 'Метро', step: 'category' })
+
+  await userEvent.click(await screen.findByRole('radio', { name: 'Другая…' }))
+  await userEvent.type(screen.getByRole('textbox', { name: 'Своя категория' }), 'Заморозка')
+  await userEvent.click(screen.getByRole('button', { name: 'Далее' }))
+
+  expect(await screen.findByText('Категория: не больше 100 знаков')).toBeInTheDocument()
+  const pole = screen.getByRole('textbox', { name: 'Своя категория' })
+  expect(pole).toHaveFocus()
+  expect(pole).toHaveAttribute('aria-invalid', 'true')
+  expect(pole).toHaveAccessibleDescription('Категория: не больше 100 знаков')
+})

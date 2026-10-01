@@ -45,11 +45,14 @@ export function ShagKategoriya({ chernovik }: { chernovik: Draft }) {
     >
       {/* Список не пришёл — свою категорию вписать всё равно можно. */}
       {!estDannye(varianty) && <Sostoyanie query={varianty} />}
+      {/* Отказ сервера по категории ведёт фокус к ней: к своей категории,
+          если повар вписал её, иначе — к списку (он фокусируется только
+          так, с клавиатуры в него попадают по радиокнопкам). */}
       <div
         className="kartochka-varianty"
         role="radiogroup"
         aria-labelledby={ZAGOLOVOK_SHAGA}
-        {...svoistvaPolya(upravlenie, 'category')}
+        {...(svoya ? {} : { ...svoistvaPolya(upravlenie, 'category'), tabIndex: -1 })}
       >
         {spisok.map((k) => (
           <label key={k}>
@@ -88,6 +91,7 @@ export function ShagKategoriya({ chernovik }: { chernovik: Draft }) {
             value={kategoriya}
             maxLength={100}
             autoComplete="off"
+            {...svoistvaPolya(upravlenie, 'category')}
             onChange={(sobytie) => zadatKategoriyu(sobytie.target.value)}
           />
         </label>

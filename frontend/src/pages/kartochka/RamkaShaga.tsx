@@ -166,22 +166,32 @@ export function PamyatShagovMastera({ children }: { children: ReactNode }) {
  * это то же «Далее», и действует оно только там, где «Далее» доступна.
  *
  * `polya` — что набрано на шаге сейчас: «Назад» уносит это с собой.
+ *
+ * `zhdyom` — шаг занят своим делом (фото готовится или загружается, идёт
+ * отправка): «Назад» и «Далее» ждут. Ушедший шаг не дождался бы конца —
+ * то, что должно было случиться после (распознавание), не случилось бы.
  */
 export function RamkaShaga({
   upravlenie,
   mozhnoDalee = false,
   onDalee,
+  tekstDalee = 'Далее',
   polya,
+  zhdyom = false,
   children,
 }: {
   upravlenie: UpravlenieShagom
   mozhnoDalee?: boolean
-  /** Нет — у шага нет «Далее» (шаг ещё не готов). */
+  /** Нет — у шага нет «Далее»: ответ на вопрос шага и есть переход. */
   onDalee?: () => void
+  /** Подпись главной кнопки: «Пропустить», «Отправить в таблицу». */
+  tekstDalee?: string
   polya?: DraftPatch
+  zhdyom?: boolean
   children: ReactNode
 }) {
-  const { shag, nazad, zanyato, oshibka } = upravlenie
+  const { shag, nazad, oshibka } = upravlenie
+  const zanyato = upravlenie.zanyato || zhdyom
   const pamyat = useContext(Pamyat)
   const zagolovok = useRef<HTMLHeadingElement>(null)
 
@@ -227,7 +237,7 @@ export function RamkaShaga({
             className="kartochka-glavnaya"
             disabled={!mozhnoDalee || zanyato}
           >
-            Далее
+            {tekstDalee}
           </button>
         )}
       </div>

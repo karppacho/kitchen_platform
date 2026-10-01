@@ -13,10 +13,17 @@ import { vi } from 'vitest'
  *  берутся при загрузке модуля — до подмен в тесте загрузки. */
 const JsdomFile = globalThis.File
 const JsdomFormData = globalThis.FormData
+const JsdomBlob = globalThis.Blob
 
 /** Node-двойник каждого снимка — то же содержимое в File Node: FormData Node,
  *  через которую тест шлёт фото, File jsdom не принимает. */
 const dvoiniki = new WeakMap<Blob, Blob>()
+
+/** Что в фото: «foto ШxВ» у снимка, «jpeg ШxВ» у уменьшенного. Blob jsdom
+ *  читать не умеет — читается его Node-двойник. */
+export function soderzhimoe(foto: Blob): Promise<string> {
+  return (dvoiniki.get(foto) ?? foto).text()
+}
 
 export function snimok(shirina: number, vysota: number): File {
   const soderzhimoe = `foto ${shirina}x${vysota}`
@@ -85,9 +92,30 @@ export function podmenitBrauzer() {
   ) {
     return razmer(this)[1]
   })
-  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation((() => ({
-    drawImage: risovanie,
-  })) as unknown as HTMLCanvasElement['getContext'])
+  /** Что делалось на холсте, по порядку: заливка фона и рисование снимка. */
+  const poryadok: string[] = []
+  /** Холсты, на которых рисовали: после уменьшения их размер должен стать нулём. */
+  const holsty: HTMLCanvasElement[] = []
+  /** Телефону не хватило памяти: холст без кисти или JPEG не получился. */
+  const pamyat = { netKisti: false, netFoto: false }
+
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(function (
+    this: HTMLCanvasElement,
+  ) {
+    holsty.push(this)
+    if (pamyat.netKisti) return null
+    const kist = {
+      fillStyle: '#000000',
+      fillRect(x: number, y: number, shirina: number, vysota: number) {
+        poryadok.push(`zalivka ${kist.fillStyle} ${x},${y},${shirina}x${vysota}`)
+      },
+      drawImage(...argumenty: unknown[]) {
+        poryadok.push('risovanie')
+        risovanie(...argumenty)
+      },
+    }
+    return kist
+  } as unknown as HTMLCanvasElement['getContext'])
   vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(function (
     this: HTMLCanvasElement,
     gotovo: BlobCallback,
@@ -95,13 +123,24 @@ export function podmenitBrauzer() {
     kachestvo?: unknown,
   ) {
     kachestva.push(kachestvo)
-    // Blob из Node: его примет FormData Node, через которую тест шлёт фото.
-    gotovo(new NodeBlob([`jpeg ${this.width}x${this.height}`], { type: tip }) as unknown as Blob)
+    if (pamyat.netFoto) {
+      gotovo(null)
+      return
+    }
+    // Blob jsdom — его прочтёт FileReader jsdom (превью); FormData Node,
+    // через которую тест шлёт фото, получит его Node-двойник.
+    const soderzhimoe = `jpeg ${this.width}x${this.height}`
+    const foto = new JsdomBlob([soderzhimoe], { type: tip })
+    dvoiniki.set(foto, new NodeBlob([soderzhimoe], { type: tip }) as unknown as Blob)
+    gotovo(foto)
   })
 
   return {
     risovanie,
     kachestva,
+    poryadok,
+    holsty,
+    pamyat,
     vernut() {
       vi.restoreAllMocks()
       if (prezhnee) Object.defineProperty(HTMLImageElement.prototype, 'decode', prezhnee)

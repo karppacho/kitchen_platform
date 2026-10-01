@@ -28,12 +28,21 @@ export class ApiError extends Error {
 const NET_SVYAZI = 'Нет связи с сервером'
 const NE_DOZHDALIS = 'Сервер не ответил вовремя — проверьте связь'
 
+/** Текст отказа, у которого нет своего текста: тело не JSON (страница
+ *  nginx, сбой сервера до ответа). Экран может заменить его своим. */
+export const NE_POLUCHILOS = 'Не удалось получить данные'
+
+/** Частота запросов nginx — ждать минуту, а не до завтра: этим он
+ *  отличается от дневного лимита распознавания с тем же кодом 429. Тот же
+ *  текст nginx шлёт и сам, в JSON. */
+export const SLISHKOM_CHASTO = 'Слишком часто — подождите минуту'
+
 /** Свой текст на отказы nginx, у которых тело — его страница, а не JSON.
  *  С круга 1 задачи 8 nginx отвечает и на них JSON, но старый конфиг или
  *  чужой прокси по дороге могут вернуть страницу. */
 const TEKST_PO_KODU: Readonly<Record<number, string>> = {
   413: 'Фото больше 8 МБ — сфотографируйте ещё раз',
-  429: 'Слишком часто — подождите минуту',
+  429: SLISHKOM_CHASTO,
 }
 
 /** Исход продления.
@@ -85,7 +94,7 @@ function prodlit(): Promise<IshodProdleniya> {
         const soobshchenie = (await razobratOtkaz(otvet, OTKAZ_ZASHCHITY)).tekst
         return { itog: 'sboy', status: 403, soobshchenie }
       }
-      return { itog: 'sboy', status: otvet.status, soobshchenie: 'Не удалось получить данные' }
+      return { itog: 'sboy', status: otvet.status, soobshchenie: NE_POLUCHILOS }
     })
     .catch((): IshodProdleniya => ({ itog: 'sboy', status: 0, soobshchenie: NET_SVYAZI }))
     .finally(() => {
@@ -98,10 +107,7 @@ function prodlit(): Promise<IshodProdleniya> {
 
 type Otkaz = { tekst: string; podrobnosti: PodrobnostiOtkaza }
 
-async function razobratOtkaz(
-  otvet: Response,
-  zapas = 'Не удалось получить данные',
-): Promise<Otkaz> {
+async function razobratOtkaz(otvet: Response, zapas = NE_POLUCHILOS): Promise<Otkaz> {
   try {
     const telo = (await otvet.json()) as {
       detail?: unknown
@@ -146,10 +152,27 @@ function storozh(signal: AbortSignal | null | undefined, srok: number | undefine
           istyok = true
           ostanovka.abort()
         }, srok)
+  const oshibkaSvyazi = () => new ApiError(0, istyok ? NE_DOZHDALIS : NET_SVYAZI)
   return {
     signal: ostanovka.signal,
     /** Ошибка связи: обрыв — «нет связи», вышел срок — «не ответил вовремя». */
-    oshibkaSvyazi: () => new ApiError(0, istyok ? NE_DOZHDALIS : NET_SVYAZI),
+    oshibkaSvyazi,
+    /**
+     * Дождаться общего обещания, но не дольше срока и не после отмены.
+     * Само обещание не обрывается — его ждут и другие запросы.
+     */
+    dozhdatsya: <T,>(obeshchanie: Promise<T>): Promise<T> =>
+      new Promise<T>((gotovo, otkaz) => {
+        const stop = () => otkaz(oshibkaSvyazi())
+        if (ostanovka.signal.aborted) {
+          stop()
+          return
+        }
+        ostanovka.signal.addEventListener('abort', stop, { once: true })
+        obeshchanie.then(gotovo, otkaz).finally(() => {
+          ostanovka.signal.removeEventListener('abort', stop)
+        })
+      }),
     snyat: () => {
       clearTimeout(taimer)
       signal?.removeEventListener('abort', otmenit)
@@ -207,7 +230,9 @@ export async function api<T>(path: string, { srok, signal, ...init }: Zapros = {
     let otvet = await zapros()
 
     if (otvet.status === 401 && !path.startsWith('/auth/')) {
-      const ishod = await prodlit()
+      // Срок — на весь запрос, с продлением: застрявшее в сети продление
+      // иначе держало бы кнопку серой сколько угодно.
+      const ishod = await strazh.dozhdatsya(prodlit())
       if (ishod.itog === 'ok') {
         otvet = await zapros()
       } else if (ishod.itog === 'sboy') {
@@ -229,7 +254,7 @@ export async function api<T>(path: string, { srok, signal, ...init }: Zapros = {
     } catch {
       // Тело оборвалось на полпути — это связь, а не нечитаемый ответ.
       if (strazh.signal.aborted) throw strazh.oshibkaSvyazi()
-      throw new ApiError(otvet.status, 'Не удалось получить данные')
+      throw new ApiError(otvet.status, NE_POLUCHILOS)
     }
   } finally {
     strazh.snyat()

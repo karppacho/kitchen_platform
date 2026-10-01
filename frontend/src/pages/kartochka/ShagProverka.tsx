@@ -1,6 +1,6 @@
 import { useEffect, useState, type ChangeEvent } from 'react'
 
-import { ApiError } from '../../api/client'
+import { ApiError, SLISHKOM_CHASTO } from '../../api/client'
 import type { Raspoznavanie } from '../../api/kartochki'
 import type { Draft, DraftPatch } from '../../api/types'
 import {
@@ -11,7 +11,8 @@ import {
   useShag,
   type UpravlenieShagom,
 } from './RamkaShaga'
-import { useZagruzkaEtiketki, ZagruzkaEtiketki } from './ShagEtiketka'
+import { PODPISI_ETIKETKI } from './ShagEtiketka'
+import { useZagruzkaSnimka, ZagruzkaSnimka } from './ZagruzkaSnimka'
 
 type PoleEtiketki =
   | 'label_name'
@@ -76,23 +77,32 @@ function vPravku(znacheniya: Znacheniya): DraftPatch {
   return pravka
 }
 
-/** Сколько ждать «идёт», опрашивая черновик. Сервер считает распознавание
- *  живым 230 с (170 с на модель и минута сверху); дольше — процесс сервера
- *  умер посреди чтения, а «идёт» в черновике так и осталось. */
+/**
+ * Сколько ждать «идёт», опрашивая черновик, — страховка. Сервер считает
+ * распознавание живым 230 с (170 с на модель и минута сверху), а зависшее
+ * дольше сам выдаёт в черновике как «не удалось». Если и это не сработало
+ * (старый сервер), экран не ждёт вечно.
+ *
+ * Отсчёт — от показа шага: время запуска сервер в черновике не отдаёт, да
+ * и часы телефона с серверными могут расходиться на минуты.
+ */
 const PREDEL_OZHIDANIYA = 240_000
 
-/** «Идёт» дольше предела. Сбрасывается, как только перестало идти. */
-function useDolgo(zhdyom: boolean): boolean {
+/** Через сколько повтор после «слишком часто» nginx снова имеет смысл. */
+const MINUTA = 60_000
+
+/** Условие держится дольше `ms`. Сбрасывается, как только перестало. */
+function useDolgo(uslovie: boolean, ms: number): boolean {
   const [dolgo, zadatDolgo] = useState(false)
   useEffect(() => {
-    if (!zhdyom) return
-    const taimer = setTimeout(() => zadatDolgo(true), PREDEL_OZHIDANIYA)
+    if (!uslovie) return
+    const taimer = setTimeout(() => zadatDolgo(true), ms)
     return () => {
       clearTimeout(taimer)
       zadatDolgo(false)
     }
-  }, [zhdyom])
-  return dolgo && zhdyom
+  }, [uslovie, ms])
+  return dolgo && uslovie
 }
 
 const NE_DOZHDALIS =
@@ -102,15 +112,18 @@ const NE_DOZHDALIS =
 function soobshchenieORaspoznavanii(chernovik: Draft, otkaz: unknown): string | null {
   const status = chernovik.recognition_status
   const kod = otkaz instanceof ApiError ? otkaz.status : null
-  // Ответ не дошёл (сон телефона, 504 nginx, срок) или распознавание уже
-  // шло (409): это не ошибка — итог в черновике, он перечитан.
-  if (kod === 0 || kod === 504 || kod === 409) {
+  // Ответ не дошёл (сон телефона, 504 nginx, срок): это не ошибка — итог в
+  // черновике, он перечитан.
+  if (kod === 0 || kod === 504) {
     if (status === 'failed') return chernovik.recognition_error
-    if (status === null) return kod === 409 && otkaz instanceof Error ? otkaz.message : NE_DOZHDALIS
+    if (status === null) return NE_DOZHDALIS
     return null
   }
-  // 429, 502, 503 и прочие — текст сервера: лимит, модель не ответила, не
-  // настроено. У 502 тот же текст лежит и в черновике — показываем один раз.
+  // 409, 429, 502, 503 и прочие — текст сервера: «Карточка отправляется»,
+  // лимит, модель не ответила, не настроено. Он о том, что случилось сейчас,
+  // и важнее прежнего итога в черновике («готово» или прежняя ошибка). У 502
+  // тот же текст лежит и в черновике — показываем один раз. 409 «уже идёт»
+  // сюда не доходит: это ожидание, а не отказ (`useRaspoznavanie`).
   if (otkaz instanceof Error) return otkaz.message
   return status === 'failed' ? chernovik.recognition_error : null
 }
@@ -120,9 +133,10 @@ function soobshchenieORaspoznavanii(chernovik: Draft, otkaz: unknown): string | 
  *
  * Пока распознавание идёт, полей нет: итог лёг бы поверх набранного. Ответ
  * на запуск может не прийти (телефон уснул, nginx не дождался) — черновик
- * опрашивается раз в 3 с, пока в нём «идёт». Не вышло — поля заполняются
- * вручную, «Распознать ещё раз» — если повтор имеет смысл (не лимит и не
- * «не настроено»). «Переснять» — новое фото и новое распознавание, шаг тот же.
+ * опрашивается раз в 3 с, пока в нём «идёт» или запрос на запуск в пути.
+ * Не вышло — поля заполняются вручную, «Распознать ещё раз» — если повтор
+ * имеет смысл (не дневной лимит и не «не настроено»; после «слишком часто»
+ * — через минуту). «Переснять» — новое фото и новое распознавание, шаг тот же.
  */
 export function ShagProverka({
   chernovik,
@@ -132,22 +146,34 @@ export function ShagProverka({
   raspoznavanie: Raspoznavanie
 }) {
   const upravlenie = useShag(chernovik, POLYA)
-  const zagruzka = useZagruzkaEtiketki(chernovik, {
+  const zagruzka = useZagruzkaSnimka(chernovik, 'label', {
     pered: () => raspoznavanie.reset(),
     posle: () => raspoznavanie.mutate(chernovik.id),
   })
+  const status = chernovik.recognition_status
   // Отказ и ожидание — только этого черновика: «Начать заново» заводит новый.
   const nashe = raspoznavanie.variables === chernovik.id
-  const zhdyom =
-    (nashe && raspoznavanie.isPending) || chernovik.recognition_status === 'running'
-  const dolgo = useDolgo(zhdyom)
+  const vPuti = nashe && raspoznavanie.isPending
+  // Ответ на запуск ещё в пути (телефон спал, сеть медленная), а итог уже
+  // лёг в черновик — черновик правдивее: после запуска он поменялся.
+  const itogVChernovike =
+    vPuti &&
+    (status === 'done' || status === 'failed') &&
+    chernovik.updated_at !== raspoznavanie.context?.versiya
+  const zhdyom = (vPuti && !itogVChernovike) || status === 'running'
+  const dolgo = useDolgo(zhdyom, PREDEL_OZHIDANIYA)
   const idyot = zhdyom && !dolgo
   const otkaz = nashe ? raspoznavanie.error : null
   const kod = otkaz instanceof ApiError ? otkaz.status : null
   const soobshchenie = idyot ? null : soobshchenieORaspoznavanii(chernovik, otkaz)
-  // Лимит до завтра и «не настроено» повтором не лечатся.
-  const bezPovtora = kod === 429 || kod === 503
+  // «Слишком часто» nginx проходит за минуту; дневной лимит (тот же код
+  // 429, свой текст) и «не настроено» повтором не лечатся.
+  const chastota = kod === 429 && otkaz instanceof Error && otkaz.message === SLISHKOM_CHASTO
+  const minutaProshla = useDolgo(chastota, MINUTA)
+  const bezPovtora = kod === 503 || (kod === 429 && !minutaProshla)
   const mozhnoRaspoznat = chernovik.photos.label && !idyot && !bezPovtora && !zagruzka.idyot
+  // До первого запуска — просто «Распознать»: «ещё раз» — когда уже было.
+  const zapuskali = status !== null || (nashe && !raspoznavanie.isIdle)
 
   // Поля — с черновика. Сервер его поменял (лёг итог распознавания, заменили
   // этикетку) — поля берутся заново: на экране то, что в черновике.
@@ -163,15 +189,23 @@ export function ShagProverka({
   return (
     <RamkaShaga
       upravlenie={upravlenie}
-      mozhnoDalee={!idyot && !zagruzka.idyot}
+      mozhnoDalee={!idyot}
       onDalee={() => upravlenie.dalee(vPravku(znacheniya))}
       polya={idyot ? undefined : vPravku(znacheniya)}
+      zhdyom={zagruzka.idyot}
     >
-      <ZagruzkaEtiketki chernovik={chernovik} zagruzka={zagruzka} zablokirovano={idyot} />
+      <ZagruzkaSnimka
+        chernovik={chernovik}
+        vid="label"
+        zagruzka={zagruzka}
+        podpisi={PODPISI_ETIKETKI}
+        zablokirovano={idyot}
+        malenkoe
+      />
       {mozhnoRaspoznat && (
         <div className="kartochka-knopki">
           <button type="button" onClick={() => raspoznavanie.mutate(chernovik.id)}>
-            Распознать ещё раз
+            {zapuskali ? 'Распознать ещё раз' : 'Распознать'}
           </button>
         </div>
       )}

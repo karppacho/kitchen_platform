@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
@@ -80,7 +80,7 @@ let zagruzki: { vid: string; foto: string; zashchita: string | null }[]
 let raspoznavaniya: (string | null)[]
 let oprosov: number
 /** Ответы загрузки по одной на попытку; кончились — фото принято. */
-let otvetyZagruzki: ('obryv' | (() => Response))[]
+let otvetyZagruzki: ('obryv' | (() => Response | Promise<Response>))[]
 let raspoznat: () => Response | Promise<Response>
 let poOprosu: ((nomer: number) => void) | null
 
@@ -403,7 +403,8 @@ test('распознавание уже идёт (409) — опрос черно
     if (posleZapuska === 2) raspoznanoNaServere()
   }
 
-  await polzovatel.click(screen.getByRole('button', { name: 'Распознать ещё раз' }))
+  // В этой вкладке распознавание не запускали — кнопка просто «Распознать».
+  await polzovatel.click(screen.getByRole('button', { name: 'Распознать' }))
 
   // Отказ 409 — и черновик перечитан: в нём «идёт».
   await waitFor(() => expect(posleZapuska).toBe(1))
@@ -534,4 +535,223 @@ test('«Переснять» на проверке — новое фото и н
   expect(screen.getByText('Шаг 5 из 9')).toBeInTheDocument()
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   expect(screen.getByText(ZAMECHANIE)).toBeInTheDocument()
+})
+
+// ---------------------------------------------------------------------------
+// Мелочи ревью: опрос в пути, «Назад» во время загрузки, кнопки после отказов
+// ---------------------------------------------------------------------------
+
+const SLISHKOM_CHASTO = 'Слишком часто — подождите минуту'
+const OTPRAVLYAETSYA = 'Карточка отправляется — подождите'
+const NE_JPEG = 'Фото не в формате JPEG или не загрузилось целиком — выберите его ещё раз'
+
+/** Отказ nginx — его страница, а не JSON. */
+function stranitsaNginx(kod: number): Response {
+  return new HttpResponse(`<html>${kod}</html>`, {
+    status: kod,
+    headers: { 'Content-Type': 'text/html' },
+  })
+}
+
+test('ответ на запуск распознавания в пути, а итог уже в черновике — видно итог', async () => {
+  const { polzovatel, vperyod } = chasy()
+  // Телефон уснул: ответ на запуск не придёт до срока, а сервер этикетку
+  // уже дочитал и положил итог в черновик.
+  const otvet = otlozhennyi()
+  raspoznat = async () => {
+    await otvet.zhdat
+    return HttpResponse.json(chernovik)
+  }
+  await prodolzhit(chernovikNa('label'), polzovatel)
+
+  await polzovatel.upload(screen.getByLabelText('Сфотографировать этикетку'), snimok(4032, 3024))
+  expect(await screen.findByText(/Распознаём этикетку/)).toBeInTheDocument()
+  await vperyod(3000)
+  // Итога ещё нет — ждём, хоть черновик и опрашивается.
+  expect(screen.getByText(/Распознаём этикетку/)).toBeInTheDocument()
+  const doItoga = oprosov
+
+  raspoznanoNaServere()
+  await vperyod(3000)
+
+  expect(await screen.findByRole('textbox', { name: 'Белки' })).toHaveValue('18')
+  expect(oprosov).toBeGreaterThan(doItoga)
+  expect(raspoznavaniya).toHaveLength(1)
+  otvet.otpustit()
+})
+
+test('пока фото этикетки загружается, «Назад» и «Далее» ждут', async () => {
+  const zagruzka = otlozhennyi()
+  otvetyZagruzki = [
+    async () => {
+      await zagruzka.zhdat
+      chernovik = { ...chernovik!, photos: S_ETIKETKOI, updated_at: '2026-10-01T08:01:00Z' }
+      return HttpResponse.json(chernovik)
+    },
+  ]
+  // Этикетка уже есть, повар переснимает: «Назад» и «Далее» были доступны.
+  await prodolzhit(chernovikNa('label', { photos: S_ETIKETKOI }))
+  expect(screen.getByRole('button', { name: 'Назад' })).toBeEnabled()
+
+  await userEvent.upload(screen.getByLabelText('Переснять'), snimok(4032, 3024))
+
+  // Ушедший шаг не дождался бы загрузки — и распознавание не запустилось бы.
+  expect(await screen.findByText('Загружаем фото…')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Назад' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Далее' })).toBeDisabled()
+
+  zagruzka.otpustit()
+  expect(await screen.findByText('Шаг 5 из 9')).toBeInTheDocument()
+  await waitFor(() => expect(raspoznavaniya).toHaveLength(1))
+})
+
+test('«Переснять» на проверке: пока фото загружается, «Назад» ждёт', async () => {
+  const zagruzka = otlozhennyi()
+  otvetyZagruzki = [
+    async () => {
+      await zagruzka.zhdat
+      return HttpResponse.json(chernovik)
+    },
+  ]
+  await prodolzhit(
+    chernovikNa('review', { photos: S_ETIKETKOI, recognition_status: 'done', ...PROCHITANO }),
+  )
+
+  await userEvent.upload(screen.getByLabelText('Переснять'), snimok(4032, 3024))
+
+  expect(await screen.findByText('Загружаем фото…')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Назад' })).toBeDisabled()
+  zagruzka.otpustit()
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Назад' })).toBeEnabled())
+})
+
+test('частота (429 nginx) при распознавании — «Распознать ещё раз» возвращается через минуту', async () => {
+  const { polzovatel, vperyod } = chasy()
+  raspoznat = () => stranitsaNginx(429)
+  await prodolzhit(chernovikNa('review', { photos: S_ETIKETKOI }), polzovatel)
+
+  await polzovatel.click(screen.getByRole('button', { name: 'Распознать' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(SLISHKOM_CHASTO)
+  expect(screen.queryByRole('button', { name: /^Распознать/ })).not.toBeInTheDocument()
+
+  await vperyod(60_000)
+
+  expect(await screen.findByRole('button', { name: 'Распознать ещё раз' })).toBeEnabled()
+  expect(raspoznavaniya).toHaveLength(1)
+})
+
+test('до первого запуска кнопка — «Распознать», после — «Распознать ещё раз»', async () => {
+  raspoznat = () => {
+    chernovik = { ...chernovik!, recognition_status: 'failed', recognition_error: NE_OTVECHAET }
+    return HttpResponse.json({ detail: NE_OTVECHAET }, { status: 502 })
+  }
+  // Фото загрузили, а распознавание так и не запустилось (вкладку закрыли).
+  await prodolzhit(chernovikNa('review', { photos: S_ETIKETKOI }))
+  expect(screen.queryByRole('button', { name: 'Распознать ещё раз' })).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Распознать' }))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(NE_OTVECHAET)
+  expect(screen.getByRole('button', { name: 'Распознать ещё раз' })).toBeEnabled()
+})
+
+test.each([
+  ['готово', { recognition_status: 'done', ...PROCHITANO }],
+  ['не удалось', { recognition_status: 'failed', recognition_error: NE_OTVECHAET }],
+] as const)(
+  'распознавание во время отправки (409) — текст «отправляется» виден и при «%s»',
+  async (_, bylo) => {
+    raspoznat = () => HttpResponse.json({ detail: OTPRAVLYAETSYA }, { status: 409 })
+    await prodolzhit(chernovikNa('review', { photos: S_ETIKETKOI, ...bylo }))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Распознать ещё раз' }))
+
+    // Не пропадает при «готово» и не подменяется прежней ошибкой при «не удалось».
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(OTPRAVLYAETSYA))
+    expect(screen.queryByText(NE_OTVECHAET)).not.toBeInTheDocument()
+    expect(raspoznavaniya).toHaveLength(1)
+  },
+)
+
+test('загрузка во время отправки (409) — текст, без повтора', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyZagruzki = [() => HttpResponse.json({ detail: OTPRAVLYAETSYA }, { status: 409 })]
+  await prodolzhit(chernovikNa('label'), polzovatel)
+
+  await polzovatel.upload(screen.getByLabelText('Сфотографировать этикетку'), snimok(4032, 3024))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(OTPRAVLYAETSYA)
+  await vperyod(10_000)
+  expect(zagruzki).toHaveLength(1)
+  expect(raspoznavaniya).toEqual([])
+})
+
+test.each([
+  ['413 nginx', () => stranitsaNginx(413), 'Фото больше 8 МБ — сфотографируйте ещё раз'],
+  ['415', () => HttpResponse.json({ detail: NE_JPEG }, { status: 415 }), NE_JPEG],
+] as const)(
+  '%s при загрузке — текст, без «Загрузить ещё раз»: то же фото не поможет',
+  async (_, otvet, tekst) => {
+    otvetyZagruzki = [otvet]
+    await prodolzhit(chernovikNa('label'))
+
+    await userEvent.upload(screen.getByLabelText('Сфотографировать этикетку'), snimok(4032, 3024))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(tekst)
+    expect(screen.queryByRole('button', { name: 'Загрузить ещё раз' })).not.toBeInTheDocument()
+    expect(zagruzki).toHaveLength(1)
+  },
+)
+
+test('частота (429 nginx) при загрузке — свой текст, без автоповтора', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyZagruzki = [() => stranitsaNginx(429)]
+  await prodolzhit(chernovikNa('label'), polzovatel)
+
+  await polzovatel.upload(screen.getByLabelText('Сфотографировать этикетку'), snimok(4032, 3024))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(SLISHKOM_CHASTO)
+  await vperyod(10_000)
+  expect(zagruzki).toHaveLength(1)
+})
+
+test('попытка загрузки ждёт ответа 60 с — потом повтор тем же фото', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyZagruzki = [
+    async () => {
+      await delay('infinite')
+      return HttpResponse.json(chernovik)
+    },
+  ]
+  await prodolzhit(chernovikNa('label'), polzovatel)
+
+  await polzovatel.upload(screen.getByLabelText('Сфотографировать этикетку'), snimok(4032, 3024))
+  expect(await screen.findByText('Загружаем фото…')).toBeInTheDocument()
+  await vperyod(59_000)
+  expect(screen.getByText('Загружаем фото…')).toBeInTheDocument()
+
+  await vperyod(1_000)
+  expect(await screen.findByText(/попытка 2 из 3/)).toBeInTheDocument()
+  await vperyod(2_000)
+
+  expect(await screen.findByText('Шаг 5 из 9')).toBeInTheDocument()
+  expect(zagruzki.map((z) => z.foto)).toEqual(['jpeg 1600x1200', 'jpeg 1600x1200'])
+})
+
+test('«Переснять» не спорит с «Далее», фото на проверке — поменьше', async () => {
+  await prodolzhit(chernovikNa('label'))
+  // Фото ещё нет — сфотографировать и есть главное действие шага.
+  expect(screen.getByLabelText('Сфотографировать этикетку').closest('label')).toHaveClass(
+    'foto-vybor-glavnaya',
+  )
+
+  await userEvent.upload(screen.getByLabelText('Сфотографировать этикетку'), snimok(4032, 3024))
+  expect(await screen.findByText('Шаг 5 из 9')).toBeInTheDocument()
+
+  // На проверке главное — «Далее»; фото не толкает поля ниже края телефона.
+  expect(screen.getByLabelText('Переснять').closest('label')).not.toHaveClass(
+    'foto-vybor-glavnaya',
+  )
+  expect(screen.getByRole('img', { name: 'Фото этикетки' })).toHaveClass('kartochka-foto-malenkoe')
 })

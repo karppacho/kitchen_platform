@@ -16,6 +16,7 @@ export function FotoVybor({
   galereya,
   onVybrano,
   zablokirovano = false,
+  glavnaya = true,
 }: {
   /** Подпись кнопки камеры: «Сфотографировать этикетку», «Переснять». */
   kamera: string
@@ -23,6 +24,9 @@ export function FotoVybor({
   galereya?: string
   onVybrano: (fail: File) => void
   zablokirovano?: boolean
+  /** Камера — главное действие экрана (акцентом). Нет — когда главное
+   *  другое, «Далее»: «Переснять» не должна с ней спорить. */
+  glavnaya?: boolean
 }) {
   function vybrano(sobytie: ChangeEvent<HTMLInputElement>) {
     const fail = sobytie.target.files?.[0]
@@ -33,7 +37,7 @@ export function FotoVybor({
 
   return (
     <div className="foto-vybor">
-      <label className="foto-vybor-knopka foto-vybor-glavnaya">
+      <label className={glavnaya ? 'foto-vybor-knopka foto-vybor-glavnaya' : 'foto-vybor-knopka'}>
         <input
           className="foto-vybor-pole"
           type="file"

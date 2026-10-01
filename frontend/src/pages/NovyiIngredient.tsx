@@ -5,17 +5,23 @@ import {
   SHAGI,
   useChernovik,
   useNachatChernovik,
+  useOtpravka,
   useRaspoznavanie,
+  type Otpravka,
   type Raspoznavanie,
 } from '../api/kartochki'
 import type { Draft } from '../api/types'
 import { Sostoyanie } from '../ui/Sostoyanie'
-import { PamyatShagovMastera, RamkaShaga, useShag } from './kartochka/RamkaShaga'
+import { PamyatShagovMastera } from './kartochka/RamkaShaga'
 import { ShagEtiketka } from './kartochka/ShagEtiketka'
+import { ShagFoto } from './kartochka/ShagFoto'
+import { ShagItog, Zapisano } from './kartochka/ShagItog'
 import { ShagKategoriya } from './kartochka/ShagKategoriya'
 import { ShagNazvanie } from './kartochka/ShagNazvanie'
+import { ShagOpisanie } from './kartochka/ShagOpisanie'
 import { ShagPostavshchik } from './kartochka/ShagPostavshchik'
 import { ShagProverka } from './kartochka/ShagProverka'
+import { ShagSoglasovan } from './kartochka/ShagSoglasovan'
 import './kartochka/kartochka.css'
 import './pages.css'
 
@@ -28,10 +34,16 @@ import './pages.css'
  */
 export function NovyiIngredient() {
   const chernovik = useChernovik()
+  // Отправка живёт здесь, над шагами: черновика после неё нет, а экран
+  // «Записано в таблицу» и защита от второй отправки должны остаться.
+  const otpravka = useOtpravka()
   // id черновика, с которым повар работает: начал его здесь или выбрал
   // «Продолжить». Черновик сменился (завели в другой вкладке) — снова вопрос.
   const [vRabote, zadatVRabote] = useState<string | null>(null)
-  const nachat = useNachatChernovik((novyi) => zadatVRabote(novyi.id))
+  const nachat = useNachatChernovik((novyi) => {
+    zadatVRabote(novyi.id)
+    otpravka.sbrosit()
+  })
   const oshibka = nachat.error instanceof Error ? nachat.error.message : null
   // Распознавание запускает шаг «Фото этикетки», а ждёт его итога шаг
   // «Проверка» — запрос живёт здесь, над шагами, и переживает смену шага.
@@ -39,7 +51,17 @@ export function NovyiIngredient() {
 
   const dannye = chernovik.data
   let ekran
-  if (dannye === undefined) {
+  if (otpravka.otvet !== null) {
+    // «Записано» держится, пока заводится новая карточка; не завелась —
+    // экран вернётся к черновику, и отказ будет виден там.
+    ekran = (
+      <Zapisano
+        otvet={otpravka.otvet}
+        onEshche={() => nachat.mutate(null, { onError: otpravka.sbrosit })}
+        zanyato={nachat.isPending}
+      />
+    )
+  } else if (dannye === undefined) {
     ekran = <Sostoyanie query={chernovik} />
   } else if (dannye === null) {
     ekran = (
@@ -64,7 +86,12 @@ export function NovyiIngredient() {
     // шагов — снаружи ключа: она помнит, какой шаг показан первым.
     ekran = (
       <PamyatShagovMastera>
-        <Master key={dannye.step} chernovik={dannye} raspoznavanie={raspoznavanie} />
+        <Master
+          key={dannye.step}
+          chernovik={dannye}
+          raspoznavanie={raspoznavanie}
+          otpravka={otpravka}
+        />
       </PamyatShagovMastera>
     )
   }
@@ -198,9 +225,11 @@ function Vybor({
 function Master({
   chernovik,
   raspoznavanie,
+  otpravka,
 }: {
   chernovik: Draft
   raspoznavanie: Raspoznavanie
+  otpravka: Otpravka
 }) {
   switch (chernovik.step) {
     case 'supplier':
@@ -213,20 +242,13 @@ function Master({
       return <ShagEtiketka chernovik={chernovik} raspoznavanie={raspoznavanie} />
     case 'review':
       return <ShagProverka chernovik={chernovik} raspoznavanie={raspoznavanie} />
-    default:
-      return <ShagPozzhe chernovik={chernovik} />
+    case 'approval':
+      return <ShagSoglasovan chernovik={chernovik} />
+    case 'photos':
+      return <ShagFoto chernovik={chernovik} />
+    case 'description':
+      return <ShagOpisanie chernovik={chernovik} />
+    case 'summary':
+      return <ShagItog chernovik={chernovik} otpravka={otpravka} />
   }
-}
-
-/** Шаги после проверки появятся следующей задачей этапа. До неё — честно:
- *  шаг не готов, заполненное сохранено, назад можно. */
-function ShagPozzhe({ chernovik }: { chernovik: Draft }) {
-  const upravlenie = useShag(chernovik)
-  return (
-    <RamkaShaga upravlenie={upravlenie}>
-      <p className="kartochka-poyasnenie">
-        Этот шаг ещё не готов. Всё, что вы заполнили, сохранено.
-      </p>
-    </RamkaShaga>
-  )
 }
