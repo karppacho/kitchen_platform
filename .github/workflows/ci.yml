@@ -105,7 +105,7 @@ jobs:
       # заведомо заниженное число.
       - name: Офлайн-тесты
         id: offline
-        run: uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov=kitchen.llm --cov-report=
+        run: uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov=kitchen.llm --cov=kitchen.cards --cov-report=
         working-directory: backend
 
       # Интеграция против настоящего Postgres: обратимость миграций и
@@ -122,7 +122,7 @@ jobs:
         if: ${{ !cancelled() && (success() || steps.offline.outcome == 'failure') }}
         run: >-
           uv run pytest -m integration
-          --cov=kitchen.domain --cov=kitchen.sync --cov=kitchen.llm --cov-append
+          --cov=kitchen.domain --cov=kitchen.sync --cov=kitchen.llm --cov=kitchen.cards --cov-append
           --cov-report=term-missing --cov-fail-under=85
         working-directory: backend
 

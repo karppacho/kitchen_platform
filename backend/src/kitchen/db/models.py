@@ -517,3 +517,95 @@ class LlmCall(Base):
     cost_rub: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     tokens: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
+
+
+class CardDraft(Base):
+    """Черновик карточки ингредиента — то, что повар набрал в мастере.
+
+    Живёт на сервере, а не в браузере: телефон уснул, вкладку закрыли —
+    повар продолжит с того же шага. Активный черновик у повара один (это
+    держит частичный уникальный индекс); отправленный или отменённый
+    остаётся строкой — по нему видно, какие фото он загружал.
+
+    В лист черновик не пишется, пока повар не нажмёт «Отправить»: тогда
+    строка уходит в таблицу одной записью (журнал — ``sheet_writes``).
+    Фото — id файлов в закрытой папке Drive, только из наших загрузок.
+    """
+
+    __tablename__ = "card_drafts"
+
+    STATUSES = ("active", "submitted", "cancelled")
+    RECOGNITION_STATUSES = ("running", "done", "failed")
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("profiles.id", ondelete="CASCADE"), index=True
+    )
+    """Повар. Удалили профиль — его черновики уходят с ним: это недописанное."""
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    step: Mapped[str] = mapped_column(String(16), default="supplier", server_default="supplier")
+    """Шаг мастера, на котором повар остановился, — с него он и продолжит."""
+
+    supplier: Mapped[str] = mapped_column(Text, default="", server_default="")
+    category: Mapped[str] = mapped_column(Text, default="", server_default="")
+    name: Mapped[str] = mapped_column(Text, default="", server_default="")
+    label_name: Mapped[str] = mapped_column(Text, default="", server_default="")
+    manufacturer: Mapped[str] = mapped_column(Text, default="", server_default="")
+    composition: Mapped[str] = mapped_column(Text, default="", server_default="")
+    # Пусто — «нет данных», а не ноль: «0 г белка» — это утверждение.
+    protein: Mapped[Decimal | None] = mapped_column(Amount)
+    fat: Mapped[Decimal | None] = mapped_column(Amount)
+    carbs: Mapped[Decimal | None] = mapped_column(Amount)
+    kcal: Mapped[Decimal | None] = mapped_column(Amount)
+    shelf_life_sealed: Mapped[str] = mapped_column(Text, default="", server_default="")
+    shelf_life_defrost: Mapped[str] = mapped_column(Text, default="", server_default="")
+    shelf_life_after: Mapped[str] = mapped_column(Text, default="", server_default="")
+    defrost_conditions: Mapped[str] = mapped_column(Text, default="", server_default="")
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    approval: Mapped[str | None] = mapped_column(Text)
+    """«Да» или «Отбракован» — как писал бот в V; пусто — повар ещё не ответил."""
+
+    label_file_id: Mapped[str | None] = mapped_column(Text)
+    package_file_id: Mapped[str | None] = mapped_column(Text)
+    before_file_id: Mapped[str | None] = mapped_column(Text)
+    after_file_id: Mapped[str | None] = mapped_column(Text)
+
+    recognition_status: Mapped[str | None] = mapped_column(String(16))
+    """Распознавание этикетки: идёт, готово, не удалось; пусто — не запускали."""
+    recognition_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recognition: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    recognition_warnings: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
+    """Замечания повару к полям черновика: что заметило распознавание на
+    этикетке и что не так с КБЖУ сейчас. Проверку КБЖУ правка повара
+    пересчитывает (``kitchen.cards.drafts.renew_nutrient_warnings``)."""
+
+    submitted_row: Mapped[int | None] = mapped_column(Integer)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sheet_write_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("sheet_writes.id", ondelete="SET NULL"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('active', 'submitted', 'cancelled')", name="ck_card_drafts_status"
+        ),
+        CheckConstraint("approval in ('Да', 'Отбракован')", name="ck_card_drafts_approval"),
+        CheckConstraint(
+            "recognition_status in ('running', 'done', 'failed')",
+            name="ck_card_drafts_recognition_status",
+        ),
+        # Один активный черновик на повара — и при гонке двух «Начать»:
+        # проверка в коде её не закрывает, индекс закрывает.
+        Index(
+            "ux_card_drafts_active_owner",
+            "owner_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )

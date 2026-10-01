@@ -157,14 +157,29 @@ def clean_text(field: str, raw: object) -> str:
     тихо пропускать текст без лимита.
     """
     limit = TEXT_LIMITS[field]
+    return _cleaned(field, raw)[:limit].strip()
+
+
+def text_too_long(field: str, raw: object) -> bool:
+    """Длиннее ли текст после чистки, чем предел поля, — то есть обрезала бы
+    его :func:`clean_text`.
+
+    Ответ модели обрезать можно, текст повара — нет: молча обрезанный состав —
+    потерянная работа. Черновик спрашивает здесь и отвечает отказом с
+    пределом; чистка и предел — те же, что у :func:`clean_text`.
+    """
+    limit = TEXT_LIMITS[field]
+    return len(_cleaned(field, raw)) > limit
+
+
+def _cleaned(field: str, raw: object) -> str:
     if raw is None:
         return ""
     text = str(raw).replace("\r\n", "\n").replace("\r", "\n")
     text = unicodedata.normalize("NFC", "".join(_clean_char(char) for char in text))
     lines = [" ".join(line.split()) for line in text.split("\n")]
     separator = "\n" if field in _MULTILINE_FIELDS else " "
-    text = separator.join(line for line in lines if line)
-    return text[:limit].strip()
+    return separator.join(line for line in lines if line)
 
 
 _DROPPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn"})

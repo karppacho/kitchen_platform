@@ -32,6 +32,7 @@ from kitchen.domain.cards import (
     missing_for_submit,
     parse_nutrient,
     photo_file_name,
+    text_too_long,
 )
 from kitchen.sync import specs
 from kitchen.sync.ownership import Owner
@@ -257,6 +258,19 @@ def test_clean_text_cuts_to_the_limit() -> None:
 def test_clean_text_knows_only_card_fields() -> None:
     with pytest.raises(KeyError):
         clean_text("price", "1")
+
+
+def test_text_too_long_is_what_clean_text_would_cut() -> None:
+    """Черновик не обрезает текст повара молча, а отвечает отказом: предел и
+    чистка — те же, что у :func:`clean_text`."""
+    limit = TEXT_LIMITS["name"]
+    assert not text_too_long("name", "а" * limit)
+    assert text_too_long("name", "а" * (limit + 1))
+    # Пробелы и невидимые символы чистка убирает — в предел они не идут.
+    assert not text_too_long("name", f"  {'а' * limit}{_ZWSP}  ")
+    assert not text_too_long("name", None)
+    with pytest.raises(KeyError):
+        text_too_long("price", "1")
 
 
 # ---------------------------------------------------------------------------

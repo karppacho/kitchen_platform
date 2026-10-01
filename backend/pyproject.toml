@@ -118,7 +118,7 @@ pretty = true
 # секциях для несуществующих пакетов, и этот шум в логах вреден — к нему
 # быстро привыкают и перестают читать вывод целиком.
 [[tool.mypy.overrides]]
-module = ["kitchen.domain.*", "kitchen.sync.*", "kitchen.llm.*"]
+module = ["kitchen.domain.*", "kitchen.sync.*", "kitchen.llm.*", "kitchen.cards.*"]
 strict = true
 disallow_any_explicit = true
 
@@ -181,6 +181,9 @@ name = "Слои: web и worker сверху, domain снизу"
 type = "layers"
 layers = [
     "kitchen.web | kitchen.worker",
+    # Слой приложения карточек: ручки и воркер зовут его, а он — обмен с
+    # Google, модель и базу. Решения живут здесь, а не в ручках.
+    "kitchen.cards",
     "kitchen.sync | kitchen.llm",
     "kitchen.db",
     "kitchen.domain",

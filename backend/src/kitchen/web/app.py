@@ -16,11 +16,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from kitchen import __version__
+from kitchen.cards.drafts import CardsError
 from kitchen.config import Settings, load_settings
 from kitchen.db.session import make_session_factory
+from kitchen.sync.drive import drive_from_settings
 from kitchen.web.api import router
 from kitchen.web.auth_api import GOTRUE_TIMEOUT
 from kitchen.web.auth_api import router as auth_router
+from kitchen.web.cards import cards_error
+from kitchen.web.cards import router as cards_router
 from kitchen.web.csrf import CSRF_HEADER, CsrfMiddleware
 
 
@@ -62,10 +66,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(router)
     app.include_router(auth_router)
+    app.include_router(cards_router)
+    # Отказы карточек — текстом для повара (и полем, которое подсветить).
+    app.add_exception_handler(CardsError, cards_error)
 
     # Один клиент на приложение: httpx держит пул соединений, и создавать
     # его на каждый вход значит платить рукопожатием TLS за каждый вход.
     app.state.http = httpx.Client(timeout=GOTRUE_TIMEOUT)
+    # Фото карточек. Ключ сервисного аккаунта читается при первом запросе к
+    # Drive, а не здесь: без ключа приложение стартует, а загрузка фото
+    # отвечает понятной ошибкой. Ручки берут клиент через зависимость
+    # kitchen.web.cards.get_drive — тест подменяет её фальшивкой.
+    app.state.drive = drive_from_settings(config)
 
     # Порядок важен: добавленный последним оборачивает остальных. Защита
     # стоит внутри CORS, чтобы отказ с разрешённого адреса ушёл с
@@ -78,7 +90,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # означало бы либо неработающий вход, либо дыру.
         allow_origins=config.cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        # PUT — загрузка фото карточки. Через nginx запрос свой и CORS не
+        # нужен; без PUT ломалась бы разработка с другого адреса.
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type", CSRF_HEADER],
     )
 
