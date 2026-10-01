@@ -247,7 +247,8 @@ test('на телефоне внизу вкладки живых раздело�
   await screen.findByRole('heading', { name: 'Блюда' })
   const vkladki = screen.getByRole('navigation', { name: 'Основные разделы' })
   expect(within(vkladki).getByRole('link', { name: 'Блюда' })).toHaveAttribute('aria-current', 'page')
-  expect(within(vkladki).getAllByRole('link')).toHaveLength(3)
+  // Шефу открыты все четыре живых раздела — по вкладке на каждый.
+  expect(within(vkladki).getAllByRole('link')).toHaveLength(4)
   unmount()
 
   setViewport(1440)
@@ -255,6 +256,26 @@ test('на телефоне внизу вкладки живых раздело�
   await screen.findByText('Алексей')
   expect(screen.queryByRole('navigation', { name: 'Основные разделы' })).not.toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Выйти' })).toBeInTheDocument()
+})
+
+test('у повара на телефоне нет вкладок, в шапке — его раздел', async () => {
+  // Повару открыт один раздел: одна вкладка бессмысленна, полосы внизу
+  // нет вовсе. Шапка при этом по-прежнему называет раздел.
+  server.use(
+    http.get('/api/me', () =>
+      HttpResponse.json({ email: 'cook@example.com', display_name: 'Повар', roles: ['cook'] }),
+    ),
+    // Экран повара при открытии спрашивает текущий черновик — без ответа
+    // запрос ушёл бы мимо msw. Черновика нет: экран показывает «Начать».
+    http.get('/api/cards/drafts/current', () => HttpResponse.json(null)),
+  )
+  setViewport(360)
+  narisovat('/cards')
+  await screen.findByRole('button', { name: 'Начать' })
+
+  expect(screen.queryByRole('navigation', { name: 'Основные разделы' })).not.toBeInTheDocument()
+  const shapka = screen.getAllByRole('banner').find((el) => el.closest('main') === null)!
+  expect(shapka).toHaveTextContent('Новый ингредиент')
 })
 
 test('сломавшийся экран не роняет оболочку', async () => {

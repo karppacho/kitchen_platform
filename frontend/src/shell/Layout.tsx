@@ -89,7 +89,7 @@ export function Layout() {
       </div>
 
       {!wide && menyuOtkryto && <Shtorka otkryvatel={knopkaMenyu} onZakryt={zakryt} />}
-      {!wide && <Vkladki />}
+      {!wide && <Vkladki roli={me?.roles ?? []} />}
     </div>
   )
 }

@@ -1,27 +1,32 @@
 import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
 
-import { RAZDELY, type Razdel } from './razdely'
+import { dostupnye, RAZDELY, type Razdel } from './razdely'
 
 /**
  * Разделы, живущие вкладками внизу телефона: живые, без пометки «скоро».
- * Список тот же, что у меню (`RAZDELY`), своей копии нет: появится живой
- * раздел — появится вкладка. Этап 5 добавит разделам роли и подставит сюда
- * отфильтрованный по роли список — у повара вкладок не будет.
+ * Список тот же, что у меню: `dostupnye` по ролям, затем без `faza`. Своей
+ * копии нет: появится живой раздел — появится вкладка; закроют раздел
+ * роли — уйдёт и вкладка, а не останется ссылкой на отказ 403.
  */
 export function razdelyVkladok(razdely: readonly Razdel[] = RAZDELY): Razdel[] {
   return razdely.filter((r) => !r.faza)
 }
 
-// Подписи вкладок короче названий разделов: три вкладки делят 360 px.
+// Подписи вкладок короче названий разделов: четыре вкладки делят 360 px.
 // Доступное имя остаётся полным — как у пункта меню.
-const KOROTKO: Record<string, string> = { '/reconciliation': 'Сверка' }
+const KOROTKO: Record<string, string> = { '/reconciliation': 'Сверка', '/cards': 'Ингредиент' }
 
 // Поля, при фокусе в которых вкладки прячутся: iOS держит закреплённые
 // панели над клавиатурой, и вкладки закрывали бы половину экрана.
 const POLYA = 'input, textarea, select'
 
-export function Vkladki() {
+/**
+ * Вкладки — тому, кому есть между чем переключаться. Повару открыт один
+ * раздел: единственная вкладка вести никуда не может, полосы внизу нет
+ * вовсе, и экран карточки получает всю высоту телефона.
+ */
+export function Vkladki({ roli }: { roli: readonly string[] }) {
   const [spryatany, spryatat] = useState(false)
 
   useEffect(() => {
@@ -39,9 +44,12 @@ export function Vkladki() {
     }
   }, [])
 
+  const razdely = razdelyVkladok(dostupnye(RAZDELY, roli))
+  if (razdely.length < 2) return null
+
   return (
     <nav className="vkladki" aria-label="Основные разделы" hidden={spryatany}>
-      {razdelyVkladok().map((r) => {
+      {razdely.map((r) => {
         const korotko = KOROTKO[r.put]
         return (
           <NavLink
