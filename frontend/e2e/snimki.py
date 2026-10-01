@@ -14,6 +14,11 @@ Dev-сервер для --port запускайте как `npm run dev -- --hos
 Проверки: горизонтальное переполнение 0 на всех экранах; в блюдах на 360 px
 не меньше 8 строк в первом экране; кнопки и ссылки в шапке, содержимом и
 вкладках не ниже 44 px при is_mobile. Провал — код возврата 1.
+
+Замеры делаются до снимка: после screenshot(full_page=True) Chromium теряет
+эмуляцию (pointer: coarse), правила @media (pointer: coarse) перестают
+действовать, и замер целей после снимка показал бы ложные 30 px. При
+is_mobile скрипт отдельно проверяет, что эмуляция на месте.
 """
 
 from __future__ import annotations
@@ -166,12 +171,20 @@ class Proverki:
 
     def snimok(self, page: Page, imya: str, *, full: bool = False, mobile: bool = False) -> None:
         page.wait_for_timeout(400)
-        page.screenshot(path=str(OUT / f"{imya}.png"), full_page=full)
+        # Все замеры — до снимка. После screenshot(full_page=True) Chromium
+        # теряет эмуляцию (pointer: coarse): правила @media (pointer: coarse)
+        # перестают действовать, кнопки 44 px становятся 30 px, и замер после
+        # снимка давал ложные провалы.
         perepolnenie = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")
         print(f"{imya}: переполнение {perepolnenie}px")
         if perepolnenie > 0:
             self.provaly.append(f"{imya}: горизонтальное переполнение {perepolnenie}px")
         if mobile:
+            # Без эмуляции тач-экрана замер целей недостоверен — это провал,
+            # а не молчаливый пропуск, чтобы сбой эмуляции не прошёл незамеченным.
+            if not page.evaluate("matchMedia('(pointer: coarse)').matches"):
+                print(f"{imya}: предупреждение — эмуляция тач-экрана потеряна, (pointer: coarse) не действует")
+                self.provaly.append(f"{imya}: эмуляция тач-экрана потеряна — замер целей недостоверен")
             melkie = page.evaluate(
                 """() => [...document.querySelectorAll('header button, header a, main button, main a, nav a, [role=dialog] button, [role=dialog] a')]
                     .filter(el => el.offsetParent !== null || el.closest('[role=dialog]'))
@@ -183,6 +196,7 @@ class Proverki:
                 # Весь список и его длина: срез скрыл бы, сколько целей на самом
                 # деле мелких и какие именно за первыми шестью.
                 self.provaly.append(f"{imya}: цели меньше 44 px ({len(melkie)}) — {melkie}")
+        page.screenshot(path=str(OUT / f"{imya}.png"), full_page=full)
 
     def strok(self, page: Page, imya: str, minimum: int) -> None:
         # Строки, чей верх помещается в первый экран.
