@@ -90,6 +90,7 @@ LABEL_REPLACED = "Фото этикетки заменили, пока шло р
 LABEL_REMOVED = "Фото этикетки убрали, пока шло распознавание, — сфотографируйте её заново"
 RESTARTED = "Эту этикетку уже распознают заново — дождитесь результата нового запуска"
 INTERRUPTED = "Распознавание прервалось — попробуйте ещё раз или заполните поля вручную"
+STALLED = "Распознавание прервалось — нажмите «Распознать ещё раз» или заполните поля вручную"
 
 
 class RecognitionNotConfiguredError(CardsError):
@@ -418,6 +419,22 @@ def _abandon(
             STALE_AFTER,
             str(error).splitlines()[0] if str(error) else type(error).__name__,
         )
+
+
+def shown_recognition(session: Session, draft: CardDraft) -> tuple[str | None, str | None]:
+    """Состояние распознавания и почему не удалось — какими их видит повар.
+
+    «Идёт» старше :data:`STALE_AFTER` — процесс умер посреди вызова (тот же
+    предел разрешает повтор): выдаётся «не удалось» с подсказкой, иначе
+    экран опрашивал бы черновик без конца. База не меняется — решение
+    принимается при выдаче, а повтор и так разрешён. Часы — базы, как у
+    отметки «идёт» и у проверки повтора.
+    """
+    if draft.recognition_status == store.RUNNING and not store.recognition_running(
+        session, draft.id, STALE_AFTER
+    ):
+        return store.FAILED, STALLED
+    return draft.recognition_status, recognition_error(draft)
 
 
 def recognition_error(draft: CardDraft) -> str | None:

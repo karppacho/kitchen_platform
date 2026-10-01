@@ -31,7 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text, update
 
-from kitchen.cards.recognize import RESTARTED, STALE_AFTER
+from kitchen.cards.recognize import RESTARTED, STALE_AFTER, STALLED
 from kitchen.config import Settings
 from kitchen.db import models
 from kitchen.domain.cards import check_nutrients, label_fields_from_extraction
@@ -450,6 +450,45 @@ def test_running_left_by_dead_process_does_not_lock_the_draft(
 
     assert reply.status_code == 200, reply.text
     assert reply.json()["recognition_status"] == "done"
+
+
+def test_fresh_running_is_shown_as_running(
+    people: None, drive: FakeDrive, sessions: sessionmaker[Session]
+) -> None:
+    """«Идёт» моложе предела — идёт: экран опрашивает черновик дальше."""
+    client = make_client(drive, FakePolza(answer()).transport())
+    draft = labelled(client)
+    set_running(sessions, draft["id"], STALE_AFTER - timedelta(seconds=30))
+
+    shown = current(client)
+
+    assert shown is not None
+    assert (shown["recognition_status"], shown["recognition_error"]) == ("running", None)
+
+
+def test_stale_running_is_shown_as_failed_and_retry_passes(
+    people: None, drive: FakeDrive, sessions: sessionmaker[Session]
+) -> None:
+    """Процесс api умер посреди распознавания — «идёт» осталось в базе
+    навсегда. Старше того же предела, что разрешает повтор, оно выдаётся как
+    «не удалось» с подсказкой, что делать: экран не опрашивает черновик без
+    конца. База не меняется — решение при выдаче, а повтор и так разрешён."""
+    client = make_client(drive, FakePolza(answer()).transport())
+    draft = labelled(client)
+    set_running(sessions, draft["id"], STALE_AFTER + timedelta(seconds=30))
+
+    shown = current(client)
+    in_base = draft_row(sessions, draft["id"]).recognition_status
+    again = recognize(client, draft["id"])
+
+    assert shown is not None
+    assert (shown["recognition_status"], shown["recognition_error"]) == ("failed", STALLED)
+    assert STALLED == (
+        "Распознавание прервалось — нажмите «Распознать ещё раз» или заполните поля вручную"
+    )
+    assert in_base == "running", "база не тронута"
+    assert again.status_code == 200, again.text
+    assert (again.json()["recognition_status"], again.json()["recognition_error"]) == ("done", None)
 
 
 def test_no_label_is_409(people: None, drive: FakeDrive) -> None:

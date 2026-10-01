@@ -26,6 +26,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy.orm import Session
 
 from kitchen.cards import drafts, recognize, submit
 from kitchen.config import Settings
@@ -129,7 +130,9 @@ class DraftOut(BaseModel):
     """Какие из четырёх фото есть. Сами фото — ``GET …/photos/{вид}``."""
     recognition_status: str | None
     """Распознавание этикетки: ``running`` — идёт (опрашивайте черновик),
-    ``done``, ``failed``; ``null`` — не запускали или этикетку заменили."""
+    ``done``, ``failed``; ``null`` — не запускали или этикетку заменили.
+    «Идёт» дольше предела (процесс умер посреди вызова) выдаётся ``failed`` —
+    опрос не длится вечно, а повтор уже разрешён."""
     recognition_error: str | None
     """Почему не удалось последнее распознавание — текст для повара."""
     warnings: list[str]
@@ -224,7 +227,8 @@ def _number(value: Decimal | None) -> str | None:
     return None if value is None else format(value.normalize(), "f")
 
 
-def _out(draft: CardDraft) -> DraftOut:
+def _out(session: Session, draft: CardDraft) -> DraftOut:
+    recognition_status, recognition_error = recognize.shown_recognition(session, draft)
     return DraftOut(
         id=draft.id,
         status=draft.status,
@@ -246,8 +250,8 @@ def _out(draft: CardDraft) -> DraftOut:
         description=draft.description,
         approval=draft.approval,
         photos=drafts.photos(draft),
-        recognition_status=draft.recognition_status,
-        recognition_error=recognize.recognition_error(draft),
+        recognition_status=recognition_status,
+        recognition_error=recognition_error,
         warnings=drafts.draft_warnings(draft),
         missing=list(drafts.missing(draft)),
         created_at=draft.created_at,
@@ -297,12 +301,12 @@ def name_check(
 def current_draft(session: SessionDep, user: CardsUserDep) -> DraftOut | None:
     """Незаконченная карточка повара; ``null`` — её нет."""
     draft = drafts.current_draft(session, user.id)
-    return None if draft is None else _out(draft)
+    return None if draft is None else _out(session, draft)
 
 
 @router.post("/drafts", response_model=DraftOut, status_code=status.HTTP_201_CREATED)
 def start_draft(session: SessionDep, user: CardsUserDep) -> DraftOut:
-    return _out(drafts.start_draft(session, user.id))
+    return _out(session, drafts.start_draft(session, user.id))
 
 
 @router.patch("/drafts/{draft_id}", response_model=DraftOut)
@@ -314,7 +318,8 @@ def update_draft(
     window: SubmitWindowDep,
 ) -> DraftOut:
     changes = body.model_dump(exclude_unset=True)
-    return _out(drafts.update_draft(session, user.id, draft_id, changes, submit_window=window))
+    draft = drafts.update_draft(session, user.id, draft_id, changes, submit_window=window)
+    return _out(session, draft)
 
 
 @router.delete("/drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -382,7 +387,7 @@ def recognize_label(
         draft_id,
         submit_window=window,
     )
-    return _out(draft)
+    return _out(session, draft)
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +419,7 @@ def put_photo(
         now=datetime.now(UTC),
         submit_window=window,
     )
-    return _out(draft)
+    return _out(session, draft)
 
 
 @router.delete("/drafts/{draft_id}/photos/{kind}", response_model=DraftOut)
@@ -426,7 +431,8 @@ def remove_photo(
     drive: DriveDep,
     window: SubmitWindowDep,
 ) -> DraftOut:
-    return _out(drafts.remove_photo(session, drive, user.id, draft_id, kind, submit_window=window))
+    draft = drafts.remove_photo(session, drive, user.id, draft_id, kind, submit_window=window)
+    return _out(session, draft)
 
 
 @router.get("/drafts/{draft_id}/photos/{kind}")
