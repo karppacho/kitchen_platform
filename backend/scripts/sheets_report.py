@@ -160,11 +160,7 @@ def main() -> int:
     args = parser.parse_args()
 
     settings = load_settings()
-    client = GspreadClient(
-        settings.google_credentials_path,
-        timeout=settings.google_timeout,
-        refresh_timeout=settings.google_refresh_timeout,
-    )
+    client = GspreadClient(settings.google_credentials_path, timeout=settings.google_timeout)
     reader = SheetsReader(
         client,
         {

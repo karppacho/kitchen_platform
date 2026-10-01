@@ -1,6 +1,14 @@
 # Блокирующий CI. Требование к нему одно и жёсткое: укладываться в 5 минут.
 # Проверки защищают, только пока их терпят; если PR ждёт двадцать минут,
 # дисциплина умрёт сама. Всё медленное (e2e, LLM-евалы) живёт отдельно.
+#
+# Имена задач (name) не менять: на них настроена защита main — переименованная
+# задача станет обязательной проверкой, которая никогда не придёт.
+#
+# Установка зависимостей (uv sync) — со своим пределом и одним повтором:
+# 01.10 она зависла на десять минут и съела весь предел задания. Попытка —
+# не дольше 100 с (из кэша обычно секунды), зависшую timeout обрывает, и
+# вторая идёт заново; шаг целиком — не дольше 4 минут.
 
 name: CI
 
@@ -27,7 +35,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
       - run: uv run ruff check --output-format=github .
         working-directory: backend
@@ -43,7 +56,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
       - run: uv run mypy src
         working-directory: backend
@@ -57,7 +75,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
       - run: uv run lint-imports
         working-directory: backend
@@ -96,7 +119,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
 
       # Порог покрытия проверяется ОДИН раз и по сумме обоих наборов.
@@ -148,7 +176,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
       # Lock-файл обязан соответствовать pyproject: иначе на сервере
       # встанут не те версии, что проверял CI.
@@ -250,9 +283,31 @@ jobs:
           HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
           PY
 
+          # Проверка готовности: заглушка ответила хоть чем-то — её 404 тоже
+          # ответ. Нет соединения — исключение и код 1, ждём дальше.
+          cat > /tmp/stub_ready.py <<'PY'
+          import urllib.error
+          import urllib.request
+
+          try:
+              urllib.request.urlopen("http://127.0.0.1:8080/", timeout=1)
+          except urllib.error.HTTPError:
+              pass
+          PY
+
           docker run -d --name api --network kitchen-ci --network-alias api \
             -v /tmp/stub_api.py:/stub.py:ro \
+            -v /tmp/stub_ready.py:/ready.py:ro \
             python:3.12-alpine python3 /stub.py
+
+      # Контейнер заглушки запущен — это ещё не значит, что python уже слушает
+      # порт: 30.09 nginx отдал на /api/ 502, проверка упала не по своей
+      # причине. Ждём, пока заглушка сама начнёт отвечать.
+      - name: Ждём, пока заглушка API начнёт отвечать
+        run: |
+          timeout 30 bash -c \
+            'until docker exec api python3 /ready.py 2>/dev/null; do sleep 0.5; done' \
+            || { echo "::error::заглушка API не начала отвечать за 30 с"; docker logs api; exit 1; }
 
       # ssl_certificate и ssl_certificate_key в конфиге — обязательные пути;
       # без файлов по ним nginx не стартует вовсе, ещё до первого запроса.

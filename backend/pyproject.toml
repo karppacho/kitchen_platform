@@ -151,6 +151,10 @@ filterwarnings = [
     "default",
     # Своё устаревание чиним сразу.
     "error::DeprecationWarning:kitchen",
+    # Давнее, исправится обновлением starlette; источник — starlette/testclient.py
+    # (anyio переименовал BlockingPortal). Только оно и только оттуда — не
+    # общее подавление: тест в tests/unit/test_infra.py.
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:starlette.testclient",
 ]
 
 

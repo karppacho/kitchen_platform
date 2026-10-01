@@ -200,6 +200,35 @@ def test_other_conditions_are_kept_next_to_temperature() -> None:
     assert text == "12 месяцев при -18 °C, в сухом месте"
 
 
+@pytest.mark.parametrize(
+    ("conditions", "expected"),
+    [
+        ("при -18°C, в сухом месте", "12 месяцев при -18 °C, в сухом месте"),
+        ("t -18°C; в сухом месте", "12 месяцев при -18 °C, в сухом месте"),
+        (
+            "в сухом месте, при -18°C, вдали от солнца",
+            "12 месяцев при -18 °C, в сухом месте, вдали от солнца",
+        ),
+        ("при -18°C", "12 месяцев при -18 °C"),
+    ],
+)
+def test_temperature_in_both_keeps_the_rest_of_conditions(conditions: str, expected: str) -> None:
+    """Температура и в периоде, и в условиях: её второй раз не дописываем, а
+    нетемпературная часть условий («в сухом месте») не теряется."""
+    text, warnings = describe_shelf_life("12 месяцев при -18 °C", None, None, conditions)
+
+    assert text == expected
+    assert text.count("18") == 1, "температура не дублируется"
+    assert warnings == ()
+
+
+def test_decimal_comma_does_not_split_conditions() -> None:
+    """«+2,5 °C» — одно число с запятой, а не две части условий."""
+    text, _ = describe_shelf_life("30 суток", None, None, "при +2,5 °C, в темноте")
+
+    assert text == "30 суток при +2,5 °C, в темноте"
+
+
 def test_period_whitespace_is_squashed() -> None:
     text, _ = describe_shelf_life("  12   месяцев ", None, None, None)
     assert text == "12 месяцев"

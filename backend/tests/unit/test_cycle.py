@@ -595,10 +595,8 @@ def test_reader_from_takes_everything_from_settings(
     class Client:
         """Вместо GspreadClient: помнит, с чем создан и какие таблицы открывал."""
 
-        def __init__(
-            self, credentials_path: Path, *, timeout: tuple[int, int], refresh_timeout: int
-        ) -> None:
-            made.append((credentials_path, timeout, refresh_timeout))
+        def __init__(self, credentials_path: Path, *, timeout: tuple[int, int]) -> None:
+            made.append((credentials_path, timeout))
 
         def open(self, spreadsheet_id: str) -> FakeSpreadsheet:
             opened.append(spreadsheet_id)
@@ -610,7 +608,6 @@ def test_reader_from_takes_everything_from_settings(
         google_credentials_path=key,
         google_connect_timeout=3,
         google_read_timeout=7,
-        google_refresh_timeout=5,
         sheets_id_kitchen="kitchen-id",
         sheets_id_competitors="competitors-id",
         sheets_id_ingredient_cards="cards-id",
@@ -622,5 +619,5 @@ def test_reader_from_takes_everything_from_settings(
         [specs.INGREDIENTS, specs.COMPETITOR_ITEMS, specs.INGREDIENT_CARDS, specs.TASTING_RATINGS]
     )
 
-    assert made == [(key, (3, 7), 5)]
+    assert made == [(key, (3, 7))]
     assert opened == ["kitchen-id", "competitors-id", "cards-id", "tastings-id"]

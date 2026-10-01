@@ -17,6 +17,8 @@ import json
 import re
 import shutil
 import subprocess
+import tomllib
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -471,6 +473,70 @@ def test_integratsiya_idyot_i_posle_krasnyh_oflayn_testov() -> None:
     )
 
 
+CI_JOBS = {
+    "lint": "ruff",
+    "types": "mypy",
+    "arch": "слои (import-linter)",
+    "test": "тесты",
+    "secrets": "секреты (gitleaks)",
+    "deps": "зависимости",
+    "frontend": "фронтенд",
+    "nginx": "образ nginx (живая проверка)",
+}
+"""Имена задач CI. На них настроена защита ``main``: переименованная задача —
+обязательная проверка, которая никогда не придёт, и PR не сольётся."""
+
+
+def test_ci_job_names_are_what_branch_protection_waits_for() -> None:
+    jobs = _load_ci()["jobs"]
+
+    assert {key: job.get("name") for key, job in jobs.items()} == CI_JOBS
+
+
+def _uv_sync_steps() -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (key, step)
+        for key, job in _load_ci()["jobs"].items()
+        for step in job["steps"]
+        if "uv sync" in str(step.get("run", ""))
+    ]
+
+
+def test_uv_sync_has_its_own_limit_and_one_retry() -> None:
+    """01.10 установка зависимостей зависла на десять минут и съела весь
+    предел задания. У шага — свой предел, у каждой попытки — свой ``timeout``,
+    и попыток две: зависшая первая не съедает всё, вторая идёт заново."""
+    steps = _uv_sync_steps()
+
+    assert {key for key, _ in steps} == {"lint", "types", "arch", "test", "deps"}
+    for key, step in steps:
+        run = " ".join(str(step["run"]).split())
+        limit = step.get("timeout-minutes")
+        attempts = re.findall(r"timeout -k (\d+) (\d+) uv sync --all-extras --dev", run)
+        assert isinstance(limit, int) and 0 < limit <= 5, f"{key}: у uv sync нет своего предела"
+        assert len(attempts) == 2, f"{key}: у uv sync не две попытки под timeout: {run}"
+        assert " || " in run, f"{key}: вторая попытка — только после неудачи первой"
+        worst = sum(int(kill) + int(seconds) for kill, seconds in attempts)
+        assert worst < limit * 60, f"{key}: две попытки ({worst} с) не влезают в предел шага"
+
+
+def test_nginx_check_waits_for_the_api_stub() -> None:
+    """30.09 заглушка API ещё не слушала порт, и nginx отдал на /api/ 502.
+    Прежде чем проверять ответы API через nginx, ждём, пока заглушка сама
+    начнёт отвечать, — с пределом и понятной ошибкой."""
+    steps = _load_ci()["jobs"]["nginx"]["steps"]
+    names = [str(step.get("name", "")) for step in steps]
+    wait = names.index("Ждём, пока заглушка API начнёт отвечать")
+    first_api_check = next(i for i, name in enumerate(names) if "/api" in name)
+    run = str(steps[wait]["run"])
+
+    assert names.index("Сеть и заглушка API") < wait < first_api_check
+    assert "docker exec api python3 /ready.py" in run
+    assert re.search(r"timeout \d+ bash -c", run), "ожидание без предела повисло бы"
+    assert "::error::" in run
+    assert "-v /tmp/stub_ready.py:/ready.py:ro" in str(steps[names.index("Сеть и заглушка API")])
+
+
 # ---------------------------------------------------------------------------
 # Сертификат: где лежит и кто его читает
 # ---------------------------------------------------------------------------
@@ -770,3 +836,37 @@ def test_security_headers_are_sent_always(name: str) -> None:
     assert lines, f"add_header {name} пропал из конфига"
     for line in lines:
         assert line.rstrip(";").endswith(" always"), f"«{line}»: без always"
+
+
+# ---------------------------------------------------------------------------
+# Прогон тестов: чужие предупреждения
+# ---------------------------------------------------------------------------
+PYPROJECT = REPO / "backend" / "pyproject.toml"
+PORTAL_WARNING = "The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread instead."
+
+
+def _warned(message: str, module: str) -> list[str]:
+    """Что из предупреждения дойдёт до вывода pytest при фильтрах из pyproject.
+
+    pytest ставит фильтры ``filterwarnings`` на каждый тест; ``catch_warnings``
+    их наследует. Реестр свой — повтор не прячется за «уже показано»."""
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.warn_explicit(message, DeprecationWarning, "x.py", 1, module=module, registry={})
+    return [str(w.message) for w in seen]
+
+
+def test_only_the_starlette_portal_warning_is_silenced() -> None:
+    """Давнее предупреждение starlette об ``anyio.abc.BlockingPortal`` глушится
+    точечно — только оно и только из ``starlette.testclient``. Общего
+    подавления нет: то же сообщение из другого модуля и другое устаревание
+    из того же модуля по-прежнему видны."""
+    options = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["tool"]["pytest"]["ini_options"]
+    ignored = [line for line in options["filterwarnings"] if line.startswith("ignore")]
+
+    assert ignored == [
+        "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning:"
+        "starlette.testclient"
+    ]
+    assert _warned(PORTAL_WARNING, "starlette.testclient") == []
+    assert _warned(PORTAL_WARNING, "anyio.other") == [PORTAL_WARNING]
+    assert _warned("Другое устаревание", "starlette.testclient") == ["Другое устаревание"]

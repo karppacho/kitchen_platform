@@ -169,16 +169,9 @@ class GspreadClient:
     его :meth:`close`.
     """
 
-    def __init__(
-        self,
-        credentials_path: Path,
-        *,
-        timeout: tuple[int, int] = (10, 60),
-        refresh_timeout: int = 15,
-    ) -> None:
+    def __init__(self, credentials_path: Path, *, timeout: tuple[int, int] = (10, 60)) -> None:
         self._credentials_path = credentials_path
         self._timeout = timeout
-        self._refresh_timeout = refresh_timeout
         self._gc: object | None = None
         self._books: dict[str, Spreadsheet] = {}
         self._login: tuple[GoogleCredentials, requests.Session] | None = None
@@ -199,9 +192,7 @@ class GspreadClient:
         соединений не нужно. Таблицы вид открывает сам — открытая таблица
         помнит клиента, через которого её открыли, и его таймауты.
         """
-        view = GspreadClient(
-            self._credentials_path, timeout=timeout, refresh_timeout=self._refresh_timeout
-        )
+        view = GspreadClient(self._credentials_path, timeout=timeout)
         view._parent = self
         return view
 
@@ -228,9 +219,9 @@ class GspreadClient:
         credentials = Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
             str(self._credentials_path), scopes=list(self.SCOPES)
         )
-        session: requests.Session = AuthorizedSession(  # type: ignore[no-untyped-call]
-            credentials, refresh_timeout=self._refresh_timeout
-        )
+        # Без refresh_timeout: google-auth 2.57 его только хранит и не
+        # применяет — токен обновляется с таймаутом самого запроса (см. ниже).
+        session: requests.Session = AuthorizedSession(credentials)  # type: ignore[no-untyped-call]
         self._login = (credentials, session)
         return self._login
 
@@ -241,11 +232,12 @@ class GspreadClient:
         import gspread
 
         # Таймауты обязательны: по умолчанию их нет вообще, и зависший запрос
-        # вешает воркер молча и навсегда. Ставятся они в двух РАЗНЫХ местах,
-        # и это не дублирование:
-        #
-        #   refresh_timeout у сессии  — на обновление токена;
-        #   client.set_timeout(...)   — на сами запросы к Sheets.
+        # вешает воркер молча и навсегда. Ставятся они одним местом —
+        # client.set_timeout(...): gspread передаёт таймаут в каждый запрос,
+        # а AuthorizedSession обновляет токен с таймаутом того же запроса
+        # (functools.partial(self._auth_request, timeout=…)). Свой
+        # refresh_timeout у сессии google-auth 2.57 только хранит и не
+        # применяет — его и не передаём (тест в test_sheets_client.py).
         #
         # Присвоить `session.timeout` нельзя: AuthorizedSession — наследник
         # requests.Session, у которого такого атрибута нет, и присваивание

@@ -266,11 +266,7 @@ def _utcnow() -> datetime:
 def reader_from(settings: Settings) -> SheetsReader:
     """Читатель боевых таблиц: воркер и ручной импорт собирают его одинаково."""
     return SheetsReader(
-        GspreadClient(
-            settings.google_credentials_path,
-            timeout=settings.google_timeout,
-            refresh_timeout=settings.google_refresh_timeout,
-        ),
+        GspreadClient(settings.google_credentials_path, timeout=settings.google_timeout),
         {
             "kitchen": settings.sheets_id_kitchen,
             "competitors": settings.sheets_id_competitors,

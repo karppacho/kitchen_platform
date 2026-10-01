@@ -9,8 +9,8 @@
 Правила взяты из промпта бота, с одной поправкой Александра (30.09.2026):
 
 1. На этикетке написан период («180 суток», «12 месяцев при t -18°C») —
-   пишем как есть. Условия хранения дописываем, только если их в периоде
-   ещё нет.
+   пишем как есть. Условия хранения дописываем — ту их часть, которой в
+   периоде ещё нет.
 2. Периода нет, но есть дата изготовления и «годен до» — считаем разницу:
    больше 60 дней — полными месяцами (округление вниз), иначе днями.
    «12 месяцев (с 15.06.2025 до 15.06.2026) при t -18°C».
@@ -65,6 +65,9 @@ _HAS_TEMPERATURE = re.compile(
 _STARTS_WITH_PRI = re.compile(r"при\b", re.IGNORECASE)
 # «t +2..+6°C», «-18°C», «+4» — продолжение фразы «при …».
 _STARTS_WITH_TEMPERATURE = re.compile(r"(?:[tт]\s*)?[+\-−–]?\s*\d", re.IGNORECASE)
+# Границы частей условий хранения: точка с запятой и запятая — кроме
+# десятичной, между цифрами: «+2,5 °C» — одна часть.
+_CONDITION_PARTS = re.compile(r";|,(?!\d)|(?<!\d),")
 
 
 def parse_label_date(raw: str | None) -> date | None:
@@ -156,9 +159,7 @@ def describe_shelf_life(
     conditions_text = _squash(conditions)
 
     if period_text:
-        if conditions_text and not _already_has_conditions(period_text, conditions_text):
-            return _with_conditions(period_text, conditions_text), ()
-        return period_text, ()
+        return _with_conditions(period_text, _missing_conditions(period_text, conditions_text)), ()
 
     made_raw = _squash(manufactured)
     until_raw = _squash(best_before)
@@ -220,21 +221,30 @@ def _with_conditions(text: str, conditions: str) -> str:
     return f"{text}, {conditions}"
 
 
-def _already_has_conditions(period: str, conditions: str) -> bool:
-    """Уже ли сказано в периоде то, что говорят условия хранения.
+def _missing_conditions(period: str, conditions: str) -> str:
+    """Часть условий хранения, которой в периоде ещё нет, — её и дописать.
 
     Период с этикетки нередко уже содержит температуру: «12 месяцев при
     -18 °C». Дописать к нему «при t -18°C» — повтор, который повар будет
-    стирать руками. Поэтому условия не дописываются, если тот же текст в
-    периоде уже есть или температура есть и там, и там. Всё остальное
+    стирать руками. Поэтому условия делятся на части (по запятой и точке с
+    запятой) и пропускается часть, текст которой в периоде уже есть, и часть
+    с температурой, если температура есть и в периоде. Всё остальное
     дописывается: температура из условий не должна теряться из-за
     постороннего «при» («6 месяцев при условии герметичности»), а «в сухом
-    месте» — из-за температуры в периоде.
+    месте» — из-за температуры в периоде, в том числе когда они в условиях
+    вместе: «при -18°C, в сухом месте».
     """
-    wanted = _key(conditions).removeprefix("при")
-    if wanted and wanted in _key(period):
-        return True
-    return bool(_HAS_TEMPERATURE.search(conditions)) and bool(_HAS_TEMPERATURE.search(period))
+    period_key = _key(period)
+    period_has_temperature = bool(_HAS_TEMPERATURE.search(period))
+    kept: list[str] = []
+    for part in _CONDITION_PARTS.split(conditions):
+        wanted = _key(part).removeprefix("при")
+        if not wanted or wanted in period_key:
+            continue
+        if period_has_temperature and _HAS_TEMPERATURE.search(part):
+            continue
+        kept.append(part.strip())
+    return ", ".join(kept)
 
 
 def _key(text: str) -> str:

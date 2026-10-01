@@ -639,7 +639,6 @@ def test_client_from_settings_uses_configured_scope_and_timeouts(
         drive_scope="drive",
         google_connect_timeout=3,
         google_read_timeout=33,
-        google_refresh_timeout=13,
     )
 
     client = drive_from_settings(settings)

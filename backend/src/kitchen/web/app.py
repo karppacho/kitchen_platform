@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Literal
 
 import httpx
@@ -23,6 +24,7 @@ from kitchen.config import Settings, load_settings
 from kitchen.db.journal import DbJournal
 from kitchen.db.session import make_session_factory
 from kitchen.llm.label import label_reader_from_settings
+from kitchen.logs import configure_logging
 from kitchen.sync.client import GspreadClient
 from kitchen.sync.cycle import SyncCycle
 from kitchen.sync.drive import drive_from_settings
@@ -36,7 +38,7 @@ from kitchen.web.cards import router as cards_router
 from kitchen.web.csrf import CSRF_HEADER, CsrfMiddleware
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
 
     from sqlalchemy.orm import Session, sessionmaker
 
@@ -58,6 +60,14 @@ class Health(BaseModel):
     env: str
 
 
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Старт приложения — одна точка настройки журнала процесса api: при
+    старте под uvicorn, а не при импорте модуля (импортируют его и тесты)."""
+    configure_logging()
+    yield
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Собрать приложение.
 
@@ -72,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Схему наружу не отдаём: она подробно описывает внутреннее
         # устройство, а пользователей у нас двое и им она не нужна.
         openapi_url="/openapi.json" if config.app_env == "development" else None,
+        lifespan=_lifespan,
     )
 
     # Состояние приложения: настройки и фабрика сессий. Через request,
@@ -101,9 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # перенос; закрывает его зависимость после ответа.
     app.state.label_reader = _once(lambda: label_reader_from_settings(config))
     app.state.google = lambda: GspreadClient(
-        config.google_credentials_path,
-        timeout=config.google_timeout,
-        refresh_timeout=config.google_refresh_timeout,
+        config.google_credentials_path, timeout=config.google_timeout
     )
     app.state.card_writer = lambda google: _card_writer(config, app.state.sessions, google)
     app.state.sync_cycle = lambda google: _card_import(config, app.state.sessions, google)

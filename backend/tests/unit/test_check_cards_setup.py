@@ -81,7 +81,6 @@ class Setup:
             "sheets_id_kitchen": "kitchen-book",
             "google_connect_timeout": 4,
             "google_read_timeout": 44,
-            "google_refresh_timeout": 14,
             "polza_api_key": KEY,
             "polza_base_url": BASE_URL,
             "llm_vision_model": MODEL,
