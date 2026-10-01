@@ -272,22 +272,27 @@ def test_long_reason_is_cut() -> None:
     assert 0 < len(caught.value.detail) <= 200
 
 
+_LOOKALIKE = "pza-" + "7f3c2a9e5d41" + "b8e0aa91c2d3"
+_BEARER = "sk-or-v1-" + "0123456789" + "abcdefABCDEF"
+"""Похожие на ключ строки собраны по частям: целиком их принял бы за настоящий
+ключ сканер секретов в CI (gitleaks, правило generic-api-key)."""
+
+
 @pytest.mark.parametrize(
-    "message",
+    ("message", "secret"),
     [
-        f"Incorrect API key provided: {KEY}",
-        "Incorrect API key provided: pza-7f3c2a9e5d41b8e0aa91c2d3",
-        "Authorization: Bearer sk-or-v1-0123456789abcdefABCDEF",
+        (f"Incorrect API key provided: {KEY}", KEY),
+        (f"Incorrect API key provided: {_LOOKALIKE}", _LOOKALIKE),
+        (f"Authorization: Bearer {_BEARER}", _BEARER),
     ],
 )
-def test_key_in_reason_is_hidden(message: str) -> None:
+def test_key_in_reason_is_hidden(message: str, secret: str) -> None:
     """Шлюзы любят повторять ключ в тексте ошибки. Ни наш ключ, ни похожая на
     ключ строка в журнал не попадают; остальная причина — остаётся."""
     with pytest.raises(LlmError) as caught:
         _read(FakePolza(refusal(401, message)))
 
     described = caught.value.describe()
-    secret = message.rsplit(" ", 1)[-1]
     assert secret not in described
     assert KEY not in described
     assert "Incorrect API key provided" in described or "Authorization" in described
