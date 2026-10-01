@@ -5,8 +5,10 @@
 
 Таблица `llm_calls` — строка на каждый вызов модели через polza.ai, удачный
 или нет: когда, зачем, какая модель и версия промпта, кто вызвал, чем
-кончилось, сколько стоило, сколько токенов и времени. Из неё считаются
-дневной бюджет (сутки по Москве) и лимит распознаваний на повара.
+кончилось, сколько списал polza.ai (`cost_rub`), сколько неудачных попыток
+перед ответом могли стоить денег (`unpriced_attempts`), сколько токенов и
+времени. Из неё считаются дневной бюджет (сутки по Москве) и лимит
+распознаваний на повара.
 
 Чек-лист (его же проверяет агент migration-guard):
 
@@ -52,6 +54,7 @@ def upgrade() -> None:
         sa.Column("ok", sa.Boolean(), nullable=False),
         sa.Column("error", sa.Text(), nullable=False),
         sa.Column("cost_rub", sa.Numeric(precision=12, scale=4), nullable=True),
+        sa.Column("unpriced_attempts", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("tokens", sa.Integer(), nullable=True),
         sa.Column("duration_ms", sa.Integer(), nullable=True),
         sa.ForeignKeyConstraint(["profile_id"], ["profiles.id"], ondelete="SET NULL"),

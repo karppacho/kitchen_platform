@@ -424,10 +424,11 @@ class LlmCall(Base):
 
     Из журнала считается дневной бюджет и лимит на повара, поэтому строка
     пишется на каждый вызов, даже неудачный: таймаут мог стоить денег.
-    Стоимость — сколько списал polza.ai плюс оценка 5 ₽ за каждую попытку с
-    неизвестной ценой (таймаут, обрыв, 5xx); ``None`` — не известно ничего,
-    бюджет считает такой вызов той же оценкой. Повара удалили — траты
-    остаются, ссылка на него пустеет.
+    ``cost_rub`` — только то, что списал polza.ai за последнюю попытку
+    (``None`` — неизвестно); ``unpriced_attempts`` — неудачные попытки перед
+    ней, цена которых неизвестна. Бюджет оценивает каждую неизвестную цену
+    в 5 ₽, а по журналу видно, что списано, а что оценено. Повара удалили —
+    траты остаются, ссылка на него пустеет.
     """
 
     __tablename__ = "llm_calls"
@@ -447,5 +448,6 @@ class LlmCall(Base):
     error: Mapped[str] = mapped_column(Text, default="")
     # Четыре знака после запятой: вызов стоит копейки и доли копеек.
     cost_rub: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    unpriced_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     tokens: Mapped[int | None] = mapped_column(Integer)
     duration_ms: Mapped[int | None] = mapped_column(Integer)

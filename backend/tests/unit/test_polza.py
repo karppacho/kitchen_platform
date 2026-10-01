@@ -188,36 +188,40 @@ def test_refusals_are_not_repeated(status: int, kind: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("answers", "unpriced"),
+    ("answers", "cost", "unpriced"),
     [
-        ((ok(),), 0),
-        ((ok(usage=None),), 1),
-        ((httpx.ReadTimeout, ok()), 1),
-        ((httpx.RemoteProtocolError, ok()), 1),
-        ((refusal(502), ok(usage=None)), 2),
-        ((refusal(400), ok()), 0),
-        ((httpx.ConnectError, ok()), 0),
+        ((ok(),), Decimal("0.0123"), 0),
+        ((ok(usage=None),), None, 0),
+        ((httpx.ReadTimeout, ok()), Decimal("0.0123"), 1),
+        ((httpx.RemoteProtocolError, ok()), Decimal("0.0123"), 1),
+        ((refusal(502), ok(usage=None)), None, 1),
+        ((refusal(400), ok()), Decimal("0.0123"), 0),
+        ((httpx.ConnectError, ok()), Decimal("0.0123"), 0),
     ],
 )
 def test_attempts_without_known_price_are_counted(
-    answers: tuple[Answer, ...], unpriced: int
+    answers: tuple[Answer, ...], cost: Decimal | None, unpriced: int
 ) -> None:
-    """Таймаут, обрыв после отправки, 5xx, ответ без цены — polza.ai мог списать
-    деньги, а сколько — неизвестно. Журнал считает каждую такую попытку по
-    оценке. Не дошедший запрос (нет соединения) и отказ 4xx не стоят ничего."""
+    """Таймаут, обрыв после отправки, 5xx до ответа — polza.ai мог списать
+    деньги, а сколько — неизвестно: это ``unpriced_attempts``. Цена самой
+    ответившей попытки — ``cost_rub`` (``None`` — не сообщил), второй раз она
+    не считается. Не дошедший запрос и отказ 4xx не стоят ничего."""
     reply = _read(FakePolza(*answers))
 
+    assert reply.cost_rub == cost
     assert reply.unpriced_attempts == unpriced
 
 
 @pytest.mark.parametrize(
     ("answers", "cost", "unpriced"),
     [
-        ((httpx.ReadTimeout,), None, 2),
-        ((refusal(503),), None, 2),
+        ((httpx.ReadTimeout,), None, 1),
+        ((refusal(503),), None, 1),
         ((httpx.ConnectError,), Decimal("0"), 0),
+        ((httpx.ReadTimeout, httpx.ConnectError), Decimal("0"), 1),
         ((httpx.ReadTimeout, refusal(429)), Decimal("0"), 1),
         ((refusal(401),), Decimal("0"), 0),
+        ((httpx.Response(200, content=b"<html></html>"),), None, 0),
     ],
 )
 def test_failed_call_knows_its_unpriced_attempts(
@@ -228,6 +232,77 @@ def test_failed_call_knows_its_unpriced_attempts(
 
     assert caught.value.cost_rub == cost
     assert caught.value.unpriced_attempts == unpriced
+
+
+# ---------------------------------------------------------------------------
+# Причина отказа — от polza.ai, без ключа
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("answer", "reason"),
+    [
+        (refusal(402, "Insufficient balance"), "Insufficient balance"),
+        (httpx.Response(404, json={"message": "Model not found"}), "Model not found"),
+        (httpx.Response(422, json={"detail": "Image is too large"}), "Image is too large"),
+        (httpx.Response(429, json={"error": "Too many requests"}), "Too many requests"),
+        (httpx.Response(503, content=b"Service \n  Unavailable\n"), "Service Unavailable"),
+        (
+            httpx.Response(402, content=b'{"code": 402, "msg": "no funds"}'),
+            '{"code": 402, "msg": "no funds"}',
+        ),
+        (
+            httpx.Response(400, json={"error": {"message": "response_format_is_not_supported"}}),
+            "response_format_is_not_supported",
+        ),
+    ],
+)
+def test_reason_from_polza_is_kept(answer: httpx.Response, reason: str) -> None:
+    """Что ответил polza.ai — в ``detail`` и в журнале: первый живой запуск должен
+    показать настоящую причину, а не только код."""
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(answer))
+
+    assert caught.value.detail == reason
+    assert caught.value.describe().endswith(f": {reason}")
+
+
+def test_long_reason_is_cut() -> None:
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(refusal(400, "очень длинно " * 100)))
+
+    assert 0 < len(caught.value.detail) <= 200
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        f"Incorrect API key provided: {KEY}",
+        "Incorrect API key provided: pza-7f3c2a9e5d41b8e0aa91c2d3",
+        "Authorization: Bearer sk-or-v1-0123456789abcdefABCDEF",
+    ],
+)
+def test_key_in_reason_is_hidden(message: str) -> None:
+    """Шлюзы любят повторять ключ в тексте ошибки. Ни наш ключ, ни похожая на
+    ключ строка в журнал не попадают; остальная причина — остаётся."""
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(refusal(401, message)))
+
+    described = caught.value.describe()
+    secret = message.rsplit(" ", 1)[-1]
+    assert secret not in described
+    assert KEY not in described
+    assert "Incorrect API key provided" in described or "Authorization" in described
+
+
+def test_json_mode_drop_is_known() -> None:
+    """Скрипт проверки говорит «отклонил и в режиме JSON, и без него» только
+    тогда, когда так и было."""
+    with pytest.raises(LlmError) as both:
+        _read(FakePolza(refusal(400, "image input is not supported")))
+    with pytest.raises(LlmError) as once:
+        _read(FakePolza(refusal(422, "bad image")))
+
+    assert both.value.without_json_mode
+    assert not once.value.without_json_mode
 
 
 # ---------------------------------------------------------------------------

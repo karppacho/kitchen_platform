@@ -3,11 +3,13 @@
 Сутки бюджета начинаются в 00:00 по Москве: повар в 01:30 уже в новом дне,
 хотя по UTC это ещё вчера. Лимит — на каждого повара отдельно, бюджет — на
 всех вместе. Вызов с неизвестной ценой (таймаут: модель могла поработать)
-считается по оценке, а не бесплатным.
+считается по оценке, а не бесплатным, — как и каждая неудачная попытка
+перед ним; оценка в журнале отдельно от того, что списал polza.ai.
 """
 
 from __future__ import annotations
 
+import inspect as pyinspect
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -27,6 +29,8 @@ from kitchen.llm.budget import (
     record_call,
 )
 from kitchen.llm.label import LABEL_PROMPT_VERSION, LABEL_PURPOSE
+from kitchen.llm.polza import LlmError, PolzaClient
+from tests.fake_polza import BASE_URL, JPEG, KEY, MODEL, FakePolza, refusal
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
@@ -55,6 +59,7 @@ def _call(
     profile_id: uuid.UUID | None = None,
     purpose: str = LABEL_PURPOSE,
     ok: bool = True,
+    unpriced: int = 0,
 ) -> None:
     session.add(
         LlmCall(
@@ -66,6 +71,7 @@ def _call(
             ok=ok,
             error="" if ok else "unavailable: не ответил",
             cost_rub=None if cost is None else Decimal(cost),
+            unpriced_attempts=unpriced,
             tokens=1200,
             duration_ms=4000,
         )
@@ -137,6 +143,23 @@ def test_budget_is_shared_by_everyone(sessions: sessionmaker[Session]) -> None:
 
 
 @pytest.mark.integration
+def test_unpriced_attempts_has_server_default(sessions: sessionmaker[Session]) -> None:
+    """Колонка не пуста, но с серверным значением 0: вставка без неё проходит."""
+    from sqlalchemy import text
+
+    with sessions.begin() as session:
+        session.execute(
+            text(
+                "insert into llm_calls (purpose, model, prompt_version, ok, error) "
+                "values ('label', 'm', 'v', true, '')"
+            )
+        )
+    with sessions() as session:
+        [call] = session.scalars(select(LlmCall)).all()
+    assert call.unpriced_attempts == 0
+
+
+@pytest.mark.integration
 def test_unknown_cost_counts_as_five_rubles(sessions: sessionmaker[Session]) -> None:
     """Цена неизвестна — считается 5 ₽: таймаут не бесплатен, модель могла поработать."""
     assert Decimal("5") == UNKNOWN_COST_RUB
@@ -147,6 +170,21 @@ def test_unknown_cost_counts_as_five_rubles(sessions: sessionmaker[Session]) -> 
         assert _allowed(session, _msk(1, 10), limits=limits)
 
         _call(session, _msk(1, 9, 30), cost=None, ok=False)
+
+        assert not _allowed(session, _msk(1, 10), limits=limits)
+
+
+@pytest.mark.integration
+def test_unpriced_attempts_count_in_budget(sessions: sessionmaker[Session]) -> None:
+    """Таймаут перед ответом тоже мог стоить денег: каждая такая попытка — 5 ₽
+    сверх известной цены вызова."""
+    limits = LlmLimits(daily_budget_rub=Decimal("10"), calls_per_user_daily=40)
+    with sessions.begin() as session:
+        _call(session, _msk(1, 9), cost="0.0123", unpriced=1)
+
+        assert _allowed(session, _msk(1, 10), limits=limits)
+
+        _call(session, _msk(1, 9, 30), cost="0", unpriced=1, ok=False)
 
         assert not _allowed(session, _msk(1, 10), limits=limits)
 
@@ -213,6 +251,7 @@ def test_record_call_keeps_exact_cost(sessions: sessionmaker[Session]) -> None:
             profile_id=cook,
             ok=True,
             cost_rub=Decimal("0.0123"),
+            unpriced_attempts=1,
             tokens=1200,
             duration_ms=4321,
         )
@@ -224,37 +263,28 @@ def test_record_call_keeps_exact_cost(sessions: sessionmaker[Session]) -> None:
             profile_id=None,
             ok=False,
             error="unavailable: polza.ai не отвечает",
+            unpriced_attempts=0,
         )
 
     with sessions() as session:
         good, bad = session.scalars(select(LlmCall).order_by(LlmCall.id)).all()
-    assert good.cost_rub == Decimal("0.0123")
+    assert good.cost_rub == Decimal("0.0123"), "в журнале — только то, что списал polza.ai"
     assert isinstance(good.cost_rub, Decimal)
+    assert good.unpriced_attempts == 1, "оценка — отдельно"
     assert (good.ok, good.error, good.tokens, good.duration_ms) == (True, "", 1200, 4321)
     assert good.profile_id == cook
     assert good.created_at is not None
     assert abs(good.created_at - datetime.now(UTC)) < timedelta(minutes=5)
     assert (bad.ok, bad.cost_rub, bad.tokens, bad.profile_id) == (False, None, None, None)
+    assert bad.unpriced_attempts == 0
     assert bad.error == "unavailable: polza.ai не отвечает"
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize(
-    ("cost", "unpriced", "stored"),
-    [
-        ("0.0123", 1, "5.0123"),
-        (None, 2, "10"),
-        ("0", 1, "5"),
-        ("0", 0, "0"),
-        (None, 0, None),
-    ],
-)
-def test_record_call_adds_estimate_for_unpriced_attempts(
-    sessions: sessionmaker[Session], cost: str | None, unpriced: int, stored: str | None
-) -> None:
-    """Таймаут, потом успех: вторая попытка стоила 0,0123 ₽, первая — неизвестно
-    сколько, считается в 5 ₽. Журнал видит одну строку на распознавание, и цена
-    первой попытки в ней не теряется."""
+@pytest.mark.parametrize("cost", ["100000000", "-1", "NaN"])
+def test_absurd_cost_is_stored_as_unknown(sessions: sessionmaker[Session], cost: str) -> None:
+    """Нелепая цена не роняет вставку в Numeric(12,4) — вызов не выпадает из
+    бюджета, а считается по оценке."""
     with sessions.begin() as session:
         record_call(
             session,
@@ -263,12 +293,65 @@ def test_record_call_adds_estimate_for_unpriced_attempts(
             prompt_version=LABEL_PROMPT_VERSION,
             profile_id=None,
             ok=True,
-            cost_rub=None if cost is None else Decimal(cost),
-            unpriced_attempts=unpriced,
+            cost_rub=Decimal(cost),
+            unpriced_attempts=2,
         )
     with sessions() as session:
         [call] = session.scalars(select(LlmCall)).all()
-    assert call.cost_rub == (None if stored is None else Decimal(stored))
+    assert (call.cost_rub, call.unpriced_attempts) == (None, 2)
+
+
+def test_record_call_cannot_forget_unpriced_attempts() -> None:
+    """У ``unpriced_attempts`` нет значения по умолчанию: вызывающий, забывший
+    его, получит ошибку, а не тихий ноль и заниженный бюджет."""
+    parameter = pyinspect.signature(record_call).parameters["unpriced_attempts"]
+
+    assert parameter.default is pyinspect.Parameter.empty
+    assert parameter.kind is pyinspect.Parameter.KEYWORD_ONLY
+
+
+def test_negative_unpriced_attempts_is_a_bug() -> None:
+    with pytest.raises(ValueError, match="unpriced_attempts"):
+        record_call(
+            None,  # до сессии дело не доходит
+            purpose=LABEL_PURPOSE,
+            model=MODEL,
+            prompt_version=LABEL_PROMPT_VERSION,
+            profile_id=None,
+            ok=True,
+            unpriced_attempts=-1,
+        )
+
+
+@pytest.mark.integration
+def test_journal_keeps_polza_reason_but_not_the_key(sessions: sessionmaker[Session]) -> None:
+    """Отказ polza.ai — в журнал его причина («Insufficient balance»), а ключ,
+    если шлюз его повторил в тексте, — нет."""
+    fake = FakePolza(refusal(402, f"Insufficient balance for key {KEY}"))
+    client = PolzaClient(
+        api_key=KEY, base_url=BASE_URL, timeout_seconds=60, transport=fake.transport()
+    )
+    with pytest.raises(LlmError) as caught:
+        client.vision_json(model=MODEL, system="s", prompt="p", jpeg=JPEG, max_tokens=10)
+    error = caught.value
+    with sessions.begin() as session:
+        record_call(
+            session,
+            purpose=LABEL_PURPOSE,
+            model=MODEL,
+            prompt_version=LABEL_PROMPT_VERSION,
+            profile_id=None,
+            ok=False,
+            error=error.describe(),
+            cost_rub=error.cost_rub,
+            unpriced_attempts=error.unpriced_attempts,
+            duration_ms=error.duration_ms,
+        )
+    with sessions() as session:
+        [call] = session.scalars(select(LlmCall)).all()
+    assert "Insufficient balance" in call.error
+    assert "402" in call.error
+    assert KEY not in call.error
 
 
 @pytest.mark.integration
@@ -287,15 +370,20 @@ def test_deleting_a_profile_keeps_the_journal(sessions: sessionmaker[Session]) -
 
 @pytest.mark.integration
 def test_llm_calls_schema(sessions: sessionmaker[Session]) -> None:
-    """Внешний ключ на профиль — SET NULL и с индексом; стоимость — Numeric(12,4)."""
+    """Внешний ключ на профиль — SET NULL и с индексом; стоимость — Numeric(12,4);
+    попытки без цены — целое, не пусто, по умолчанию 0 (вставка без него не падает)."""
     with sessions() as session:
         inspector = inspect(session.get_bind())
         [foreign] = inspector.get_foreign_keys("llm_calls")
         indexed = {tuple(index["column_names"]) for index in inspector.get_indexes("llm_calls")}
-        cost = {c["name"]: c for c in inspector.get_columns("llm_calls")}["cost_rub"]
+        columns = {c["name"]: c for c in inspector.get_columns("llm_calls")}
     assert foreign["referred_table"] == "profiles"
     assert foreign["constrained_columns"] == ["profile_id"]
     assert foreign["options"].get("ondelete") == "SET NULL"
     assert ("profile_id",) in indexed
     assert ("created_at",) in indexed
-    assert (cost["type"].precision, cost["type"].scale) == (12, 4)
+    assert (columns["cost_rub"]["type"].precision, columns["cost_rub"]["type"].scale) == (12, 4)
+    unpriced = columns["unpriced_attempts"]
+    assert unpriced["type"].python_type is int
+    assert not unpriced["nullable"]
+    assert str(unpriced["default"]) == "0"

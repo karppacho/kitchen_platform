@@ -3,12 +3,13 @@
 Сутки — с 00:00 по Москве: повар в 01:30 работает уже в новом дне, хотя по
 UTC это ещё вчера. Всё считается по журналу ``llm_calls``:
 
-* **бюджет** — сумма ``cost_rub`` всех вызовов за сутки, на всех вместе.
-  Попытка с неизвестной ценой (таймаут, обрыв после отправки, 5xx, ответ
-  без цены: модель могла поработать) считается в :data:`UNKNOWN_COST_RUB`,
-  а не бесплатной: иначе серия таймаутов тратила бы деньги мимо бюджета.
-  :func:`record_call` добавляет оценку к цене вызова, строка ``NULL`` —
-  тоже оценка;
+* **бюджет** — за все вызовы за сутки, на всех вместе: ``cost_rub``
+  (неизвестная цена, ``NULL``, — :data:`UNKNOWN_COST_RUB`) плюс
+  :data:`UNKNOWN_COST_RUB` за каждую из ``unpriced_attempts`` — неудачных
+  попыток перед последней, цена которых неизвестна. Таймаут не бесплатен:
+  модель могла поработать, и серия таймаутов иначе тратила бы деньги мимо
+  бюджета. Оценка в журнал не вписывается — по нему видно, что списано, а
+  что оценено;
 * **лимит** — сколько раз повар звал модель за сутки по этому делу, вместе
   с неудачными попытками.
 
@@ -40,8 +41,10 @@ if TYPE_CHECKING:
     from kitchen.config import Settings
 
 UNKNOWN_COST_RUB = Decimal("5")
-"""Во сколько бюджет считает вызов, цена которого неизвестна."""
+"""Во сколько бюджет считает попытку, цена которой неизвестна."""
 
+_COST_CEILING = Decimal("100000000")
+"""С этой цены — не цена: колонка ``Numeric(12,4)`` её не вместит."""
 _ERROR_LIMIT = 1000
 
 LimitKind = Literal["budget", "user_limit"]
@@ -99,7 +102,10 @@ def ensure_allowed(
     """
     since = moscow_day_start(datetime.now(UTC) if now is None else now)
 
-    known_or_estimated = func.coalesce(LlmCall.cost_rub, UNKNOWN_COST_RUB)
+    known_or_estimated = (
+        func.coalesce(LlmCall.cost_rub, UNKNOWN_COST_RUB)
+        + LlmCall.unpriced_attempts * UNKNOWN_COST_RUB
+    )
     spent = session.scalar(
         select(func.coalesce(func.sum(known_or_estimated), 0)).where(LlmCall.created_at >= since)
     )
@@ -139,28 +145,33 @@ def record_call(
     prompt_version: str,
     profile_id: uuid.UUID | None,
     ok: bool,
+    unpriced_attempts: int,
     error: str = "",
     cost_rub: Decimal | None = None,
-    unpriced_attempts: int = 0,
     tokens: int | None = None,
     duration_ms: int | None = None,
 ) -> LlmCall:
     """Записать вызов в журнал — и удачный, и нет.
 
-    ``cost_rub`` и ``unpriced_attempts`` — из ``LlmReply`` или ``LlmError``: в
-    журнал ложится известная цена плюс :data:`UNKNOWN_COST_RUB` за каждую
-    попытку с неизвестной ценой. Таймаут, потом успех за 0,0123 ₽ — 5,0123 ₽:
-    одна строка на распознавание, и цена первой попытки не теряется. Не
-    известно ничего — ``NULL``, бюджет посчитает его той же оценкой.
+    ``cost_rub`` и ``unpriced_attempts`` — из ``LlmReply`` или ``LlmError``, как
+    есть: что списал polza.ai за последнюю попытку и сколько неудачных попыток
+    перед ней стоили неизвестно сколько. Таймаут, потом успех за 0,0123 ₽ —
+    ``cost_rub=0.0123``, ``unpriced_attempts=1``; бюджет посчитает 5,0123 ₽.
+    ``unpriced_attempts`` обязателен: забытый, он молча занизил бы бюджет.
+    Нелепая цена (отрицательная, бесконечная, от 10⁸ ₽) пишется как
+    неизвестная — вставка в ``Numeric(12,4)`` не падает, вызов не выпадает из
+    бюджета.
 
     Строка добавляется в сессию вызывающего; фиксирует транзакцию он. Если
     остальная работа может откатиться, вызов стоит записать отдельной
     транзакцией: деньги списаны в любом случае.
     """
-    if cost_rub is None and unpriced_attempts == 0:
-        stored: Decimal | None = None
-    else:
-        stored = (cost_rub or Decimal("0")) + UNKNOWN_COST_RUB * unpriced_attempts
+    if unpriced_attempts < 0:
+        raise ValueError(f"unpriced_attempts не может быть меньше нуля: {unpriced_attempts}")
+    if cost_rub is not None and not (
+        cost_rub.is_finite() and Decimal("0") <= cost_rub < _COST_CEILING
+    ):
+        cost_rub = None
     call = LlmCall(
         purpose=purpose,
         model=model,
@@ -168,7 +179,8 @@ def record_call(
         profile_id=profile_id,
         ok=ok,
         error=error[:_ERROR_LIMIT],
-        cost_rub=stored,
+        cost_rub=cost_rub,
+        unpriced_attempts=unpriced_attempts,
         tokens=tokens,
         duration_ms=duration_ms,
     )
