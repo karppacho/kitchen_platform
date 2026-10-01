@@ -28,8 +28,13 @@
 * книга карточек — у платформы право редактирования: она туда пишет. Книга
   кухни закрыта для записи, и право редактирования на ней — предупреждение:
   лишнее право лучше снять;
-* папка фото — папка на общем диске, закрыта (доступ «Ограниченный»), в неё
-  можно добавлять файлы; кто имеет к ней доступ;
+* папка фото — это папка и не в корзине; где лежит: на «Моём диске»
+  владельца (так сейчас, решение 01.10: фото загружает сервисный аккаунт,
+  место — его; печатается, сколько занято и свободно) или на общем диске;
+  кому открыта: открыта по ссылке или всему домену на изменение — ошибка
+  (фото может удалить кто угодно), только на чтение — предупреждение (фото
+  видны всем, у кого есть ссылка); в неё можно добавлять файлы; кто имеет к
+  ней доступ;
 * пробная загрузка 1 КБ JPEG → скачивание → корзина: сначала с узким доступом
   ``drive.file``; если ему не хватает прав или он не видит папку — с
   ``drive``. Проба прошла только с ``drive``, а выставлен ``drive.file`` —
@@ -49,7 +54,7 @@ import codecs
 import json
 import sys
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Literal
 
@@ -67,7 +72,7 @@ from kitchen.sync.drive import (
     DriveError,
     DriveScope,
     authorized_session,
-    folder_is_closed,
+    folder_access,
 )
 from kitchen.sync.ownership import WRITE_OPEN
 
@@ -380,15 +385,16 @@ def _check_books(settings: Settings, report: Report) -> None:
 # Папка фото
 # ---------------------------------------------------------------------------
 def _check_folder(settings: Settings, email: str, report: Report) -> bool:
-    """Папка годится для фото? Открыта или не на общем диске — пробный файл туда
-    не кладётся: в открытой папке он стал бы виден по ссылке.
+    """Папка годится для фото? Не папка, в корзине или открыта на изменение —
+    пробный файл туда не кладётся: папку сначала чинят.
 
-    Сведения о папке и её доступах читает охват «только чтение сведений».
+    Сведения о папке, её доступах и месте аккаунта читает охват «только
+    чтение сведений».
     """
     report.section("ПАПКА ФОТО")
     folder_id = settings.drive_cards_folder_id
     if not folder_id:
-        report.fail("не задан DRIVE_CARDS_FOLDER_ID — id закрытой папки на общем диске")
+        report.fail("не задан DRIVE_CARDS_FOLDER_ID — id папки фото")
         return False
     client = _client(settings, INSPECT_SCOPE)
     try:
@@ -404,22 +410,24 @@ def _check_folder(settings: Settings, email: str, report: Report) -> bool:
         report.fail("DRIVE_CARDS_FOLDER_ID указывает не на папку")
         passed = False
     elif not folder.get("driveId"):
-        report.fail(
-            "папка не на общем диске: у сервисного аккаунта нет своего места, загрузка "
-            "упадёт. Нужна папка на общем диске"
-        )
-        passed = False
+        # Фото в такой папке принадлежат сервисному аккаунту и занимают его
+        # место (решение 01.10, живая проба прошла) — кончиться может оно.
+        report.ok("папка на «Моём диске» владельца; место — у сервисного аккаунта")
+        _account_space(client, report)
     else:
         report.ok("папка на общем диске")
     if folder.get("trashed") is True:
         report.fail("папка в корзине")
         passed = False
-    if folder_is_closed(people):
+    access = folder_access(people)
+    if access == "closed":
         report.ok("закрыта: доступ «Ограниченный», по ссылке посторонний не откроет")
+    elif access == "readable_by_link":
+        report.warn("фото видны всем, у кого есть ссылка")
     else:
         report.fail(
-            "открыта: доступна всем, у кого есть ссылка, или всему домену — "
-            "поставьте доступ «Ограниченный»"
+            "папка открыта на изменение всем по ссылке — фото может удалить кто угодно. "
+            "Оставьте по ссылке только «Читатель» или поставьте доступ «Ограниченный»"
         )
         passed = False
     # Сведения читаются охватом «только чтение», поэтому здесь — подсказка, а
@@ -439,6 +447,37 @@ def _check_folder(settings: Settings, email: str, report: Report) -> bool:
         mark = "  ← платформа" if person.get("emailAddress") == email else ""
         report.note(f"  · {role:18} {_who(person)}{mark}")
     return passed
+
+
+def _account_space(client: DriveClient, report: Report) -> None:
+    """Сколько места у сервисного аккаунта занято и свободно — только числа.
+
+    Подсказка, а не проверка: не узнали — решает пробная загрузка ниже."""
+    try:
+        quota = client.storage_quota()
+    except DriveError as error:
+        _stop_if_disabled(error)
+        report.note(f"место сервисного аккаунта узнать не удалось — {_why(error)}")
+        return
+    if quota.limit is None or quota.free is None:
+        report.note(f"место сервисного аккаунта: занято {_size(quota.usage)}, предела нет")
+        return
+    report.note(
+        f"место сервисного аккаунта: занято {_size(quota.usage)}, "
+        f"свободно {_size(quota.free)} из {_size(quota.limit)}"
+    )
+
+
+_UNITS = (("ГБ", 1024**3), ("МБ", 1024**2), ("КБ", 1024))
+
+
+def _size(count: int) -> str:
+    """Байты — для человека: «1,5 ГБ», «512 МБ», «0 байт». Без float: Decimal."""
+    for unit, size in _UNITS:
+        if count >= size:
+            value = (Decimal(count) / size).quantize(Decimal("0.1"), ROUND_HALF_UP)
+            return f"{value:f}".removesuffix(".0").replace(".", ",") + f" {unit}"
+    return f"{count} байт"
 
 
 def _who(person: dict[str, object]) -> str:

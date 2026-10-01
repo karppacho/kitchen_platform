@@ -255,9 +255,9 @@ def test_no_scope_works(setup: Setup, capsys: pytest.CaptureFixture[str]) -> Non
 def test_no_probe_into_a_folder_that_failed_checks(
     setup: Setup, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Папка открыта всем — пробный файл туда не кладётся: он стал бы виден
-    по ссылке."""
-    setup.drive.folder.permissions.append({"id": "d", "type": "domain", "role": "reader"})
+    """Папка открыта всему домену на изменение — пробный файл туда не кладётся:
+    папку сначала чинят."""
+    setup.drive.folder.permissions.append({"id": "d", "type": "domain", "role": "writer"})
 
     code, _ = setup.run(capsys)
 
@@ -276,30 +276,100 @@ def test_drive_api_disabled(setup: Setup, capsys: pytest.CaptureFixture[str]) ->
     assert len(setup.drive.sent) == 1
 
 
-def test_folder_not_on_shared_drive(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
-    setup.drive.folder.drive_id = None
-
-    code, out = setup.run(capsys)
-
-    assert code == 1
-    assert "не на общем диске" in out
-
-
-def test_open_folder_fails_and_is_not_fixed(
+def test_folder_on_my_drive_is_ok_with_account_space(
     setup: Setup, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Папка «доступна всем по ссылке» — ошибка. Исправляет человек: скрипт
-    доступ только читает."""
-    setup.drive.folder.permissions.append(
-        {"id": "anyoneWithLink", "type": "anyone", "role": "reader"}
-    )
+    """Папка на «Моём диске» владельца — не ошибка (решение 01.10): фото
+    загружает сервисный аккаунт, место — его. Сколько занято и сколько
+    свободно — числами; проба идёт как обычно."""
+    setup.drive.folder.drive_id = None
+    setup.drive.quota = {"limit": str(15 * 1024**3), "usage": str(1536 * 1024**2)}
+
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    assert "ОШИБКА" not in out
+    [line] = _lines(out, "OK", "«Моём диске»")
+    assert "папка на «Моём диске» владельца; место — у сервисного аккаунта" in line
+    [space] = _lines(out, "место сервисного аккаунта")
+    assert "занято 1,5 ГБ" in space
+    assert "свободно 13,5 ГБ из 15 ГБ" in space
+    assert [s for s in setup.drive.sent if s.path == "/drive/v3/about"]
+    [probe] = [f for f in setup.drive.files.values() if f.own]
+    assert probe.trashed is True
+
+
+def test_account_space_unknown_is_only_a_note(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Место узнать не вышло — это подсказка, а не ошибка: решает пробная загрузка."""
+    setup.drive.folder.drive_id = None
+    setup.drive.quota = {"usage": "много"}
+
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    assert "ВНИМАНИЕ" not in out
+    assert _lines(out, "место сервисного аккаунта узнать не удалось")
+
+
+def test_shared_drive_folder_does_not_ask_account_space(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """На общем диске фото занимают место диска, а не аккаунта: про место
+    аккаунта не спрашиваем."""
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    assert "папка на общем диске" in out
+    assert not [s for s in setup.drive.sent if s.path == "/drive/v3/about"]
+
+
+@pytest.mark.parametrize("kind", ["anyone", "domain"])
+@pytest.mark.parametrize("role", ["writer", "fileOrganizer", "organizer"])
+def test_folder_editable_by_link_fails_and_is_not_fixed(
+    setup: Setup, capsys: pytest.CaptureFixture[str], kind: str, role: str
+) -> None:
+    """Папка открыта по ссылке (или всему домену) на изменение — ошибка: фото
+    может удалить кто угодно. Пробы нет. Исправляет человек: скрипт доступ
+    только читает."""
+    setup.drive.folder.permissions.append({"id": "open", "type": kind, "role": role})
 
     code, out = setup.run(capsys)
 
     assert code == 1
-    assert "всем, у кого есть ссылка" in out
-    assert "Ограниченный" in out
+    [line] = _lines(out, "ОШИБКА", "папка открыта на изменение")
+    assert "папка открыта на изменение всем по ссылке — фото может удалить кто угодно" in line
+    assert [s for s in setup.drive.sent if s.method != "GET"] == []
     assert setup.drive.permission_writes() == []
+
+
+@pytest.mark.parametrize("kind", ["anyone", "domain"])
+@pytest.mark.parametrize("role", ["reader", "commenter"])
+def test_folder_readable_by_link_is_a_warning(
+    setup: Setup, capsys: pytest.CaptureFixture[str], kind: str, role: str
+) -> None:
+    """Доступ «все со ссылкой — читатель» (решение 01.10) — предупреждение: фото
+    видны всем, у кого ссылка, но удалить их нельзя. Код 0, проба идёт."""
+    setup.drive.folder.permissions.append({"id": "anyoneWithLink", "type": kind, "role": role})
+
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    assert "ОШИБКА" not in out
+    [line] = _lines(out, "ВНИМАНИЕ", "фото видны")
+    assert "фото видны всем, у кого есть ссылка" in line
+    [probe] = [f for f in setup.drive.files.values() if f.own]
+    assert probe.trashed is True
+    assert setup.drive.permission_writes() == []
+
+
+def test_closed_folder_is_ok(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    assert _lines(out, "OK", "закрыта: доступ «Ограниченный»")
+    assert "фото видны" not in out
 
 
 def test_who_has_access_is_listed(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:

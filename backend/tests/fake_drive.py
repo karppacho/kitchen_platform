@@ -12,9 +12,11 @@
   первая часть — JSON с метаданными, вторая — содержимое файла;
 * файл общего диска без ``supportsAllDrives=true`` для запроса не
   существует — 404 ``notFound``, как у Google;
-* файл без папки или в папке не на общем диске ложится в «Мой диск»
-  сервисного аккаунта, а своего места у него нет — 403
-  ``storageQuotaExceeded``;
+* файл в папке на «Моём диске» владельца ложится в неё и занимает место
+  сервисного аккаунта (живая проба 01.10); сколько места занято и какой
+  предел — ``about`` с ``storageQuota`` (:attr:`FakeDrive.quota`), числа
+  строками, как отдаёт Google; кончилось место — тест заказывает 403
+  ``storageQuotaExceeded`` через :meth:`FakeDrive.fail_next`;
 * метаданные загрузки — только ``name``, ``mimeType``, ``parents``,
   ``appProperties``; ``appProperties`` — не больше 124 байт на пару;
 * сколько байт файла клиент прочитал из ответа — :attr:`FakeDrive.served`;
@@ -44,6 +46,7 @@ from requests.adapters import BaseAdapter
 HOST = "www.googleapis.com"
 FILES = "/drive/v3/files"
 UPLOAD = "/upload/drive/v3/files"
+ABOUT = "/drive/v3/about"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 
@@ -66,10 +69,7 @@ _MESSAGES = {
         "Google Drive API has not been used in project 000000000000 before or it is "
         "disabled. Enable it by visiting the Google Cloud console, then retry."
     ),
-    "storageQuotaExceeded": (
-        "Service Accounts do not have storage quota. Leverage shared drives, "
-        "or use OAuth delegation instead."
-    ),
+    "storageQuotaExceeded": "The user's Drive storage quota has been exceeded.",
     "insufficientFilePermissions": "The user does not have sufficient permissions for this file.",
     "userRateLimitExceeded": "User rate limit exceeded.",
     "backendError": "Backend Error",
@@ -163,6 +163,8 @@ class FakeDrive(BaseAdapter):
         self.served = 0
         """Сколько байт содержимого файлов клиент реально прочитал из ответов."""
         self.only_own_files = only_own_files
+        self.quota: dict[str, object] = {"limit": str(15 * 1024**3), "usage": str(512 * 1024**2)}
+        """Место сервисного аккаунта — ``storageQuota`` из ``about``, байты строками."""
         self._failures: list[_Failure] = []
         self._drops: list[Exception] = []
         self._ids = itertools.count(1)
@@ -260,6 +262,11 @@ class FakeDrive(BaseAdapter):
     def _route(self, sent: Sent) -> tuple[int, bytes, str]:
         if sent.path == UPLOAD and sent.method == "POST":
             return _json(self._upload(sent))
+        if sent.path == ABOUT and sent.method == "GET":
+            about = {"kind": "drive#about", "storageQuota": dict(self.quota)}
+            fields = sent.params.get("fields")
+            assert fields, "about без fields Google не отдаёт — 400"
+            return _json(_select(about, fields))
         assert sent.path.startswith(FILES + "/"), f"фальшивка не моделирует {sent.path}"
         file_id, _, tail = sent.path[len(FILES) + 1 :].partition("/")
         file = self._lookup(sent, file_id)
@@ -324,8 +331,6 @@ class FakeDrive(BaseAdapter):
                 raise _Refusal(
                     403, "insufficientFilePermissions", _MESSAGES["insufficientFilePermissions"]
                 )
-        if drive_id is None:
-            raise _Refusal(403, "storageQuotaExceeded", _MESSAGES["storageQuotaExceeded"])
 
         properties = {str(k): str(v) for k, v in metadata.get("appProperties", {}).items()}
         for key, value in properties.items():

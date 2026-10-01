@@ -1,17 +1,23 @@
 """Фото карточек ингредиентов в Google Drive: загрузка, скачивание, корзина.
 
-Фото лежат только в закрытой папке на общем диске. Доступ к ним даёт папка:
-в ней участники — шеф и сервисный аккаунт платформы, больше никто. Поэтому
-клиент **никогда не трогает доступы** — ни одного запроса на запись в
-``/permissions``. Бот открывал каждое фото «всем, у кого есть ссылка», и
-ссылка из листа открывалась в любом браузере; здесь так нельзя.
+Фото лежат в папке фото из настроек — сейчас это прежняя папка бота на
+«Моём диске» её владельца (решение 01.10). Файлы загружает сервисный
+аккаунт платформы, и место они занимают его — своё, 15 ГБ: кончиться может
+оно. Папка может лежать и на общем диске — тогда место общего диска.
+
+Доступ к фото даёт папка, а не файл: файлы наследуют её доступы. Владелец
+поставил папке «все со ссылкой — читатель», чтобы ссылка из листа
+открывалась у шефа, как при боте. Сама платформа **никогда не трогает
+доступы** — ни одного запроса на запись в ``/permissions``: бот открывал
+доступ каждому фото сам, здесь так нельзя. Что папка не открыта на
+изменение, проверяет скрипт настройки (:func:`folder_access`).
 
 Запросы — REST Drive v3 обычной сессией requests (в бою — AuthorizedSession
 из google-auth, как у клиента таблиц), а не googleapiclient: тот ходит через
 httplib2 со своим устройством таймаутов. Каждый запрос:
 
-* с ``supportsAllDrives=true`` — без него файлы общего диска для запроса не
-  существуют, и Drive отвечает 404;
+* к файлам — с ``supportsAllDrives=true``: без него файлы общего диска для
+  запроса не существуют, и Drive отвечает 404;
 * с таймаутом ``(соединение, чтение)`` из настроек — у requests таймаута по
   умолчанию нет, и зависший запрос вешал бы ручку навсегда. Токен
   google-auth обновляет с таймаутом того же запроса (см. тест).
@@ -28,6 +34,7 @@ from __future__ import annotations
 
 import json
 import secrets
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 import requests
@@ -43,6 +50,7 @@ if TYPE_CHECKING:
 
 FILES_URL = "https://www.googleapis.com/drive/v3/files"
 UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
+ABOUT_URL = "https://www.googleapis.com/drive/v3/about"
 
 DriveScope = Literal["drive", "drive.file"]
 
@@ -65,18 +73,26 @@ API_DISABLED_REASONS = frozenset({"accessNotConfigured", "SERVICE_DISABLED"})
 
 DriveErrorKind = Literal["quota", "forbidden", "not_found", "unavailable", "bad_reply", "too_large"]
 
+FolderAccess = Literal["closed", "readable_by_link", "editable_by_link"]
+"""Кому открыта папка фото помимо конкретных людей и групп: никому; по ссылке
+(или всему домену) — только смотреть; по ссылке — и менять."""
+
 _RATE_REASONS = frozenset(
     {"userRateLimitExceeded", "rateLimitExceeded", "dailyLimitExceeded", "RATE_LIMIT_EXCEEDED"}
 )
 _OPEN_TO = frozenset({"anyone", "domain"})
+_LOOK_ONLY_ROLES = frozenset({"reader", "commenter"})
+"""Роли, с которыми файл не изменить и не удалить. Комментатор только
+оставляет заметки — для фото это то же чтение по ссылке."""
 _CHUNK = 64 * 1024
 _PERMISSION_PAGES = 20
 _METADATA_FIELDS = "id,name,mimeType,driveId,trashed,capabilities(canAddChildren,canEdit,canTrash)"
 _PERMISSION_FIELDS = "nextPageToken,permissions(id,type,role,emailAddress,domain,displayName)"
+_QUOTA_FIELDS = "storageQuota(limit,usage)"
 
 _QUOTA = (
-    "В Google Drive нет места для фото: либо кончилось место на общем диске, либо папка "
-    "для фото лежит не на общем диске — своего места у платформы нет. Сообщите администратору."
+    "В Google Drive нет места для фото: кончилось место у сервисного аккаунта платформы — "
+    "фото хранятся на нём. Сообщите администратору."
 )
 _API_DISABLED = (
     "Google Drive выключен для платформы: включите Drive API в проекте Google Cloud "
@@ -149,18 +165,49 @@ def explain_drive_error(status: int, body: bytes) -> DriveError:
     return error("bad_reply", _BAD_REPLY)
 
 
-def folder_is_closed(permissions: Iterable[Mapping[str, object]]) -> bool:
-    """Закрыта ли папка: нет доступа ни «всем, у кого есть ссылка», ни всему домену.
+def folder_access(permissions: Iterable[Mapping[str, object]]) -> FolderAccess:
+    """Кому открыта папка, кроме конкретных людей и групп.
 
     Доступ «Ограниченный» в интерфейсе Drive — это ровно отсутствие прав типа
-    ``anyone`` и ``domain``; остальные права — у конкретных людей и групп.
-    Файлы в папке наследуют её доступы, поэтому закрытая папка — закрытые фото.
+    ``anyone`` («все, у кого есть ссылка») и ``domain`` (весь домен);
+    остальные права — у конкретных людей и групп. Файлы в папке наследуют её
+    доступы.
+
+    * ``closed`` — таких прав нет: фото видят только участники;
+    * ``readable_by_link`` — все такие права «читатель» или «комментатор»:
+      фото видны всем, у кого есть ссылка, но удалить их нельзя;
+    * ``editable_by_link`` — хоть одно такое право шире: фото может удалить
+      кто угодно. Незнакомая или пустая роль — тоже сюда: безопаснее считать
+      её правом записи.
+
+    Платформа доступы только читает — выдаёт и снимает их человек.
     """
-    return not any(p.get("type") in _OPEN_TO for p in permissions)
+    roles = [p.get("role") for p in permissions if p.get("type") in _OPEN_TO]
+    if not roles:
+        return "closed"
+    if all(role in _LOOK_ONLY_ROLES for role in roles):
+        return "readable_by_link"
+    return "editable_by_link"
+
+
+@dataclass(frozen=True, slots=True)
+class StorageQuota:
+    """Место на Google Drive сервисного аккаунта, в байтах.
+
+    ``limit`` — ``None``: предела нет (так Drive отвечает безлимитным
+    аккаунтам), а не ноль."""
+
+    usage: int
+    limit: int | None
+
+    @property
+    def free(self) -> int | None:
+        """Сколько осталось; ``None`` — предела нет."""
+        return None if self.limit is None else max(0, self.limit - self.usage)
 
 
 class DriveClient:
-    """Файлы в закрытой папке фото.
+    """Файлы в папке фото.
 
     Сессия собирается при первом запросе: без ключа приложение стартует, а
     загрузка фото отвечает понятной ошибкой. ``connect`` — фабрика сессии:
@@ -184,8 +231,8 @@ class DriveClient:
     ) -> str:
         """Положить JPEG в папку фото одним запросом multipart; вернуть id файла.
 
-        Папка — только настроенная закрытая: файл без неё лёг бы в «Мой диск»
-        сервисного аккаунта, где нет ни места, ни шефа в доступе.
+        Папка — только настроенная папка фото: файл без неё лёг бы в корень
+        «Моего диска» сервисного аккаунта, куда у шефа доступа нет.
         ``app_properties`` — пометки платформы на файле (черновик, вид фото).
         """
         if not self.folder_id:
@@ -301,6 +348,24 @@ class DriveClient:
             params = {**params, "pageToken": token}
         raise DriveError("bad_reply", _BAD_REPLY)
 
+    def storage_quota(self) -> StorageQuota:
+        """Сколько места на Drive у сервисного аккаунта занято и какой предел.
+
+        Фото в папке на «Моём диске» владельца принадлежат сервисному аккаунту
+        и занимают его место. Только числа — ни адресов, ни имён. Только чтение.
+        """
+        reply = _json(
+            self._send("GET", ABOUT_URL, params={"fields": _QUOTA_FIELDS}, all_drives=False)
+        )
+        quota = reply.get("storageQuota")
+        if not isinstance(quota, dict):
+            raise DriveError("bad_reply", _BAD_REPLY)
+        limit = quota.get("limit")
+        return StorageQuota(
+            usage=_byte_count(quota.get("usage")),
+            limit=None if limit is None else _byte_count(limit),
+        )
+
     # --- внутреннее -----------------------------------------------------------
     def _send(
         self,
@@ -312,14 +377,19 @@ class DriveClient:
         json_body: dict[str, object] | None = None,
         headers: Mapping[str, str] | None = None,
         stream: bool = False,
+        all_drives: bool = True,
     ) -> requests.Response:
-        """Один запрос к Drive: общий диск виден, таймаут стоит, отказ объяснён."""
+        """Один запрос к Drive: общий диск виден, таймаут стоит, отказ объяснён.
+
+        ``all_drives=False`` — запрос не к файлам (``about``): параметра
+        ``supportsAllDrives`` у него нет, и незнакомое Google лучше не слать."""
         session = self._connected()
+        drives = {"supportsAllDrives": "true"} if all_drives else {}
         try:
             response = session.request(
                 method,
                 url,
-                params={**params, "supportsAllDrives": "true"},
+                params={**params, **drives},
                 data=data,
                 json=json_body,
                 headers=headers,
@@ -422,6 +492,13 @@ def _json(response: requests.Response) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise DriveError("bad_reply", _BAD_REPLY)
     return payload
+
+
+def _byte_count(value: object) -> int:
+    """Число байт из ответа Drive: int64 у Google приходит строкой цифр."""
+    if not isinstance(value, str) or not value.isascii() or not value.isdigit():
+        raise DriveError("bad_reply", _BAD_REPLY)
+    return int(value)
 
 
 def _reasons(body: bytes) -> list[str]:

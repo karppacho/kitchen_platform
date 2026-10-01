@@ -1,12 +1,12 @@
-"""Фото карточек в Google Drive: только закрытая папка общего диска.
+"""Фото карточек в Google Drive: папка фото — на «Моём диске» владельца или на общем диске.
 
 Клиент проверяется на фальшивом Drive, подменяющем транспорт requests: до
 него доходят те же байты, параметры и таймауты, что ушли бы в Google. Ни
 одного настоящего запроса.
 
-Главное, что здесь сторожится: платформа никогда не открывает доступ к фото
-(ни одного запроса на запись в ``/permissions``), каждый запрос видит общий
-диск (``supportsAllDrives=true``) и ограничен таймаутом.
+Главное, что здесь сторожится: платформа никогда не выдаёт доступ к фото
+(ни одного запроса на запись в ``/permissions``), каждый запрос к файлам
+видит и общий диск (``supportsAllDrives=true``), и каждый ограничен таймаутом.
 """
 
 from __future__ import annotations
@@ -28,10 +28,11 @@ from kitchen.sync.drive import (
     SCOPES,
     DriveClient,
     DriveError,
+    StorageQuota,
     authorized_session,
     drive_from_settings,
     explain_drive_error,
-    folder_is_closed,
+    folder_access,
 )
 from tests.fake_drive import (
     CHEF,
@@ -79,8 +80,8 @@ def _every_call(fake: FakeDrive) -> DriveClient:
 def test_upload_is_multipart_with_parents_properties_and_name() -> None:
     """Одним запросом multipart: метаданные (имя, папка, appProperties) и сам JPEG.
 
-    Папка — только настроенная закрытая: файл, созданный без неё, лёг бы в
-    «Мой диск» сервисного аккаунта, а у того нет ни места, ни шефа в доступе.
+    Папка — только настроенная папка фото: файл, созданный без неё, лёг бы в
+    корень «Моего диска» сервисного аккаунта, куда у шефа доступа нет.
     """
     fake = FakeDrive()
 
@@ -138,8 +139,8 @@ def test_never_writes_permissions() -> None:
 
 
 def test_every_request_supports_all_drives() -> None:
-    """Папка — на общем диске. Без ``supportsAllDrives=true`` Drive отвечает
-    «файл не найден» на всё, что там лежит."""
+    """Папка может лежать и на общем диске. Без ``supportsAllDrives=true`` Drive
+    отвечает «файл не найден» на всё, что там лежит."""
     fake = FakeDrive()
 
     _every_call(fake)
@@ -232,9 +233,9 @@ def test_upload_without_folder_setting_refused_without_request() -> None:
 # Отказы Google — понятным текстом
 # ---------------------------------------------------------------------------
 def test_storage_quota_is_quota_with_clear_text() -> None:
-    """403 ``storageQuotaExceeded`` — не «нет прав», а «нет места»; так же Drive
-    отвечает, когда папка не на общем диске: своего места у сервисного
-    аккаунта нет."""
+    """403 ``storageQuotaExceeded`` — не «нет прав», а «нет места». Фото в папке
+    на «Моём диске» владельца принадлежат сервисному аккаунту и занимают его
+    место: кончиться может оно, о нём и текст."""
     fake = FakeDrive()
     fake.fail_next(403, "storageQuotaExceeded")
 
@@ -245,17 +246,64 @@ def test_storage_quota_is_quota_with_clear_text() -> None:
     assert caught.value.status == 403
     assert caught.value.reason == "storageQuotaExceeded"
     assert "нет места" in str(caught.value)
-    assert "общем диске" in str(caught.value)
+    assert "сервисного аккаунта" in str(caught.value)
+    assert "своего места у платформы нет" not in str(caught.value)
+    assert "Сообщите администратору" in str(caught.value)
 
 
-def test_folder_outside_shared_drive_is_quota() -> None:
+def test_folder_on_my_drive_takes_the_account_space() -> None:
+    """Папка на «Моём диске» владельца — не ошибка: файл ложится в неё и
+    занимает место сервисного аккаунта (живая проба 01.10)."""
     fake = FakeDrive()
     fake.folder.drive_id = None
 
-    with pytest.raises(DriveError) as caught:
-        _upload(_client(fake))
+    file_id = _upload(_client(fake))
 
-    assert caught.value.kind == "quota"
+    stored = fake.files[file_id]
+    assert stored.parents == [FOLDER_ID]
+    assert stored.drive_id is None
+    assert stored.content == JPEG
+
+
+def test_storage_quota_numbers() -> None:
+    """Место сервисного аккаунта — только числа: занято и предел, байтами.
+    Запрос — чтение ``about``, с таймаутом; общий диск ему ни к чему."""
+    fake = FakeDrive()
+    fake.quota = {"limit": str(15 * 1024**3), "usage": "536870912", "usageInDrive": "1"}
+
+    quota = _client(fake).storage_quota()
+
+    assert quota == StorageQuota(usage=512 * 1024**2, limit=15 * 1024**3)
+    assert quota.free == 15 * 1024**3 - 512 * 1024**2
+    [sent] = fake.sent
+    assert (sent.method, sent.path) == ("GET", "/drive/v3/about")
+    assert sent.params == {"fields": "storageQuota(limit,usage)"}
+    assert sent.timeout == TIMEOUT
+
+
+def test_storage_quota_without_limit() -> None:
+    """Предела нет (так Drive отвечает безлимитным аккаунтам) — ``None``, а не ноль."""
+    fake = FakeDrive()
+    fake.quota = {"usage": "10"}
+
+    quota = _client(fake).storage_quota()
+
+    assert quota == StorageQuota(usage=10, limit=None)
+    assert quota.free is None
+
+
+@pytest.mark.parametrize(
+    "quota",
+    [{}, {"usage": "много"}, {"usage": "-1"}, {"usage": "1", "limit": "1.5"}, {"usage": 1}],
+)
+def test_storage_quota_that_is_not_numbers_is_bad_reply(quota: dict[str, object]) -> None:
+    fake = FakeDrive()
+    fake.quota = quota
+
+    with pytest.raises(DriveError) as caught:
+        _client(fake).storage_quota()
+
+    assert caught.value.kind == "bad_reply"
 
 
 def test_drive_api_disabled_says_enable_it() -> None:
@@ -516,16 +564,35 @@ def test_folder_metadata_and_permissions() -> None:
     assert {p.get("emailAddress") for p in permissions} >= {ROBOT, CHEF}
 
 
-def test_folder_is_closed() -> None:
-    """Закрыта — ни «всем, у кого есть ссылка», ни «всем в домене»."""
-    people = [
-        {"type": "user", "role": "fileOrganizer", "emailAddress": ROBOT},
-        {"type": "group", "role": "writer", "emailAddress": "kitchen@example.com"},
-    ]
+PEOPLE = [
+    {"type": "user", "role": "fileOrganizer", "emailAddress": ROBOT},
+    {"type": "group", "role": "writer", "emailAddress": "kitchen@example.com"},
+]
+"""Права конкретных людей и групп — даже на запись — папку не открывают."""
 
-    assert folder_is_closed(people) is True
-    assert folder_is_closed([*people, {"type": "anyone", "role": "reader"}]) is False
-    assert folder_is_closed([*people, {"type": "domain", "role": "reader"}]) is False
+
+def test_folder_closed_without_link_or_domain_access() -> None:
+    """Закрыта — ни «всем, у кого есть ссылка», ни «всем в домене»."""
+    assert folder_access(PEOPLE) == "closed"
+    assert folder_access([]) == "closed"
+
+
+@pytest.mark.parametrize("kind", ["anyone", "domain"])
+@pytest.mark.parametrize("role", ["reader", "commenter"])
+def test_folder_readable_by_link(kind: str, role: str) -> None:
+    """По ссылке — только смотреть (комментарий файл не меняет и не удаляет):
+    фото видны всем, у кого ссылка, но удалить их нельзя."""
+    assert folder_access([*PEOPLE, {"type": kind, "role": role}]) == "readable_by_link"
+
+
+@pytest.mark.parametrize("kind", ["anyone", "domain"])
+@pytest.mark.parametrize("role", ["writer", "fileOrganizer", "organizer", "owner", "", None])
+def test_folder_editable_by_link(kind: str, role: str | None) -> None:
+    """По ссылке можно менять — фото может удалить кто угодно. Незнакомая или
+    пустая роль — тоже сюда: безопаснее считать её правом записи."""
+    reader = {"type": "anyone", "role": "reader"}
+
+    assert folder_access([*PEOPLE, reader, {"type": kind, "role": role}]) == "editable_by_link"
 
 
 # ---------------------------------------------------------------------------
