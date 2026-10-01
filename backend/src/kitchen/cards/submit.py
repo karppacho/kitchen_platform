@@ -276,9 +276,12 @@ def _not_claimed(
     # Записано раньше: писатель ответит из журнала, без единого запроса к Google.
     result = _append(session, writer, data, owner_id, draft_id)
     if status == store.ACTIVE:
-        log.warning(
-            "черновик %s: прежняя отправка записала строку %s (журнал №%s), но не отметила "
-            "черновик — довожу до конца",
+        # Не WARNING: так же выглядит и штатное двойное нажатие — первый
+        # запрос записал и вот-вот отметит черновик сам. Отметит первым любой
+        # из двух, второй найдёт черновик отправленным той же строкой.
+        log.info(
+            "черновик %s: строка %s уже записана (журнал №%s), черновик ещё не отмечен "
+            "отправленным — отмечаю (второе нажатие во время отправки или прерванная отправка)",
             draft_id,
             result.row,
             result.journal_id,
@@ -327,13 +330,25 @@ def _append(
 def _database_trouble(session: Session, draft_id: uuid.UUID, error: SQLAlchemyError) -> CardsError:
     """База не ответила, пока писатель работал. Что сказать повару, решает
     журнал: запись по ключу уже заведена — она могла лечь, и повтор её
-    перечитает; нет — отказ на входе в очередь, в лист ничего не ушло."""
+    перечитает; нет — отказ на входе в очередь, в лист ничего не ушло.
+
+    Журнал и сам не читается (база лежит) — легла ли строка, неизвестно:
+    «нажмите ещё раз», как при заведённой записи. Повтор ничего не теряет —
+    он сначала перечитает журнал и строку, второй не напишет; а «сервер не
+    может записать» могло бы оказаться неправдой про уже легшую карточку."""
     try:
         written = store.open_sheet_write(session, submit_request_key(draft_id))
         session.rollback()
-    except SQLAlchemyError:
+    except SQLAlchemyError as unreadable:
         session.rollback()
-        written = None
+        log.error(
+            "черновик %s: база не ответила посреди отправки, и журнал записей не прочитан — "
+            "исход решит повтор: %s; журнал: %s",
+            draft_id,
+            _first_line(error),
+            _first_line(unreadable),
+        )
+        return SubmitFailedError(UNCONFIRMED)
     if written in (PENDING, VERIFIED):
         log.error(
             "черновик %s: база не ответила посреди записи (журнал — %s), исход решит повтор — %s",
@@ -376,13 +391,28 @@ def _mark_submitted(session: Session, draft_id: uuid.UUID, result: AppendResult)
             f"Карточка записана в строку {result.row}, но сервер не успел это запомнить — "
             "нажмите «Отправить» ещё раз: второй строки не будет."
         ) from None
-    if not marked:
+    if not marked and not _marked_by_twin(session, draft_id, result):
         log.error(
             "черновик %s закрыли, пока шла запись, — карточка всё равно в строке %s (журнал №%s)",
             draft_id,
             result.row,
             result.journal_id,
         )
+
+
+def _marked_by_twin(session: Session, draft_id: uuid.UUID, result: AppendResult) -> bool:
+    """Черновик уже отмечен отправленным этой же строкой и записью журнала —
+    его отметил второй запрос того же двойного нажатия. Это не ошибка.
+
+    Не прочитали (база не ответила) — считаем, что не отмечен: лучше лишний
+    ERROR, чем пропущенный."""
+    try:
+        marked = store.submitted_as(session, draft_id)
+        session.rollback()
+    except SQLAlchemyError:
+        session.rollback()
+        return False
+    return marked == (result.row, result.journal_id)
 
 
 def _release(session: Session, draft_id: uuid.UUID) -> None:

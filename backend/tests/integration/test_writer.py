@@ -477,6 +477,25 @@ def test_lock_alive_checks_the_lock_itself(sessions) -> None:
         assert lock.alive()
 
 
+def test_lock_alive_with_negative_key(sessions) -> None:
+    """Ключ bigint бывает и отрицательным: старшая половина тогда — число со
+    знаком (−5), а `classid` у Postgres — oid без знака (2³² − 5). Живость
+    обязана узнать и такой замок, а чужой с той же младшей половиной — нет."""
+    key = (-5 << 32) | 7
+    with sessions() as session:
+        session.begin()
+        session.execute(text("select pg_advisory_xact_lock(:key)"), {"key": key})
+
+        assert HeldLock(session, key).alive()
+        assert not HeldLock(session, (5 << 32) | 7).alive(), "та же половина без знака — чужой"
+        assert not HeldLock(session, (-6 << 32) | 7).alive(), "другая старшая половина"
+        session.rollback()
+
+    journal = DbJournal(sessions)
+    with journal.writers_lock(key, timedelta(seconds=1), timedelta(minutes=1)) as lock:
+        assert lock.alive()
+
+
 def test_unconfirmed_attempts_on_postgres(sessions) -> None:
     """Неподтверждённые попытки отправки — с их отправкой, новые первыми;
     прочие неудачи и чужие ключи — мимо."""

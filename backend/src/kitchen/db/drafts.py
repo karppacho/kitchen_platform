@@ -225,9 +225,23 @@ def end_submit(session: Session, draft_id: uuid.UUID) -> None:
     )
 
 
+def submitted_as(session: Session, draft_id: uuid.UUID) -> tuple[int, int] | None:
+    """Строка листа и запись журнала отправленного черновика; ``None`` — черновик
+    не отправлен (активен, сброшен или его нет)."""
+    found = session.execute(
+        select(models.CardDraft.submitted_row, models.CardDraft.sheet_write_id).where(
+            models.CardDraft.id == draft_id, models.CardDraft.status == SUBMITTED
+        )
+    ).first()
+    if found is None or found[0] is None or found[1] is None:
+        return None
+    return int(found[0]), int(found[1])
+
+
 def mark_submitted(session: Session, draft_id: uuid.UUID, *, row: int, sheet_write_id: int) -> bool:
     """Черновик отправлен: строка в листе и запись журнала. ``False`` —
-    черновик уже не активен (его закрыли, пока шла запись)."""
+    черновик уже не активен: его закрыли, пока шла запись, или его уже отметил
+    второй запрос того же двойного нажатия (:func:`submitted_as` различит)."""
     result = session.execute(
         update(models.CardDraft)
         .where(models.CardDraft.id == draft_id, models.CardDraft.status == ACTIVE)

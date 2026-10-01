@@ -313,6 +313,34 @@ def test_key_in_reason_is_hidden(message: str, secret: str) -> None:
     assert "Incorrect API key provided" in described or "Authorization" in described
 
 
+_NUL, _ESC, _ZWSP = chr(0), chr(0x1B), "\N{ZERO WIDTH SPACE}"
+
+
+@pytest.mark.parametrize(
+    "torn",
+    [
+        f"{KEY[:6]}{_NUL}{KEY[6:14]}{_ZWSP}{KEY[14:]}",
+        f"{KEY[:3]}{_ESC}{KEY[3:]}",
+        f"{_LOOKALIKE[:9]}{_ZWSP}{_LOOKALIKE[9:]}",
+        f"Bearer{_NUL} {_BEARER[:15]}{_ZWSP}{_BEARER[15:]}",
+    ],
+    ids=["key-nul-zwsp", "key-esc", "lookalike-zwsp", "bearer-nul-zwsp"],
+)
+def test_key_torn_by_invisible_characters_is_hidden(torn: str) -> None:
+    """Ключ, разорванный NUL, ESC или пробелом нулевой ширины, фильтр
+    печатаемых символов склеивает обратно. Маска — после фильтра: в журнал и
+    в ответ ключ не попадает и склеенным."""
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(refusal(401, f"Incorrect API key provided: {torn}")))
+
+    described = caught.value.describe()
+    for secret in (KEY, _LOOKALIKE, _BEARER):
+        assert secret not in described
+        assert secret not in caught.value.detail
+    assert "Incorrect API key provided" in caught.value.detail
+    assert all(char.isprintable() for char in described), repr(described)
+
+
 def test_json_mode_drop_is_known() -> None:
     """Скрипт проверки говорит «отклонил и в режиме JSON, и без него» только
     тогда, когда так и было."""

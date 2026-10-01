@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 import uuid
@@ -735,6 +736,102 @@ def test_journal_trouble_after_the_write_asks_to_repeat(
     assert again.status_code == 200, again.text
     assert (again.json()["row"], again.json()["already_written"]) == (FREE_ROW, True)
     assert writes(sheets) == 1
+
+
+def test_unreadable_journal_after_database_trouble_asks_to_repeat(
+    people: None,
+    drive: FakeDrive,
+    sheets: FakeSheetsClient,
+    sessions: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """База не ответила посреди записи, и журнал записей тоже не прочитать —
+    легла ли строка, неизвестно. Повару не «сервер не может записать», а
+    «нажмите ещё раз»: повтор перечитает строку и второй не напишет."""
+
+    class JournalFailsOnce(DbJournal):
+        failed = False
+
+        def finish(self, write_id: int, **changes: object) -> None:  # type: ignore[override]
+            if not JournalFailsOnce.failed:
+                JournalFailsOnce.failed = True
+                raise OperationalError("update sheet_writes", {}, Exception("connection lost"))
+            super().finish(write_id, **changes)  # type: ignore[arg-type]
+
+    client = make_client(
+        drive,
+        sheets,
+        sessions,
+        writer=lambda: CardSheetWriter(sheets, CARDS, JournalFailsOnce(sessions)),
+    )
+    draft = ready(client)
+    real_read = draft_store.open_sheet_write
+
+    monkeypatch.setattr(draft_store, "open_sheet_write", _database_gone)
+    first = submit(client, draft["id"])
+    monkeypatch.setattr(draft_store, "open_sheet_write", real_read)
+    again = submit(client, draft["id"])
+
+    assert first.status_code == 502
+    assert first.json() == {"detail": UNCONFIRMED}
+    assert again.status_code == 200, again.text
+    assert (again.json()["row"], again.json()["already_written"]) == (FREE_ROW, True)
+    assert writes(sheets) == 1
+
+
+class WriterThenMeanwhile:
+    """Писатель, после записи которого — до отметки черновика — что-то
+    происходит, один раз: так второе нажатие приходит между ``verified`` в
+    журнале и «черновик отправлен»."""
+
+    def __init__(self, writer: CardSheetWriter, meanwhile: list[Callable[[], None]]) -> None:
+        self._writer = writer
+        self._meanwhile = meanwhile
+
+    def append(self, values: object, **keys: object) -> object:
+        result = self._writer.append(values, **keys)  # type: ignore[arg-type]
+        if self._meanwhile:
+            self._meanwhile.pop()()
+        return result
+
+
+def test_second_press_between_write_and_mark_is_not_an_error(
+    people: None,
+    drive: FakeDrive,
+    sheets: FakeSheetsClient,
+    sessions: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Второе нажатие пришло, когда строка уже легла (журнал ``verified``), а
+    черновик ещё не отмечен. Второй запрос доводит отправку из журнала, первый
+    находит черновик уже отправленным той же строкой — это не ошибка: ни
+    ERROR, ни WARNING в журнале сервера, одна строка в листе."""
+    during: list[httpx.Response] = []
+    meanwhile: list[Callable[[], None]] = []
+    client = make_client(
+        drive,
+        sheets,
+        sessions,
+        writer=lambda: WriterThenMeanwhile(
+            CardSheetWriter(sheets, CARDS, DbJournal(sessions)), meanwhile
+        ),
+    )
+    draft = ready(client)
+    meanwhile.append(lambda: during.append(submit(client, draft["id"])))
+
+    with caplog.at_level(logging.INFO, logger="kitchen"):
+        first = submit(client, draft["id"])
+
+    assert first.status_code == 200, first.text
+    [second] = during
+    assert second.status_code == 200, second.text
+    assert first.json()["row"] == second.json()["row"] == FREE_ROW
+    assert second.json()["already_written"] is True
+    assert writes(sheets) == 1
+    loud = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert loud == []
+    record = draft_row(sessions, draft["id"])
+    assert (record.status, record.submitted_row) == ("submitted", FREE_ROW)
 
 
 def test_submit_waits_for_running_recognition(

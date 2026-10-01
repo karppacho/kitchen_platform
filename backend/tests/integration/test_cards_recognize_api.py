@@ -31,7 +31,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select, text, update
 
-from kitchen.cards.recognize import STALE_AFTER
+from kitchen.cards.recognize import RESTARTED, STALE_AFTER
 from kitchen.config import Settings
 from kitchen.db import models
 from kitchen.domain.cards import check_nutrients, label_fields_from_extraction
@@ -697,6 +697,45 @@ def test_result_for_changed_label_clears_its_own_running(
     record = draft_row(sessions, draft["id"])
     assert (record.recognition_status, record.recognition_started_at) == (None, None)
     assert record.label_name == ""
+
+
+@pytest.mark.parametrize("new_run", ["running", "done"])
+def test_result_of_a_run_taken_over_by_a_new_one_does_not_land(
+    people: None, drive: FakeDrive, sessions: sessionmaker[Session], new_run: str
+) -> None:
+    """Запуск завис дольше предела, и новый запуск по той же этикетке его
+    перехватил. Этикетку никто не менял — «Фото этикетки заменили» было бы
+    неправдой: у ответа свой текст. Итог старого запуска не ложится, «идёт»
+    или итог нового остаются как есть."""
+
+    def model(request: httpx.Request) -> httpx.Response:
+        with sessions.begin() as session:
+            session.execute(
+                update(models.CardDraft)
+                .where(models.CardDraft.status == "active")
+                .values(
+                    recognition_status=new_run,
+                    recognition_started_at=func.now() + timedelta(seconds=1),
+                    label_name="Итог нового запуска" if new_run == "done" else "",
+                )
+            )
+        return answer()
+
+    client = make_client(drive, httpx.MockTransport(model))
+    draft = labelled(client)
+
+    reply = recognize(client, draft["id"])
+
+    assert reply.status_code == 409
+    assert reply.json() == {"detail": RESTARTED}
+    assert "заменили" not in RESTARTED and "убрали" not in RESTARTED
+    record = draft_row(sessions, draft["id"])
+    assert record.recognition_status == new_run
+    assert record.recognition_started_at is not None
+    assert record.label_name == ("Итог нового запуска" if new_run == "done" else "")
+    assert record.protein is None, "итог старого запуска не лёг"
+    [call] = journal(sessions)
+    assert call.ok is True, "деньги за вызов — в журнале"
 
 
 def test_recognition_waits_while_card_is_being_sent(

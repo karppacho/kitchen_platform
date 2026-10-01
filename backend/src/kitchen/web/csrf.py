@@ -113,15 +113,17 @@ class CsrfMiddleware:
             reason = self.rejection_reason(request)
             if reason is not None:
                 # Только нужное для разбора: ни кук, ни токенов, ни прочих
-                # заголовков. Путь и Origin присылает клиент — через %r, чтобы
-                # перевод строки в них не подделал строку журнала.
+                # заголовков. Путь, Origin и Host (из него — свой адрес)
+                # присылает клиент: через %r, чтобы перевод строки в них не
+                # подделал строку журнала, и обрезанными — чтобы огромный
+                # заголовок не раздул журнал.
                 log.warning(
-                    "запрос отклонён защитой от подделки: %s %r — %s; Origin %r, свой адрес %s",
+                    "запрос отклонён защитой от подделки: %s %r — %s; Origin %r, свой адрес %r",
                     scope["method"],
-                    request.url.path,
+                    _clip(request.url.path),
                     reason,
-                    request.headers.get("origin"),
-                    _show(own_origin(request)),
+                    _clip(request.headers.get("origin")),
+                    _clip(_show(own_origin(request))),
                 )
                 response = JSONResponse({"detail": REJECTED}, status_code=403)
                 await response(scope, receive, send)
@@ -156,3 +158,15 @@ def _show(origin: Origin | None) -> str:
         return "не определён"
     scheme, host, port = origin
     return f"{scheme}://{host}:{port}"
+
+
+_LOG_FIELD_LIMIT = 200
+"""Сколько знаков присланного клиентом поля идёт в журнал. Для разбора
+хватает с запасом: адрес и путь платформы короче."""
+
+
+def _clip(value: str | None) -> str | None:
+    """Поле для журнала — не длиннее :data:`_LOG_FIELD_LIMIT` знаков и отметка, что обрезано."""
+    if value is None or len(value) <= _LOG_FIELD_LIMIT:
+        return value
+    return value[:_LOG_FIELD_LIMIT] + "…"

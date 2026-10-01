@@ -27,6 +27,7 @@ import requests
 from kitchen.config import Settings
 from kitchen.db.journal import (
     FAILED,
+    LAYOUT_UNCONFIRMED,
     PENDING,
     ROLLED_BACK,
     VERIFIED,
@@ -1019,6 +1020,96 @@ def test_row_without_journal_trail_is_taken_as_written() -> None:
     assert rig.writes() == []
 
 
+def test_two_rows_with_our_label_link_are_not_silent(caplog: pytest.LogCaptureFixture) -> None:
+    """Ссылка этикетки этой отправки — в двух строках листа: дубль карточки у
+    шефа. Сверяется верхняя, но молча это не проходит: номера всех строк — в
+    пометке журнала и в ERROR лога."""
+    ours = row(
+        SPEC,
+        category="Соусы",
+        name="Соус Барбекю",
+        supplier="Север",
+        label_url=drive_view_url("lbl1"),
+        approval_status=APPROVED,
+    )
+    other = row(SPEC, name="Горчица", label_url=drive_view_url("g1"))
+    rig = _rig((*EXISTING, ours, other, ours))
+
+    with caplog.at_level(logging.INFO, logger=LOG):
+        result = rig.append()
+
+    assert (result.row, result.already_written) == (6, True)
+    record = rig.journal.only()
+    assert record.row == 6
+    assert record.note is not None
+    assert "ссылка этикетки этой отправки в нескольких строках листа: 6, 8" in record.note
+    [error] = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert "6, 8" in error
+    assert f"журнал №{record.id}" in error
+    assert rig.writes() == []
+
+
+def _unconfirmed(rig: Rig, row_number: int, **changes: object) -> int:
+    """Ещё одна неподтверждённая попытка той же отправки — с отправкой первой,
+    поправленной на ``changes``. Так журнал выглядит после двух нажатий, обе
+    записи которых шеф сдвинул в окне записи."""
+    first = rig.journal.records[0]
+    attempt = rig.journal.start(
+        NewWrite(
+            book="ingredient_cards",
+            sheet="Лист1",
+            row=row_number,
+            request_key=KEY,
+            actor_id=None,
+            before={"rows": {}},
+            values={**first.values, **changes},
+        )
+    )
+    rig.journal.finish(attempt, status=FAILED, error="сдвиг", note=LAYOUT_UNCONFIRMED)
+    return attempt
+
+
+def test_landed_attempt_is_the_one_closest_to_the_row() -> None:
+    """Две неподтверждённые попытки с той же ссылкой этикетки и разной
+    отправкой, а в листе лежит первая. Легшая — та, что меньше всех расходится
+    со строкой, а не новейшая: иначе правка повара во второй попытке выглядела
+    бы записанной, а первая версия в листе — правкой шефа."""
+    rig = _rig()
+    rig.book.chef_inserts_rows("Лист1", above=5, moment="before_write")
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    second = _unconfirmed(rig, 7, fat=13.5)
+    edited = _values()
+    edited["fat"] = Decimal("13.5")
+
+    result = rig.append(edited)
+
+    assert (result.row, result.already_written, result.not_written) == (6, True, ("fat",))
+    assert result.shifted == UnconfirmedWrite(id=second, row=7), "показать шефу — новейшую"
+    found = rig.journal.records[-1]
+    assert found.values["fat"] == 12.5, "в values — отправка легшей, первой попытки"
+    assert found.note is not None
+    assert "с тех пор в листе иначе" not in found.note
+    assert "в лист не записаны правки повара: I" in found.note
+
+
+def test_equally_close_attempts_take_the_newest() -> None:
+    """Обе попытки расходятся со строкой одинаково (жиры в листе поправил шеф) —
+    легшей считается новейшая."""
+    rig = _rig()
+    rig.book.chef_inserts_rows("Лист1", above=5, moment="before_write")
+    with pytest.raises(WriteNotConfirmedError):
+        rig.append()
+    _unconfirmed(rig, 7, fat=14.5)
+    rig.book.chef_edits_cell("'Лист1'!I6", "11,5", moment="now")
+
+    rig.append()
+
+    found = rig.journal.records[-1]
+    assert found.values["fat"] == 14.5
+    assert found.note is not None and "с тех пор в листе иначе: I" in found.note
+
+
 def test_short_path_without_reread_row_compares_with_written() -> None:
     """Запись verified без перечитанной строки в after (так писал бы журнал
     до этого правила): короткий путь считает строкой записанное."""
@@ -1357,9 +1448,10 @@ def test_only_the_writer_writes_to_sheets() -> None:
     (сверено по ``Spreadsheet``, ``Worksheet``, ``Client`` и ``HTTPClient``).
     Не ловятся методы с общими именами: ``update``, ``clear``, ``format``,
     ``sort``, ``resize``, ``freeze``, ``hide``, ``show``, ``copy``,
-    ``create``, ``share``, ``duplicate`` — так же зовутся методы словаря,
-    множества, списка и строки, и храповик краснел бы на каждом
-    ``dict.update``.
+    ``create``, ``share``, ``duplicate``, а также ``HTTPClient.request`` —
+    так же зовутся методы словаря, множества, списка, строки и HTTP-сессий
+    (``requests``, ``httpx``), и храповик краснел бы на каждом
+    ``dict.update`` и каждом запросе к Drive или polza.ai.
     """
     found: dict[str, set[str]] = {}
     for path in SRC.rglob("*.py"):

@@ -424,14 +424,20 @@ def _reason(body: str, secret: str) -> str:
     — как отдаёт шлюз), иначе само тело; пробелы схлопнуты, не длиннее
     200 знаков. Ключ платформы и всё, что похоже на ключ, вычёркивается:
     шлюзы любят повторять его в тексте ошибки.
+
+    Порядок важен: сначала — только печатаемые символы, потом маска. Ключ,
+    разорванный NUL, ESC или пробелом нулевой ширины, маска не узнала бы, а
+    фильтр затем склеил бы его — и в журнал он лёг бы целым.
     """
     text = body[:_REASON_SOURCE_LIMIT]
     try:
         payload: object = json.loads(text)
     except (ValueError, RecursionError):
         payload = text
-    found = (_message(payload, depth=0) or text).replace(secret, "***")
-    cleaned = printable_line(_SECRET_LIKE.sub(_masked, found))
+    found = printable_line(_message(payload, depth=0) or text)
+    if secret:
+        found = found.replace(secret, "***")
+    cleaned = _SECRET_LIKE.sub(_masked, found)
     if len(cleaned) <= _REASON_LIMIT:
         return cleaned
     return cleaned[: _REASON_LIMIT - 1].rstrip() + "…"

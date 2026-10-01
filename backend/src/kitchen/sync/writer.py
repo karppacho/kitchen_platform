@@ -674,7 +674,7 @@ class CardSheetWriter:
                 before={"rows": {str(ours[0]): _snapshot(raw, ours[0])}},
                 values=dict(sent),
             )
-            return self._found(book, raw, write, sent, attempts, shifted)
+            return self._found(book, raw, write, sent, attempts, shifted, ours)
         name = str(sent[_B.field])
         conflicts = name_conflicts(raw, name)
         if conflicts:
@@ -743,21 +743,25 @@ class CardSheetWriter:
         sent: Mapping[str, SentValue],
         attempts: Sequence[SentWrite],
         shifted: UnconfirmedWrite | None,
+        rows: Sequence[int],
     ) -> AppendResult:
         """Строка с нашей ссылкой этикетки уже в листе — прежняя попытка.
 
         Писать не надо. Но строку сверяем: после сбоя черновик снова открыт,
         повар мог его поправить, а шеф — строку. Что записано на самом деле —
-        отправка легшей попытки: последней неподтверждённой попытки этой
-        отправки с той же ссылкой этикетки (журнал). Правки повара, не
+        отправка легшей попытки (:func:`_landed_attempt`). Правки повара, не
         попавшие в лист, — в ответе; правки шефа — только в журнале. Запись
         журнала хранит в ``values`` записанное, а не нынешнюю отправку: иначе
         следующий повтор коротким путём сверял бы с тем, чего в листе нет.
+
+        ``rows`` — все строки листа с этой ссылкой этикетки, сверху вниз;
+        сверяется верхняя. Больше одной — дубль карточки у шефа: номера всех
+        — в пометке журнала и в ERROR лога, молча это не проходит.
         """
         row = write.row
         cells = _google("перечитать строку прежней попытки", lambda: _row_values(book, row))
         label = sent[_P.field]
-        landing = next((a for a in attempts if a.values.get(_P.field) == label), None)
+        landing = _landed_attempt([a for a in attempts if a.values.get(_P.field) == label], cells)
         if landing is not None:
             landed = _sent_from(landing.values, landing.id)
             chefs = _differing(landed, cells)
@@ -770,8 +774,13 @@ class CardSheetWriter:
             chefs = ()
         cooks = _cook_edits(sent, landed, cells)
         line = _snapshot(raw, row)
+        twins = ", ".join(str(number) for number in rows) if len(rows) > 1 else ""
         note = _joined(
             PRIOR_ATTEMPT,
+            f"ссылка этикетки этой отправки в нескольких строках листа: {twins} — сверена "
+            f"строка {row}; остальные — дубль карточки, покажите шефу"
+            if twins
+            else "",
             _chef_note(chefs),
             f"в лист не записаны правки повара: {_letters(_columns(cooks))}" if cooks else "",
             "за записанное принята строка листа: отправки попытки в журнале нет"
@@ -790,6 +799,15 @@ class CardSheetWriter:
             },
         )
         log.info("«%s»: строка %s — прежняя попытка, журнал №%s", SPEC.title, row, journal_id)
+        if twins:
+            log.error(
+                "«%s»: ссылка этикетки этой отправки в нескольких строках листа: %s — сверена "
+                "строка %s, журнал №%s; остальные — дубль карточки, покажите шефу",
+                SPEC.title,
+                twins,
+                row,
+                journal_id,
+            )
         return AppendResult(row, journal_id, True, cooks, shifted)
 
     def _reread(self, book: Spreadsheet, attempt: _Attempt, cause: str) -> _Reread:
@@ -1095,6 +1113,22 @@ def _sent_from(values: Mapping[str, object], journal_id: int) -> dict[str, SentV
             )
         sent[field] = value
     return sent
+
+
+def _landed_attempt(attempts: Sequence[SentWrite], cells: Sequence[object]) -> SentWrite | None:
+    """Какая из неподтверждённых попыток с этой ссылкой этикетки легла в строку.
+
+    Та, чья отправка меньше всех расходится со строкой листа: каждая
+    неподтверждённая попытка могла лечь, а лежит в строке одна. Новейшая без
+    разбора назвала бы правку повара записанной, а записанное — правкой шефа.
+    При равном расхождении — новейшая (``attempts`` — новые первыми, ``min``
+    берёт первую из равных). Попыток нет — ``None``.
+    """
+    return min(
+        attempts,
+        key=lambda attempt: len(_differing(_sent_from(attempt.values, attempt.id), cells)),
+        default=None,
+    )
 
 
 def _cells_as_sent(cells: Sequence[object]) -> dict[str, SentValue]:

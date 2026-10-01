@@ -224,6 +224,35 @@ def test_rejection_by_origin_logs_both_addresses(caplog: pytest.LogCaptureFixtur
     assert "c2VrcmV0OnBhcm9s" not in caplog.text, "прочие заголовки в журнал не пишутся"
 
 
+def test_rejection_log_quotes_and_clips_what_the_client_sent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Свой адрес сервер берёт из ``Host`` — его присылает клиент, как путь и
+    Origin. Все три — через ``%r`` (перевод строки или ESC в них не подделает
+    строку журнала) и не длиннее ~200 знаков: заголовок в десятки килобайт не
+    раздует журнал."""
+    host = "k" * 600 + ".example"
+    headers = {
+        **CSRF,
+        "Origin": "https://" + "e" * 3000 + ".example",
+        "Host": host,
+        "X-Forwarded-Proto": "https",
+    }
+
+    with caplog.at_level(logging.WARNING, logger="kitchen.web"):
+        with_session().post("/api/auth/" + "x" * 3000, headers=headers)
+
+    [record] = ours(caplog)
+    message = record.getMessage()
+    assert "чужой Origin" in message
+    assert "'https://kkkk" in message, "свой адрес — через %r, в кавычках"
+    assert "'https://eeee" in message
+    assert "'/api/auth/xxxx" in message
+    assert len(message) < 1000, len(message)
+    for arg in record.args or ():
+        assert len(str(arg)) <= 210, f"поле журнала не обрезано: {len(str(arg))} знаков"
+
+
 def test_passed_request_is_not_logged(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.DEBUG, logger="kitchen.web"):
         with_session().post("/api/auth/logout", headers=CSRF)
