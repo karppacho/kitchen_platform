@@ -234,7 +234,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # Контекст — корень репозитория, как в infra/docker-compose.yml: в
       # образ должны попасть и frontend/, и infra/. Кэш слоёв между
