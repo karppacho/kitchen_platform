@@ -23,7 +23,7 @@ import requests
 from kitchen.config import Settings
 from kitchen.llm.polza import PolzaClient, polza_from_settings
 from kitchen.sync.drive import INSPECT_SCOPE, SCOPES, DriveClient
-from tests.fake_drive import FOLDER_ID, ROBOT, SHEET_MIME, FakeDrive, FakeFile
+from tests.fake_drive import CHEF, FOLDER_ID, ROBOT, SHEET_MIME, FakeDrive, FakeFile
 from tests.fake_polza import (
     BASE_URL,
     KEY,
@@ -63,6 +63,27 @@ def _drive() -> FakeDrive:
     fake.add(FakeFile("cards-book", "Карточки", SHEET_MIME, can_edit=True))
     fake.add(FakeFile("kitchen-book", "Кухня", SHEET_MIME, can_edit=False))
     return fake
+
+
+def _on_my_drive(drive: FakeDrive) -> None:
+    """Папка как в бою (решение 01.10): прежняя папка бота на «Моём диске»
+    владельца, платформа — «Редактор», все со ссылкой — «Читатель»."""
+    drive.folder.drive_id = None
+    drive.folder.permissions = [
+        {"id": "p-owner", "type": "user", "role": "owner", "emailAddress": CHEF},
+        {"id": "p-robot", "type": "user", "role": "writer", "emailAddress": ROBOT},
+        {"id": "anyoneWithLink", "type": "anyone", "role": "reader"},
+    ]
+
+
+PLACES = {"общий диск": "Менеджер контента", "Мой диск": "Редактор"}
+"""Место папки → роль, которую советуют сервисному аккаунту: на «Моём диске»
+«Менеджера контента» нет, файлы добавляет и свои выбрасывает «Редактор»."""
+
+
+def _place(drive: FakeDrive, place: str) -> None:
+    if place == "Мой диск":
+        _on_my_drive(drive)
 
 
 class Setup:
@@ -343,13 +364,16 @@ def test_folder_editable_by_link_fails_and_is_not_fixed(
     assert setup.drive.permission_writes() == []
 
 
-@pytest.mark.parametrize("kind", ["anyone", "domain"])
+@pytest.mark.parametrize(
+    ("kind", "seen_by"), [("anyone", "всем, у кого есть ссылка"), ("domain", "всем в домене")]
+)
 @pytest.mark.parametrize("role", ["reader", "commenter"])
 def test_folder_readable_by_link_is_a_warning(
-    setup: Setup, capsys: pytest.CaptureFixture[str], kind: str, role: str
+    setup: Setup, capsys: pytest.CaptureFixture[str], kind: str, seen_by: str, role: str
 ) -> None:
     """Доступ «все со ссылкой — читатель» (решение 01.10) — предупреждение: фото
-    видны всем, у кого ссылка, но удалить их нельзя. Код 0, проба идёт."""
+    видны всем, у кого ссылка, но удалить их нельзя. Открыто только домену —
+    так и сказано: посторонний со ссылкой фото не увидит. Код 0, проба идёт."""
     setup.drive.folder.permissions.append({"id": "anyoneWithLink", "type": kind, "role": role})
 
     code, out = setup.run(capsys)
@@ -357,10 +381,26 @@ def test_folder_readable_by_link_is_a_warning(
     assert code == 0, out
     assert "ОШИБКА" not in out
     [line] = _lines(out, "ВНИМАНИЕ", "фото видны")
-    assert "фото видны всем, у кого есть ссылка" in line
+    assert line.endswith(f"фото видны {seen_by}")
     [probe] = [f for f in setup.drive.files.values() if f.own]
     assert probe.trashed is True
     assert setup.drive.permission_writes() == []
+
+
+def test_folder_readable_by_link_and_domain_names_the_link(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Открыто и домену, и по ссылке — главное «по ссылке»: это шире."""
+    setup.drive.folder.permissions += [
+        {"id": "d", "type": "domain", "role": "reader", "domain": "example.com"},
+        {"id": "anyoneWithLink", "type": "anyone", "role": "reader"},
+    ]
+
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    [line] = _lines(out, "ВНИМАНИЕ", "фото видны")
+    assert line.endswith("фото видны всем, у кого есть ссылка")
 
 
 def test_closed_folder_is_ok(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
@@ -372,24 +412,54 @@ def test_closed_folder_is_ok(setup: Setup, capsys: pytest.CaptureFixture[str]) -
 
 
 def test_who_has_access_is_listed(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    """Роли — как их называет Drive на общем диске: ``writer`` — «Автор»."""
     code, out = setup.run(capsys)
 
     assert code == 0
-    assert "Менеджер контента" in out
-    assert "chef@example.com" in out
+    [robot] = _lines(out, ROBOT, "← платформа")
+    assert "Менеджер контента" in robot
+    [chef] = _lines(out, CHEF)
+    assert "Автор" in chef
 
 
-def test_cannot_add_files(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+def test_who_has_access_on_my_drive_named_as_there(
+    setup: Setup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """На «Моём диске» ``writer`` — «Редактор», а не «Автор» общего диска:
+    администратор ищет в Drive ту роль, что напечатана."""
+    _on_my_drive(setup.drive)
+
+    code, out = setup.run(capsys)
+
+    assert code == 0, out
+    [robot] = _lines(out, ROBOT, "← платформа")
+    assert "Редактор" in robot
+    [owner] = _lines(out, CHEF)
+    assert "Владелец" in owner
+    [link] = _lines(out, "все, у кого есть ссылка")
+    assert "Читатель" in link
+    assert "Автор" not in out
+    assert "Менеджер" not in out
+
+
+@pytest.mark.parametrize(("place", "role"), PLACES.items())
+def test_cannot_add_files(
+    setup: Setup, capsys: pytest.CaptureFixture[str], place: str, role: str
+) -> None:
     """Нет права добавлять файлы: сведения Drive — подсказка, решает пробная
-    загрузка, и она не проходит ни с одним доступом."""
+    загрузка, и она не проходит ни с одним доступом. Роль в подсказке — та,
+    что есть там, где лежит папка."""
+    _place(setup.drive, place)
     setup.drive.folder.can_add_children = False
 
     code, out = setup.run(capsys)
 
     assert code == 1
-    assert "добавлять файлы нельзя" in out
-    assert "Менеджер контента" in out
+    [hint] = _lines(out, "ВНИМАНИЕ", "добавлять файлы нельзя")
+    assert f"нужна роль «{role}»" in hint
     assert setup.scopes()[-2:] == [SCOPES["drive.file"], SCOPES["drive"]]
+    if place == "Мой диск":
+        assert "Менеджер контента" not in out
 
 
 def test_capability_hint_does_not_override_the_probe(
@@ -461,9 +531,14 @@ def test_missing_key(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
     assert setup.opened == []
 
 
-def test_trash_refused_names_the_leftover(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
-    """Корзина не удалась — нужна роль «Менеджер контента»; оставшийся файл
-    назван, чтобы его убрали руками."""
+@pytest.mark.parametrize(("place", "role"), PLACES.items())
+def test_trash_refused_names_the_leftover(
+    setup: Setup, capsys: pytest.CaptureFixture[str], place: str, role: str
+) -> None:
+    """Корзина не удалась — нужна роль: на общем диске «Менеджер контента»,
+    на «Моём диске» — «Редактор»; оставшийся файл назван, чтобы его убрали
+    руками."""
+    _place(setup.drive, place)
     setup.drive.fail_next(403, "insufficientFilePermissions", method="PATCH")
     setup.drive.fail_next(403, "insufficientFilePermissions", method="PATCH")
 
@@ -472,7 +547,9 @@ def test_trash_refused_names_the_leftover(setup: Setup, capsys: pytest.CaptureFi
     assert code == 1
     warnings = _lines(out, "ВНИМАНИЕ", "корзина не удалась")
     assert warnings
-    assert all("Менеджер контента" in line for line in warnings)
+    assert all(f"нужна роль «{role}»" in line for line in warnings)
+    if place == "Мой диск":
+        assert "Менеджер контента" not in out
     leftovers = [f for f in setup.drive.files.values() if f.own and not f.trashed]
     assert leftovers
     assert all(f.name in out for f in leftovers)
@@ -498,7 +575,7 @@ def test_trash_outside_photo_folder_has_no_role_hint(
     refusals = _lines(out, "корзина не удалась")
     assert refusals
     assert all("не из папки фото" in line for line in refusals)
-    assert not any("Менеджер контента" in line for line in refusals)
+    assert not any("нужна роль" in line for line in refusals)
 
 
 def _lines(out: str, *parts: str) -> list[str]:

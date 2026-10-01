@@ -33,8 +33,10 @@
   место — его; печатается, сколько занято и свободно) или на общем диске;
   кому открыта: открыта по ссылке или всему домену на изменение — ошибка
   (фото может удалить кто угодно), только на чтение — предупреждение (фото
-  видны всем, у кого есть ссылка); в неё можно добавлять файлы; кто имеет к
-  ней доступ;
+  видны всем, у кого есть ссылка, или всем в домене); в неё можно добавлять
+  файлы; кто имеет к ней доступ. Роли названы так, как их пишет Drive там,
+  где лежит папка: ``writer`` на общем диске — «Автор», на «Моём диске» —
+  «Редактор»; «Менеджер контента» бывает только на общем диске;
 * пробная загрузка 1 КБ JPEG → скачивание → корзина: сначала с узким доступом
   ``drive.file``; если ему не хватает прав или он не видит папку — с
   ``drive``. Проба прошла только с ``drive``, а выставлен ``drive.file`` —
@@ -53,6 +55,8 @@ import argparse
 import codecs
 import json
 import sys
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -88,14 +92,35 @@ SCOPE_KINDS = frozenset({"not_found", "forbidden"})
 Outcome = Literal["ok", "narrow", "stop"]
 """Итог пробы с одним доступом: прошла; не хватило доступа; дальше не идти."""
 
-ROLES = {
-    "organizer": "Менеджер",
-    "fileOrganizer": "Менеджер контента",
-    "writer": "Автор",
-    "commenter": "Комментатор",
-    "reader": "Читатель",
-    "owner": "Владелец",
-}
+_COMMON_ROLES = {"owner": "Владелец", "commenter": "Комментатор", "reader": "Читатель"}
+
+
+@dataclass(frozen=True, slots=True)
+class Place:
+    """Где лежит папка фото. Роли Drive называет по-разному в зависимости от
+    места, а администратор ищет в интерфейсе ту роль, что напечатана."""
+
+    roles: Mapping[str, str]
+    """Роль API → её название в интерфейсе Drive."""
+    needed: str
+    """Роль сервисного аккаунта, с которой он добавляет файлы в папку и
+    выбрасывает свои в корзину."""
+
+
+SHARED_DRIVE = Place(
+    roles={
+        **_COMMON_ROLES,
+        "organizer": "Менеджер",
+        "fileOrganizer": "Менеджер контента",
+        "writer": "Автор",
+    },
+    needed="Менеджер контента",
+)
+"""Общий диск: ``writer`` — «Автор», выбрасывать в корзину может «Менеджер контента»."""
+
+MY_DRIVE = Place(roles={**_COMMON_ROLES, "writer": "Редактор"}, needed="Редактор")
+"""«Мой диск»: «Менеджеров» нет, ``writer`` — «Редактор»; ему хватает и на
+загрузку, и на корзину своих фото."""
 
 
 def _probe_jpeg() -> bytes:
@@ -244,8 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     if email is not None:
         try:
             _check_books(settings, report)
-            if _check_folder(settings, email, report):
-                _probe(settings, report)
+            place = _check_folder(settings, email, report)
+            if place is not None:
+                _probe(settings, place, report)
         except _DriveOff as off:
             report.fail(_why(off.error))
 
@@ -384,9 +410,10 @@ def _check_books(settings: Settings, report: Report) -> None:
 # ---------------------------------------------------------------------------
 # Папка фото
 # ---------------------------------------------------------------------------
-def _check_folder(settings: Settings, email: str, report: Report) -> bool:
+def _check_folder(settings: Settings, email: str, report: Report) -> Place | None:
     """Папка годится для фото? Не папка, в корзине или открыта на изменение —
-    пробный файл туда не кладётся: папку сначала чинят.
+    пробный файл туда не кладётся: папку сначала чинят (``None``). Годится —
+    где она лежит: от этого зависят названия ролей в подсказках.
 
     Сведения о папке, её доступах и месте аккаунта читает охват «только
     чтение сведений».
@@ -395,7 +422,7 @@ def _check_folder(settings: Settings, email: str, report: Report) -> bool:
     folder_id = settings.drive_cards_folder_id
     if not folder_id:
         report.fail("не задан DRIVE_CARDS_FOLDER_ID — id папки фото")
-        return False
+        return None
     client = _client(settings, INSPECT_SCOPE)
     try:
         folder = client.metadata(folder_id)
@@ -403,13 +430,14 @@ def _check_folder(settings: Settings, email: str, report: Report) -> bool:
     except DriveError as error:
         _stop_if_disabled(error)
         report.fail(f"папка не открылась — {_why(error)}")
-        return False
+        return None
 
     passed = True
+    place = SHARED_DRIVE if folder.get("driveId") else MY_DRIVE
     if folder.get("mimeType") != FOLDER_MIME:
         report.fail("DRIVE_CARDS_FOLDER_ID указывает не на папку")
         passed = False
-    elif not folder.get("driveId"):
+    elif place is MY_DRIVE:
         # Фото в такой папке принадлежат сервисному аккаунту и занимают его
         # место (решение 01.10, живая проба прошла) — кончиться может оно.
         report.ok("папка на «Моём диске» владельца; место — у сервисного аккаунта")
@@ -423,7 +451,9 @@ def _check_folder(settings: Settings, email: str, report: Report) -> bool:
     if access == "closed":
         report.ok("закрыта: доступ «Ограниченный», по ссылке посторонний не откроет")
     elif access == "readable_by_link":
-        report.warn("фото видны всем, у кого есть ссылка")
+        # Право «все, у кого есть ссылка» шире права домена: есть оно — о нём.
+        by_link = any(person.get("type") == "anyone" for person in people)
+        report.warn(f"фото видны {'всем, у кого есть ссылка' if by_link else 'всем в домене'}")
     else:
         report.fail(
             "папка открыта на изменение всем по ссылке — фото может удалить кто угодно. "
@@ -437,16 +467,16 @@ def _check_folder(settings: Settings, email: str, report: Report) -> bool:
     else:
         report.warn(
             "по сведениям Drive, добавлять файлы нельзя — сервисному аккаунту нужна роль "
-            "«Менеджер контента»; проверит пробная загрузка"
+            f"«{place.needed}»; проверит пробная загрузка"
         )
 
     report.note("")
     report.note("Доступ к папке:")
     for person in people:
-        role = ROLES.get(str(person.get("role")), str(person.get("role")))
+        role = place.roles.get(str(person.get("role")), str(person.get("role")))
         mark = "  ← платформа" if person.get("emailAddress") == email else ""
         report.note(f"  · {role:18} {_who(person)}{mark}")
-    return passed
+    return place if passed else None
 
 
 def _account_space(client: DriveClient, report: Report) -> None:
@@ -493,10 +523,10 @@ def _who(person: dict[str, object]) -> str:
 # ---------------------------------------------------------------------------
 # Пробная загрузка
 # ---------------------------------------------------------------------------
-def _probe(settings: Settings, report: Report) -> None:
+def _probe(settings: Settings, place: Place, report: Report) -> None:
     report.section("ПРОБНАЯ ЗАГРУЗКА: 1 КБ JPEG → скачивание → корзина")
     for scope in ORDER:
-        outcome = _try_probe(_client(settings, SCOPES[scope]), scope, report)
+        outcome = _try_probe(_client(settings, SCOPES[scope]), scope, place, report)
         if outcome == "ok":
             _advise(scope, settings.drive_scope, report)
             return
@@ -505,7 +535,7 @@ def _probe(settings: Settings, report: Report) -> None:
     report.fail("пробный файл не прошёл ни с одним доступом — сохранять фото платформа не сможет")
 
 
-def _try_probe(client: DriveClient, scope: DriveScope, report: Report) -> Outcome:
+def _try_probe(client: DriveClient, scope: DriveScope, place: Place, report: Report) -> Outcome:
     name = f"проверка-настройки_{datetime.now(UTC):%Y-%m-%d_%H-%M-%S}.jpg"
     try:
         file_id = client.upload_jpeg(PROBE, name=name, app_properties={"purpose": "setup-check"})
@@ -534,7 +564,7 @@ def _try_probe(client: DriveClient, scope: DriveScope, report: Report) -> Outcom
         # Роль — только когда корзину запретил сам Google (403). Отказ клиента
         # «файл не из папки фото» и непринятый ключ ролью не лечатся.
         role = (
-            " Сервисному аккаунту нужна роль «Менеджер контента»."
+            f" Сервисному аккаунту нужна роль «{place.needed}»."
             if error.kind == "forbidden" and error.status == 403
             else ""
         )
