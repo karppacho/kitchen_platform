@@ -1,6 +1,14 @@
 # Блокирующий CI. Требование к нему одно и жёсткое: укладываться в 5 минут.
 # Проверки защищают, только пока их терпят; если PR ждёт двадцать минут,
 # дисциплина умрёт сама. Всё медленное (e2e, LLM-евалы) живёт отдельно.
+#
+# Имена задач (name) не менять: на них настроена защита main — переименованная
+# задача станет обязательной проверкой, которая никогда не придёт.
+#
+# Установка зависимостей (uv sync) — со своим пределом и одним повтором:
+# 01.10 она зависла на десять минут и съела весь предел задания. Попытка —
+# не дольше 100 с (из кэша обычно секунды), зависшую timeout обрывает, и
+# вторая идёт заново; шаг целиком — не дольше 4 минут.
 
 name: CI
 
@@ -27,7 +35,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
       - run: uv run ruff check --output-format=github .
         working-directory: backend
@@ -43,7 +56,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
       - run: uv run mypy src
         working-directory: backend
@@ -57,7 +75,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
       - run: uv run lint-imports
         working-directory: backend
@@ -96,7 +119,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
 
       # Порог покрытия проверяется ОДИН раз и по сумме обоих наборов.
@@ -105,7 +133,7 @@ jobs:
       # заведомо заниженное число.
       - name: Офлайн-тесты
         id: offline
-        run: uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov-report=
+        run: uv run pytest --cov=kitchen.domain --cov=kitchen.sync --cov=kitchen.llm --cov=kitchen.cards --cov-report=
         working-directory: backend
 
       # Интеграция против настоящего Postgres: обратимость миграций и
@@ -122,7 +150,7 @@ jobs:
         if: ${{ !cancelled() && (success() || steps.offline.outcome == 'failure') }}
         run: >-
           uv run pytest -m integration
-          --cov=kitchen.domain --cov=kitchen.sync --cov-append
+          --cov=kitchen.domain --cov=kitchen.sync --cov=kitchen.llm --cov=kitchen.cards --cov-append
           --cov-report=term-missing --cov-fail-under=85
         working-directory: backend
 
@@ -148,7 +176,12 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
-      - run: uv sync --all-extras --dev
+      # Свой предел и один повтор — см. начало файла.
+      - name: Установить зависимости
+        run: >-
+          timeout -k 10 100 uv sync --all-extras --dev
+          || { echo "::warning::uv sync не уложился или упал — повтор"; timeout -k 10 100 uv sync --all-extras --dev; }
+        timeout-minutes: 4
         working-directory: backend
       # Lock-файл обязан соответствовать pyproject: иначе на сервере
       # встанут не те версии, что проверял CI.
@@ -250,9 +283,31 @@ jobs:
           HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
           PY
 
+          # Проверка готовности: заглушка ответила хоть чем-то — её 404 тоже
+          # ответ. Нет соединения — исключение и код 1, ждём дальше.
+          cat > /tmp/stub_ready.py <<'PY'
+          import urllib.error
+          import urllib.request
+
+          try:
+              urllib.request.urlopen("http://127.0.0.1:8080/", timeout=1)
+          except urllib.error.HTTPError:
+              pass
+          PY
+
           docker run -d --name api --network kitchen-ci --network-alias api \
             -v /tmp/stub_api.py:/stub.py:ro \
+            -v /tmp/stub_ready.py:/ready.py:ro \
             python:3.12-alpine python3 /stub.py
+
+      # Контейнер заглушки запущен — это ещё не значит, что python уже слушает
+      # порт: 30.09 nginx отдал на /api/ 502, проверка упала не по своей
+      # причине. Ждём, пока заглушка сама начнёт отвечать.
+      - name: Ждём, пока заглушка API начнёт отвечать
+        run: |
+          timeout 30 bash -c \
+            'until docker exec api python3 /ready.py 2>/dev/null; do sleep 0.5; done' \
+            || { echo "::error::заглушка API не начала отвечать за 30 с"; docker logs api; exit 1; }
 
       # ssl_certificate и ssl_certificate_key в конфиге — обязательные пути;
       # без файлов по ним nginx не стартует вовсе, ещё до первого запроса.
@@ -329,6 +384,41 @@ jobs:
           test "$(cat /tmp/code_api.txt)" = "404" || { echo "::error::GET /api/nope вернул $(cat /tmp/code_api.txt), а не 404"; exit 1; }
           grep -qi '^content-type: application/json' /tmp/h_api.txt || { echo "::error::GET /api/nope: Content-Type не application/json — похоже, отдался index.html вместо заглушки API"; exit 1; }
           grep -q '"detail"' /tmp/b_api.txt || { echo "::error::GET /api/nope: тело не похоже на ответ заглушки API"; exit 1; }
+
+      # Распознавание этикетки — вызов модели за деньги: зона llm пускает
+      # запрос и три сверху (burst=3), пятый подряд — 429, а не 503. Черновики
+      # карточек режут тело на 9 МБ ещё в nginx: до входа сервер его не читает.
+      # Оба отказа — JSON с detail, как ответы API, и с заголовками
+      # безопасности server (именованные location без add_header).
+      - name: "Карточки: распознавание идёт к API с пределом частоты, большое фото — 413, отказы JSON"
+        run: |
+          recognize() {
+            curl -sk -D /tmp/h_rec.txt -o /tmp/b_rec.txt -w '%{http_code}' -X POST \
+              --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/cards/recognize/x
+          }
+          for i in 1 2 3 4; do
+            code=$(recognize)
+            test "$code" = "404" || { echo "::error::POST /api/cards/recognize/ №$i вернул $code, а не 404 заглушки API"; exit 1; }
+          done
+          code=$(recognize)
+          test "$code" = "429" || { echo "::error::пятый POST /api/cards/recognize/ подряд вернул $code, а не 429 (limit_req_status)"; exit 1; }
+          grep -qi '^content-type: application/json' /tmp/h_rec.txt || { echo "::error::429 распознавания — не JSON"; exit 1; }
+          grep -q '"detail"' /tmp/b_rec.txt || { echo "::error::в теле 429 распознавания нет detail"; exit 1; }
+          grep -qi '^strict-transport-security:' /tmp/h_rec.txt || { echo "::error::429 распознавания без HSTS — add_header в location?"; exit 1; }
+          head -c 10485760 /dev/zero > /tmp/big_photo.bin
+          code=$(curl -sk -D /tmp/h_big.txt -o /tmp/b_big.txt -w '%{http_code}' -X PUT --data-binary @/tmp/big_photo.bin \
+            --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/cards/drafts/x/photos/label)
+          test "$code" = "413" || { echo "::error::PUT 10 МБ в /api/cards/drafts/ вернул $code, а не 413 (client_max_body_size 9m)"; exit 1; }
+          grep -qi '^content-type: application/json' /tmp/h_big.txt || { echo "::error::413 черновиков — не JSON"; exit 1; }
+          grep -q '"detail"' /tmp/b_big.txt || { echo "::error::в теле 413 черновиков нет detail"; exit 1; }
+          grep -qi '^content-security-policy:' /tmp/h_big.txt || { echo "::error::413 черновиков без CSP — add_header в location?"; exit 1; }
+          # «Начать» шлёт POST ровно на /api/cards/drafts (без слеша). Блок со
+          # слешем на конце nginx «дополнял» до 301, и браузер повторял POST как
+          # GET — черновик не создавался (выкладка 01.10.2026). Здесь запрос
+          # обязан дойти до заглушки API (404), а не получить редирект.
+          code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST \
+            --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/cards/drafts)
+          test "$code" = "404" || { echo "::error::POST /api/cards/drafts вернул $code, а не 404 заглушки API (301 — слеш на конце location)"; exit 1; }
 
       - name: "GET /api без слэша — 404"
         run: |

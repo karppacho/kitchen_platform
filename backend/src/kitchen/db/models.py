@@ -36,7 +36,9 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kitchen.db.base import Base
@@ -417,3 +419,208 @@ class UserRole(Base):
     profile: Mapped[Profile] = relationship(back_populates="roles")
 
     __table_args__ = (Index("ix_user_roles_role_code", "role_code"),)
+
+
+class SheetWrite(Base):
+    """Одна запись платформы в Google-таблицу — журнал `sheet_writes`.
+
+    Лист — рабочая площадка шефа и единственная копия его работы. Каждая
+    наша запись в него оставляет здесь след: куда писали, что было в строках
+    до записи, что отправили, кто и чем кончилось. По журналу разбирают
+    неясный исход — экрана для него пока нет, только база и лог.
+
+    Строка заводится ``pending`` отдельным коммитом ДО записи в лист: упади
+    процесс посреди записи — след останется, и повтор отправки с тем же
+    ``request_key`` сначала перечитает строку, а не запишет вторую.
+    """
+
+    __tablename__ = "sheet_writes"
+
+    STATUSES = ("pending", "verified", "rolled_back", "failed")
+    OPEN_STATUSES = ("pending", "verified")
+    """Открытые: запись идёт или состоялась. По ключу запроса такая — одна."""
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    book: Mapped[str] = mapped_column(String(32))
+    """Ключ книги, как в описании листа: «ingredient_cards»."""
+    sheet: Mapped[str] = mapped_column(Text)
+    row: Mapped[int] = mapped_column(Integer)
+    """Номер строки в листе, с единицы — как его видит шеф."""
+    action: Mapped[str] = mapped_column(String(16), default="append")
+    status: Mapped[str] = mapped_column(String(16))
+    request_key: Mapped[str] = mapped_column(Text)
+    """Ключ запроса снаружи (на черновик — один): повтор отправки узнаётся по нему."""
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("profiles.id", ondelete="SET NULL"), index=True
+    )
+    before: Mapped[dict[str, object]] = mapped_column(JSONB)
+    """Снимок до записи (FORMATTED): строки N−1 и N целиком, с Q и R. Если
+    раскладку не подтвердили — ещё и весь прочитанный лист."""
+    values: Mapped[dict[str, object]] = mapped_column(JSONB)
+    """Что ушло в лист: поле → значение, числа — числами JSON.
+
+    У записи «найдена прежняя попытка» (сразу ``verified``, строка уже лежала
+    в листе и писать не пришлось) — что на самом деле записано: отправка
+    легшей попытки, а если её отправки в журнале нет, — строка листа."""
+    after: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    """Строки N−1 и N, перечитанные после записи (и после очистки, если была),
+    — в ``rows``; у найденной прежней попытки там только строка N. У
+    ``verified`` ещё ``values`` — строка N числами, как её перечитали (по ней
+    повтор отвечает без Google), и ``not_written`` — правки повара, не
+    попавшие в лист."""
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    """Хеш записанной строки — тот же, что посчитает импорт."""
+    error: Mapped[str | None] = mapped_column(Text)
+    """Почему запись не состоялась или её исход неизвестен — для разработчика."""
+    note: Mapped[str | None] = mapped_column(Text)
+    """Пометка о необычном удачном исходе: «найдена прежняя попытка»."""
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('pending', 'verified', 'rolled_back', 'failed')",
+            name="ck_sheet_writes_status",
+        ),
+        CheckConstraint("action in ('append')", name="ck_sheet_writes_action"),
+        # Одна открытая запись на ключ запроса: вторая строка от повтора
+        # отправки невозможна и при ошибке в коде. Неудачные ключ освобождают —
+        # повтор после отказа начинает новую попытку.
+        Index(
+            "ux_sheet_writes_open_request_key",
+            "request_key",
+            unique=True,
+            postgresql_where=text("status in ('pending', 'verified')"),
+        ),
+    )
+
+
+class LlmCall(Base):
+    """Один вызов модели через polza.ai — и удачный, и нет.
+
+    Из журнала считается дневной бюджет и лимит на повара, поэтому строка
+    пишется на каждый вызов, даже неудачный: таймаут мог стоить денег.
+    ``cost_rub`` — только то, что списал polza.ai за последнюю попытку
+    (``None`` — неизвестно); ``unpriced_attempts`` — неудачные попытки перед
+    ней, цена которых неизвестна. Бюджет оценивает каждую неизвестную цену
+    в 5 ₽, а по журналу видно, что списано, а что оценено. Повара удалили —
+    траты остаются, ссылка на него пустеет.
+    """
+
+    __tablename__ = "llm_calls"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(32))
+    """Зачем звали модель: ``label`` — распознавание этикетки."""
+    model: Mapped[str] = mapped_column(Text)
+    prompt_version: Mapped[str] = mapped_column(String(32))
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("profiles.id", ondelete="SET NULL"), index=True
+    )
+    ok: Mapped[bool] = mapped_column()
+    error: Mapped[str] = mapped_column(Text, default="")
+    # Четыре знака после запятой: вызов стоит копейки и доли копеек.
+    cost_rub: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
+    unpriced_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    tokens: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+
+
+class CardDraft(Base):
+    """Черновик карточки ингредиента — то, что повар набрал в мастере.
+
+    Живёт на сервере, а не в браузере: телефон уснул, вкладку закрыли —
+    повар продолжит с того же шага. Активный черновик у повара один (это
+    держит частичный уникальный индекс); отправленный или отменённый
+    остаётся строкой — по нему видно, какие фото он загружал.
+
+    В лист черновик не пишется, пока повар не нажмёт «Отправить»: тогда
+    строка уходит в таблицу одной записью (журнал — ``sheet_writes``).
+    Фото — id файлов в папке фото на Drive, только из наших загрузок.
+    """
+
+    __tablename__ = "card_drafts"
+
+    STATUSES = ("active", "submitted", "cancelled")
+    RECOGNITION_STATUSES = ("running", "done", "failed")
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("profiles.id", ondelete="CASCADE"), index=True
+    )
+    """Повар. Удалили профиль — его черновики уходят с ним: это недописанное."""
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    step: Mapped[str] = mapped_column(String(16), default="supplier", server_default="supplier")
+    """Шаг мастера, на котором повар остановился, — с него он и продолжит."""
+
+    supplier: Mapped[str] = mapped_column(Text, default="", server_default="")
+    category: Mapped[str] = mapped_column(Text, default="", server_default="")
+    name: Mapped[str] = mapped_column(Text, default="", server_default="")
+    label_name: Mapped[str] = mapped_column(Text, default="", server_default="")
+    manufacturer: Mapped[str] = mapped_column(Text, default="", server_default="")
+    composition: Mapped[str] = mapped_column(Text, default="", server_default="")
+    # Пусто — «нет данных», а не ноль: «0 г белка» — это утверждение.
+    protein: Mapped[Decimal | None] = mapped_column(Amount)
+    fat: Mapped[Decimal | None] = mapped_column(Amount)
+    carbs: Mapped[Decimal | None] = mapped_column(Amount)
+    kcal: Mapped[Decimal | None] = mapped_column(Amount)
+    shelf_life_sealed: Mapped[str] = mapped_column(Text, default="", server_default="")
+    shelf_life_defrost: Mapped[str] = mapped_column(Text, default="", server_default="")
+    shelf_life_after: Mapped[str] = mapped_column(Text, default="", server_default="")
+    defrost_conditions: Mapped[str] = mapped_column(Text, default="", server_default="")
+    description: Mapped[str] = mapped_column(Text, default="", server_default="")
+    approval: Mapped[str | None] = mapped_column(Text)
+    """«Да» или «Отбракован» — как писал бот в V; пусто — повар ещё не ответил."""
+
+    label_file_id: Mapped[str | None] = mapped_column(Text)
+    package_file_id: Mapped[str | None] = mapped_column(Text)
+    before_file_id: Mapped[str | None] = mapped_column(Text)
+    after_file_id: Mapped[str | None] = mapped_column(Text)
+
+    recognition_status: Mapped[str | None] = mapped_column(String(16))
+    """Распознавание этикетки: идёт, готово, не удалось; пусто — не запускали."""
+    recognition_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recognition: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    recognition_warnings: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
+    """Замечания самой этикетки — что заметило распознавание: срок, основа
+    КБЖУ, неясные числа. Проверка КБЖУ здесь не хранится: её черновик
+    считает при каждой выдаче по своим числам (``kitchen.cards.drafts``)."""
+
+    submit_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """Когда началась отправка в лист; пусто — не идёт. Пока отметка свежая,
+    фото черновика не меняются и не уходят в корзину: ссылки на них уже летят
+    в лист. Старше предела — процесс умер посреди записи, отправка снова
+    разрешена (``kitchen.cards.submit``)."""
+    submitted_row: Mapped[int | None] = mapped_column(Integer)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    sheet_write_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("sheet_writes.id", ondelete="SET NULL"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('active', 'submitted', 'cancelled')", name="ck_card_drafts_status"
+        ),
+        CheckConstraint("approval in ('Да', 'Отбракован')", name="ck_card_drafts_approval"),
+        CheckConstraint(
+            "recognition_status in ('running', 'done', 'failed')",
+            name="ck_card_drafts_recognition_status",
+        ),
+        # Один активный черновик на повара — и при гонке двух «Начать»:
+        # проверка в коде её не закрывает, индекс закрывает.
+        Index(
+            "ux_card_drafts_active_owner",
+            "owner_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
