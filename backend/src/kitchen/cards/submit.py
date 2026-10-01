@@ -6,26 +6,31 @@
 
 1. **Отметка «отправка идёт»** — одним запросом, и из него же — поля и id
    фото, что уйдут в лист; коммит до записи. Пока отметка свежая, вторая
-   отправка — 409, фото не меняются и не уходят в корзину: ссылки на них уже
-   летят в лист. Отметка старше :func:`submit_window` — процесс умер посреди
-   записи, отправка снова разрешена.
+   отправка — 409, правка, фото и распознавание ждут: строка уже собрана, а
+   ссылки на фото летят в лист. Идёт распознавание — отправка ждёт его.
+   Отметка старше :func:`submit_window` — процесс умер посреди записи,
+   отправка снова разрешена.
 2. **Чего не хватает** — 422 со списком полей по-русски, до Google.
 3. **Запись** — ключ запроса один на черновик (``card-draft:<id>``): повтор
    после обрыва сети идёт через журнал и второй строки не даёт.
 4. **Черновик отправлен** — только после удачной записи: номер строки,
    время, запись журнала. Любой отказ — черновик активен, отметка снята.
-5. **Перенос книги карточек в базу** — обычным путём импорта. Не удался
-   (импортный замок занят, Google не ответил) — запись от этого не
-   становится ошибкой: ответ удачный, ``imported=false``, карточку перенесёт
-   следующий цикл.
+5. **Перенос книги карточек в базу** — обычным путём импорта, но с коротким
+   ожиданием (:data:`IMPORT_LOCK_WAIT`, :data:`IMPORT_GOOGLE_TIMEOUT`): повар
+   ждёт ответа на телефоне, а запись уже состоялась. Не удался (импортный
+   замок занят, Google не ответил) — ответ всё равно удачный,
+   ``imported=false``; воркер перенесёт карточку следующим циклом.
 
-Повтор отправки уже отправленного черновика (ответ потерялся в сети) —
-тот же путь через журнал: строка та же, записи нет.
+Повтор отправки уже отправленного черновика (ответ потерялся в сети) идёт
+через журнал и к Google не ходит вовсе: строка — из журнала, ``imported`` —
+по базе. Прерванная отправка, чья запись в журнале состоялась, доводится до
+конца тем же коротким путём.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -39,8 +44,17 @@ from kitchen.cards.drafts import (
     draft_data,
     submit_request_key,
 )
+from kitchen.cards.recognize import STALE_AFTER
 from kitchen.db import drafts as store
-from kitchen.domain.cards import CardDraftData, card_row, clean_text, missing_for_submit
+from kitchen.db.journal import PENDING, VERIFIED
+from kitchen.domain.cards import (
+    CardDraftData,
+    card_row,
+    clean_text,
+    drive_view_url,
+    missing_for_submit,
+)
+from kitchen.domain.shelf_life import plural_ru
 from kitchen.sync import specs
 from kitchen.sync.ownership import ForbiddenWriteError
 from kitchen.sync.reader import describe_error
@@ -70,6 +84,18 @@ log = logging.getLogger(__name__)
 BOOK = "ingredient_cards"
 """Книга, которую переносят в базу сразу после записи."""
 
+IMPORT_LOCK_WAIT = timedelta(seconds=10)
+"""Сколько перенос после отправки ждёт импортный замок.
+
+Повар ждёт ответа на телефоне (фронтенд — 60 с вместе с записью), а строка
+уже в листе. Замок дольше занят — значит, идёт перенос воркера или застрял
+ручной импорт: ответ — ``imported=false``, карточку перенесёт воркер (он
+держит замок только на запись в базу, а Google читает до него)."""
+
+IMPORT_GOOGLE_TIMEOUT = (5, 20)
+"""Таймауты чтения книги для переноса после отправки — (соединение, ответ).
+Короче обычных: не ответил Google быстро — перенесёт воркер."""
+
 _IMPORTED = ("imported", "stale")
 """Исходы переноса, после которых карточка в базе. «stale» — пока мы
 читали лист, другой перенос прочитал его позже нас (а значит, после записи)
@@ -77,9 +103,10 @@ _IMPORTED = ("imported", "stale")
 
 _SUBMIT_MARGIN = timedelta(minutes=1)
 
-ALREADY_SUBMITTING = "Карточка уже отправляется — подождите"
+WAIT_FOR_RECOGNITION = "Дождитесь окончания распознавания"
 BUSY = "Таблица занята — попробуйте ещё раз через минуту"
 DATABASE_DOWN = "Сервер временно не может записать — черновик сохранён"
+UNCONFIRMED = "Не удалось подтвердить запись — нажмите «Отправить» ещё раз: второй строки не будет"
 NOT_CONFIGURED = "Таблица карточек не настроена — сообщите администратору. Черновик сохранён."
 WRITING_CLOSED = "Запись в таблицу сейчас закрыта — сообщите администратору. Черновик сохранён."
 SAVED = "Черновик сохранён."
@@ -97,6 +124,14 @@ def submit_window(settings: Settings) -> timedelta:
     базу до и после. Старше — процесс умер посреди записи.
     """
     return hold_limit(settings) + LOCK_TIMEOUT + _SUBMIT_MARGIN
+
+
+def submitting_text(left: timedelta | None) -> str:
+    """409 на свежей отметке: отправка идёт — или прервалась, и отметка
+    отпустит черновик через ``left``."""
+    minutes = max(1, math.ceil((left or timedelta(0)) / timedelta(minutes=1)))
+    unit = plural_ru(minutes, "минуту", "минуты", "минут")
+    return f"Карточка отправляется или отправка прервалась — попробуйте через {minutes} {unit}"
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +180,8 @@ class RowWriter(Protocol):
 
 
 class BookImport(Protocol):
-    """Перенос книг в базу — :class:`kitchen.sync.cycle.SyncCycle`."""
+    """Перенос книг в базу — :class:`kitchen.sync.cycle.SyncCycle`, собранный
+    с :data:`IMPORT_LOCK_WAIT` и :data:`IMPORT_GOOGLE_TIMEOUT`."""
 
     def run(self, *, force: bool = False, books: Sequence[str] | None = None) -> CycleResult: ...
 
@@ -187,15 +223,17 @@ def submit(
     :class:`~kitchen.cards.drafts.CardsError` с текстом для повара; при
     любом отказе черновик остаётся активным.
     """
-    claimed = store.claim_submit(session, owner_id, draft_id, window)
+    claimed = store.claim_submit(
+        session, owner_id, draft_id, window=window, recognition_stale=STALE_AFTER
+    )
     if claimed is None:
-        return _not_claimed(session, writer, books, owner_id, draft_id)
+        return _not_claimed(session, writer, owner_id, draft_id, window)
     data = draft_data(claimed)
     session.commit()
 
     done = False
     try:
-        result = _append(writer, data, owner_id, draft_id)
+        result = _append(session, writer, data, owner_id, draft_id)
         _mark_submitted(session, draft_id, result)
         done = True
     finally:
@@ -207,27 +245,54 @@ def submit(
 def _not_claimed(
     session: Session,
     writer: RowWriter | None,
-    books: BookImport,
     owner_id: uuid.UUID,
     draft_id: uuid.UUID,
+    window: timedelta,
 ) -> Submitted:
-    """Отметку не поставили: отправка уже идёт, черновика нет — или он уже
-    отправлен, и это повтор, ответ на который потерялся в сети."""
+    """Отметку не поставили — почему, и что ответить.
+
+    * Черновик уже отправлен — это повтор, ответ на который потерялся в
+      сети: строка из журнала, ``imported`` — по базе, к Google — ни шага.
+    * Идёт распознавание — 409, пусть закончится.
+    * Отметка свежая, а запись в журнале по ключу уже состоялась — прежний
+      запрос записал и не успел отметить черновик (упала база, перезапуск
+      контейнера): довести коротким путём, без записи.
+    * Иначе отправка идёт или прервалась — 409 с тем, сколько ждать.
+    """
     draft = store.own_draft(session, owner_id, draft_id)
     status = None if draft is None else draft.status
     data = None if draft is None else draft_data(draft)
+    if status == store.ACTIVE and store.recognition_running(session, draft_id, STALE_AFTER):
+        session.rollback()
+        raise DraftConflictError(WAIT_FOR_RECOGNITION)
+    written = store.open_sheet_write(session, submit_request_key(draft_id))
+    left = store.submit_left(session, draft_id, window)
     session.rollback()
-    if status == store.ACTIVE:
-        raise DraftConflictError(ALREADY_SUBMITTING)
-    if status != store.SUBMITTED or data is None:
+    if data is None or status not in (store.ACTIVE, store.SUBMITTED):
         raise DraftNotFoundError
-    # Повтор: журнал по ключу черновика отвечает той же строкой, без записи.
-    result = _append(writer, data, owner_id, draft_id)
-    return _answer(result, data, imported=_import(books, draft_id))
+    if status == store.ACTIVE and written != VERIFIED:
+        raise DraftConflictError(submitting_text(left))
+
+    # Записано раньше: писатель ответит из журнала, без единого запроса к Google.
+    result = _append(session, writer, data, owner_id, draft_id)
+    if status == store.ACTIVE:
+        log.warning(
+            "черновик %s: прежняя отправка записала строку %s (журнал №%s), но не отметила "
+            "черновик — довожу до конца",
+            draft_id,
+            result.row,
+            result.journal_id,
+        )
+        _mark_submitted(session, draft_id, result)
+    return _answer(result, data, imported=_in_database(session, result, data))
 
 
 def _append(
-    writer: RowWriter | None, data: CardDraftData, owner_id: uuid.UUID, draft_id: uuid.UUID
+    session: Session,
+    writer: RowWriter | None,
+    data: CardDraftData,
+    owner_id: uuid.UUID,
+    draft_id: uuid.UUID,
 ) -> AppendResult:
     """Одна запись писателем — отказы словами для повара.
 
@@ -255,13 +320,34 @@ def _append(
         log.error("черновик %s: запись в лист закрыта правилом владения — %s", draft_id, error)
         refusal = SubmitUnavailableError(WRITING_CLOSED)
     except SQLAlchemyError as error:
+        refusal = _database_trouble(session, draft_id, error)
+    raise refusal
+
+
+def _database_trouble(session: Session, draft_id: uuid.UUID, error: SQLAlchemyError) -> CardsError:
+    """База не ответила, пока писатель работал. Что сказать повару, решает
+    журнал: запись по ключу уже заведена — она могла лечь, и повтор её
+    перечитает; нет — отказ на входе в очередь, в лист ничего не ушло."""
+    try:
+        written = store.open_sheet_write(session, submit_request_key(draft_id))
+        session.rollback()
+    except SQLAlchemyError:
+        session.rollback()
+        written = None
+    if written in (PENDING, VERIFIED):
         log.error(
-            "черновик %s: база не ответила, когда писатель вставал в очередь или вёл журнал — %s",
+            "черновик %s: база не ответила посреди записи (журнал — %s), исход решит повтор — %s",
             draft_id,
+            written,
             _first_line(error),
         )
-        refusal = SubmitUnavailableError(DATABASE_DOWN)
-    raise refusal
+        return SubmitFailedError(UNCONFIRMED)
+    log.error(
+        "черновик %s: база не ответила на входе в очередь писателей — %s",
+        draft_id,
+        _first_line(error),
+    )
+    return SubmitUnavailableError(DATABASE_DOWN)
 
 
 def _saved(message: str) -> str:
@@ -301,7 +387,8 @@ def _mark_submitted(session: Session, draft_id: uuid.UUID, result: AppendResult)
 
 def _release(session: Session, draft_id: uuid.UUID) -> None:
     """Запись не состоялась — снять отметку «отправка идёт»: черновик снова
-    можно править и отправлять. Не вышло — отметка отпустит его по пределу."""
+    можно править и отправлять. Не вышло — отметка отпустит его по пределу,
+    а состоявшуюся запись повтор найдёт в журнале."""
     try:
         session.rollback()
         store.end_submit(session, draft_id)
@@ -337,6 +424,21 @@ def _import(books: BookImport, draft_id: uuid.UUID) -> bool:
         )
         return False
     return True
+
+
+def _in_database(session: Session, result: AppendResult, data: CardDraftData) -> bool:
+    """Есть ли карточка в базе — без переноса и без Google: повтор отвечает
+    по тому, что уже перенесено."""
+    try:
+        found = store.card_in_database(
+            session,
+            label_url=drive_view_url(data.label_file_id),
+            row=result.row,
+            name=clean_text("name", data.name),
+        )
+    finally:
+        session.rollback()
+    return found
 
 
 def _answer(result: AppendResult, data: CardDraftData, *, imported: bool) -> Submitted:

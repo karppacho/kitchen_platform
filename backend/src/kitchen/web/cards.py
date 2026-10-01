@@ -18,6 +18,7 @@ JSON их бы исказила.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -32,6 +33,7 @@ from kitchen.db.models import CardDraft
 from kitchen.domain.cards import TEXT_LIMITS
 from kitchen.llm.budget import LlmLimits
 from kitchen.llm.label import LabelReader
+from kitchen.sync.client import GspreadClient
 from kitchen.sync.cycle import SyncCycle
 from kitchen.sync.drive import DriveClient
 from kitchen.sync.writer import CardSheetWriter
@@ -61,15 +63,28 @@ def get_label_reader(request: Request) -> LabelReader | None:
     return reader
 
 
-def get_card_writer(request: Request) -> CardSheetWriter | None:
+def get_google(request: Request) -> Iterator[GspreadClient]:
+    """Вход в Google-таблицы на время запроса: один на писателя и перенос,
+    сессия закрывается после ответа."""
+    google: GspreadClient = request.app.state.google()
+    try:
+        yield google
+    finally:
+        google.close()
+
+
+GoogleDep = Annotated[GspreadClient, Depends(get_google)]
+
+
+def get_card_writer(request: Request, google: GoogleDep) -> CardSheetWriter | None:
     """Писатель строки карточки; ``None`` — книга карточек не настроена."""
-    writer: CardSheetWriter | None = request.app.state.card_writer()
+    writer: CardSheetWriter | None = request.app.state.card_writer(google)
     return writer
 
 
-def get_sync_cycle(request: Request) -> SyncCycle:
-    """Перенос листов в базу — тот же, что у воркера."""
-    cycle: SyncCycle = request.app.state.sync_cycle()
+def get_sync_cycle(request: Request, google: GoogleDep) -> SyncCycle:
+    """Перенос книги карточек в базу после отправки — с коротким ожиданием."""
+    cycle: SyncCycle = request.app.state.sync_cycle(google)
     return cycle
 
 
@@ -292,10 +307,14 @@ def start_draft(session: SessionDep, user: CardsUserDep) -> DraftOut:
 
 @router.patch("/drafts/{draft_id}", response_model=DraftOut)
 def update_draft(
-    draft_id: uuid.UUID, body: DraftPatch, session: SessionDep, user: CardsUserDep
+    draft_id: uuid.UUID,
+    body: DraftPatch,
+    session: SessionDep,
+    user: CardsUserDep,
+    window: SubmitWindowDep,
 ) -> DraftOut:
     changes = body.model_dump(exclude_unset=True)
-    return _out(drafts.update_draft(session, user.id, draft_id, changes))
+    return _out(drafts.update_draft(session, user.id, draft_id, changes, submit_window=window))
 
 
 @router.delete("/drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -348,13 +367,20 @@ def recognize_label(
     drive: DriveDep,
     reader: LabelReaderDep,
     settings: SettingsDep,
+    window: SubmitWindowDep,
 ) -> DraftOut:
     """Распознать фото этикетки черновика: поля и замечания — в черновик.
 
-    Идёт до трёх минут; телефон мог уснуть — результат ждёт в черновике
-    (``recognition_status``)."""
+    Идёт до трёх минут; телефон мог уснуть, а nginx — ответить 504 — результат
+    ждёт в черновике (``recognition_status``): опрашивать черновик."""
     draft = recognize.recognize(
-        session, drive, reader, LlmLimits.from_settings(settings), user.id, draft_id
+        session,
+        drive,
+        reader,
+        LlmLimits.from_settings(settings),
+        user.id,
+        draft_id,
+        submit_window=window,
     )
     return _out(draft)
 

@@ -518,15 +518,28 @@ class FakeSpreadsheet:
 
 
 class FakeSheetsClient:
-    """Источник таблиц, не ходящий в сеть."""
+    """Источник таблиц, не ходящий в сеть.
+
+    Как ``GspreadClient``: вид с другими таймаутами — тот же источник (тест
+    видит, какие таймауты просили), ``close`` — закрыть сессию (тест видит,
+    что закрыли)."""
 
     def __init__(self, spreadsheets: dict[str, FakeSpreadsheet]) -> None:
         self._spreadsheets = spreadsheets
         self.opened: list[str] = []
+        self.timeouts: list[tuple[int, int]] = []
+        self.closed = 0
 
     def open(self, spreadsheet_id: str) -> FakeSpreadsheet:
         self.opened.append(spreadsheet_id)
         return self._spreadsheets[spreadsheet_id]
+
+    def with_timeout(self, timeout: tuple[int, int]) -> FakeSheetsClient:
+        self.timeouts.append(timeout)
+        return self
+
+    def close(self) -> None:
+        self.closed += 1
 
 
 class ExplodingSpreadsheet:

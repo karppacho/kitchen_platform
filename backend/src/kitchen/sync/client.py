@@ -23,6 +23,9 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
+    import requests
+    from google.auth.credentials import Credentials as GoogleCredentials
+
 # Значения листа, как их видит человек (FORMATTED_VALUE, по умолчанию), —
 # всегда строки: gspread не типизирует ячейки. Числами числа приезжают только
 # при UNFORMATTED_VALUE, и разбирать такой ответ — дело вызывающего.
@@ -160,6 +163,10 @@ class GspreadClient:
 
     Соединение ленивое: конструктор не ходит в сеть, поэтому объект можно
     создать при старте процесса, не завися от доступности Google.
+
+    Вход в Google — ключ, сессия с пулом соединений, токен — один на клиента
+    и на все его виды с другими таймаутами (:meth:`with_timeout`); закрывает
+    его :meth:`close`.
     """
 
     def __init__(
@@ -174,6 +181,8 @@ class GspreadClient:
         self._refresh_timeout = refresh_timeout
         self._gc: object | None = None
         self._books: dict[str, Spreadsheet] = {}
+        self._login: tuple[GoogleCredentials, requests.Session] | None = None
+        self._parent: GspreadClient | None = None
 
     # Достаточно для чтения и записи листов; drive нужен, чтобы открыть
     # таблицу по ключу. Более широких прав не просим.
@@ -182,11 +191,34 @@ class GspreadClient:
         "https://www.googleapis.com/auth/drive.readonly",
     )
 
-    def _client(self) -> object:
-        if self._gc is not None:
-            return self._gc
+    def with_timeout(self, timeout: tuple[int, int]) -> GspreadClient:
+        """Тот же вход в Google, но свои таймауты запросов.
 
-        import gspread
+        Таймаут у gspread — на клиента целиком, а не на запрос. Вид — свой
+        клиент gspread поверх той же сессии: второго ключа, токена и пула
+        соединений не нужно. Таблицы вид открывает сам — открытая таблица
+        помнит клиента, через которого её открыли, и его таймауты.
+        """
+        view = GspreadClient(
+            self._credentials_path, timeout=timeout, refresh_timeout=self._refresh_timeout
+        )
+        view._parent = self
+        return view
+
+    def close(self) -> None:
+        """Закрыть соединения сессии — общей с видами. Дальше клиент не работает."""
+        if self._parent is not None:
+            self._parent.close()
+        elif self._login is not None:
+            self._login[1].close()
+
+    def _sign_in(self) -> tuple[GoogleCredentials, requests.Session]:
+        """Ключ сервисного аккаунта и сессия — одни на клиента и его виды."""
+        if self._parent is not None:
+            return self._parent._sign_in()
+        if self._login is not None:
+            return self._login
+
         from google.auth.transport.requests import AuthorizedSession
         from google.oauth2.service_account import Credentials
 
@@ -196,6 +228,17 @@ class GspreadClient:
         credentials = Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
             str(self._credentials_path), scopes=list(self.SCOPES)
         )
+        session: requests.Session = AuthorizedSession(  # type: ignore[no-untyped-call]
+            credentials, refresh_timeout=self._refresh_timeout
+        )
+        self._login = (credentials, session)
+        return self._login
+
+    def _client(self) -> object:
+        if self._gc is not None:
+            return self._gc
+
+        import gspread
 
         # Таймауты обязательны: по умолчанию их нет вообще, и зависший запрос
         # вешает воркер молча и навсегда. Ставятся они в двух РАЗНЫХ местах,
@@ -207,10 +250,7 @@ class GspreadClient:
         # Присвоить `session.timeout` нельзя: AuthorizedSession — наследник
         # requests.Session, у которого такого атрибута нет, и присваивание
         # молча ничего не делает. Поймано mypy в полном окружении.
-        session = AuthorizedSession(  # type: ignore[no-untyped-call]
-            credentials, refresh_timeout=self._refresh_timeout
-        )
-
+        credentials, session = self._sign_in()
         client = gspread.Client(auth=credentials, session=session)
         client.set_timeout(self._timeout)
         self._gc = client

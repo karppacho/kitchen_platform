@@ -11,7 +11,8 @@
    вызова, ни траты бюджета. Нет фото этикетки — 409.
 2. **Не идёт ли уже** — 409. «Идёт» старше :data:`STALE_AFTER` не в счёт:
    процесс умер посреди вызова, и без этого предела черновик был бы заперт
-   навсегда.
+   навсегда. Черновик уходит в лист — тоже 409: итог лёг бы в черновик, уже
+   отправленный, и пропал бы.
 3. **Бюджет и лимит повара** — до вызова: исчерпаны — 429, модель не зовётся.
 4. **Фото из Drive** — до отметки «идёт»: отметка держится только на время
    вызова модели, и её предел считается от него.
@@ -23,8 +24,9 @@
    списаны. Своей транзакцией, до записи результата. Модель — из настроек,
    а не из ответа шлюза: тот текст чужой и не очищен.
 8. **Результат** ложится, только если черновик ещё активен, этикетка та же
-   и это тот же запуск. Повар переснял этикетку, пока модель читала старую,
-   — прочитанное о старой не ложится поверх новой.
+   и это тот же запуск. Повар переснял или убрал этикетку, пока модель
+   читала старую, — прочитанное о старой не ложится поверх новой, а «идёт»
+   этого запуска не остаётся висеть.
 
 В черновик пишутся одиннадцать полей этикетки (заменой, а не добавлением) и
 замечания самой этикетки; проверку КБЖУ черновик считает при выдаче сам.
@@ -42,10 +44,12 @@ from typing import TYPE_CHECKING
 from sqlalchemy.exc import SQLAlchemyError
 
 from kitchen.cards.drafts import (
+    WAIT_FOR_SUBMIT,
     CardsError,
     DraftConflictError,
     DraftNotFoundError,
     fetch_photo,
+    forget_recognition,
     require_active,
 )
 from kitchen.db import drafts as store
@@ -81,6 +85,7 @@ NOT_CONFIGURED = "Распознавание не настроено — зап�
 NO_LABEL = "Нет фото этикетки — сначала сфотографируйте её"
 RUNNING = "Этикетка уже распознаётся — подождите"
 LABEL_REPLACED = "Фото этикетки заменили, пока шло распознавание, — распознайте новое фото"
+LABEL_REMOVED = "Фото этикетки убрали, пока шло распознавание, — сфотографируйте её заново"
 INTERRUPTED = "Распознавание прервалось — попробуйте ещё раз или заполните поля вручную"
 
 
@@ -104,11 +109,15 @@ def recognize(
     limits: LlmLimits,
     owner_id: uuid.UUID,
     draft_id: uuid.UUID,
+    *,
+    submit_window: timedelta,
 ) -> CardDraft:
     """Распознать этикетку черновика и положить прочитанное в его поля.
 
-    ``reader`` — ``None``, если ключа polza.ai нет. Отказы —
-    :class:`~kitchen.cards.drafts.CardsError` с текстом для повара.
+    ``reader`` — ``None``, если ключа polza.ai нет. Идёт отправка черновика
+    (отметка моложе ``submit_window``) — 409: итог лёг бы в черновик, уже
+    ушедший в лист. Отказы — :class:`~kitchen.cards.drafts.CardsError` с
+    текстом для повара.
     """
     draft = require_active(session, owner_id, draft_id)
     if reader is None:
@@ -118,6 +127,8 @@ def recognize(
         raise DraftConflictError(NO_LABEL)
     if store.recognition_running(session, draft.id, STALE_AFTER):
         raise DraftConflictError(RUNNING)
+    if store.submitting(session, draft.id, submit_window):
+        raise DraftConflictError(WAIT_FOR_SUBMIT)
     try:
         ensure_allowed(session, limits, purpose=reader.purpose, profile_id=owner_id)
     except LlmLimitError as error:
@@ -126,24 +137,33 @@ def recognize(
     # Запрос к Drive идёт до минуты: транзакцию базы на это время закрываем.
     session.rollback()
     jpeg = fetch_photo(drive, label, draft_id)
-    started = store.start_recognition(session, owner_id, draft_id, label, STALE_AFTER)
+    started = store.start_recognition(
+        session, owner_id, draft_id, label, stale_after=STALE_AFTER, submit_window=submit_window
+    )
     session.commit()
     if started is None:
-        raise _not_started(session, owner_id, draft_id, label)
+        raise _not_started(session, owner_id, draft_id, label, submit_window)
     return _run(session, reader, owner_id, draft_id, label, started, jpeg)
 
 
 def _not_started(
-    session: Session, owner_id: uuid.UUID, draft_id: uuid.UUID, label: str
+    session: Session,
+    owner_id: uuid.UUID,
+    draft_id: uuid.UUID,
+    label: str,
+    submit_window: timedelta,
 ) -> CardsError:
     """Отметку «идёт» не поставили: почему — повару."""
     draft = store.active_draft(session, owner_id, draft_id)
     current = None if draft is None else draft.label_file_id
+    sending = draft is not None and store.submitting(session, draft_id, submit_window)
     session.rollback()
     if draft is None:
         return DraftNotFoundError()
     if current != label:
         return DraftConflictError(NO_LABEL if not current else LABEL_REPLACED)
+    if sending:
+        return DraftConflictError(WAIT_FOR_SUBMIT)
     return DraftConflictError(RUNNING)
 
 
@@ -328,11 +348,20 @@ def _settle(
         log.info("черновик %s закрыт, пока шло распознавание, — итог отброшен", draft_id)
         raise DraftNotFoundError
     if not _same_run(draft, label, started):
-        session.rollback()
+        current = draft.label_file_id
+        if draft.recognition_status == store.RUNNING and draft.recognition_started_at == started:
+            # Этикетку сменили, не сбросив «идёт» (так делают замена и
+            # удаление фото, но мало ли путей): этот запуск снимает его сам,
+            # а не оставляет висеть до предела.
+            forget_recognition(draft)
+            session.commit()
+        else:
+            session.rollback()
         log.info(
-            "черновик %s: этикетку заменили, пока шло распознавание, — итог отброшен", draft_id
+            "черновик %s: этикетку заменили или убрали, пока шло распознавание, — итог отброшен",
+            draft_id,
         )
-        raise DraftConflictError(LABEL_REPLACED)
+        raise DraftConflictError(LABEL_REPLACED if current else LABEL_REMOVED)
     if failed is not None:
         draft.recognition_status = store.FAILED
         draft.recognition = {"label_file_id": label, "error": failed}
