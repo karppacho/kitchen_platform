@@ -167,9 +167,19 @@ button.stroka-telo {
 
 .stroka-znachenie {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: baseline;
   gap: var(--shag);
   white-space: nowrap;
+}
+
+/* Подпись под значением («Выше цены меню…») — своей строкой под числом, а
+   не рядом: иначе правая колонка раздувается и сжимает название. */
+.stroka-znachenie .podpis-dorozhe {
+  flex-basis: 100%;
+  margin-left: 0;
+  text-align: right;
 }
 
 .stroka-znachenie-podpis {
