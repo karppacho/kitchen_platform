@@ -364,8 +364,8 @@ def test_garbage_reply_without_price_counts_as_unpriced() -> None:
     with pytest.raises(LlmGarbageError) as caught:
         _reader(fake).read(JPEG)
 
-    assert caught.value.cost_rub is None
-    assert caught.value.unpriced_attempts == 1
+    assert caught.value.cost_rub is None, "цена ответившей попытки неизвестна — бюджет: 5 ₽"
+    assert caught.value.unpriced_attempts == 0, "других попыток не было"
 
 
 def test_reader_closes_its_client() -> None:

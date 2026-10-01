@@ -45,6 +45,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import sys
 from datetime import UTC, datetime
@@ -150,6 +151,9 @@ NOT_UTF8 = (
     "файл не в кодировке UTF-8 — похоже, его пересохранили Блокнотом как «Юникод» "
     "(UTF-16); сохраните ключ в UTF-8"
 )
+BOM = codecs.BOM_UTF8.decode("utf-8")
+"""Метка порядка байтов (U+FEFF). Не литералом: невидимый символ в исходнике
+легко потерять, и проверка превратилась бы в ``startswith("")`` — «с BOM» любой ключ."""
 WITH_BOM = (
     "в начале файла метка BOM — так Блокнот сохраняет «UTF-8 с BOM»; сохраните ключ в UTF-8 без BOM"
 )
@@ -310,7 +314,7 @@ def _client_email(text: str | None, problem: str) -> tuple[str | None, str]:
     if "\x00" in text:
         # UTF-16 без метки порядка байтов — формально UTF-8, но с нулями.
         return None, NOT_UTF8
-    if text.startswith("﻿"):
+    if text.startswith(BOM):
         # Разбор JSON у Google на этой метке падает так же, как здесь.
         return None, WITH_BOM
     try:
@@ -569,31 +573,47 @@ def _check_llm(settings: Settings, report: Report) -> None:
 
 
 def _llm_why(error: LlmError, settings: Settings) -> str:
-    """Что чинить администратору — и код ответа polza.ai, если он был."""
-    hints = {
-        "key": "ключ не принят — проверьте POLZA_API_KEY",
-        "no_money": "нет денег на счёте polza.ai — пополните баланс",
-        "not_found": (
-            f"модель не найдена — проверьте LLM_VISION_MODEL (сейчас «{settings.llm_vision_model}»)"
-        ),
-        "unavailable": (
-            "нет связи с polza.ai или ответа нет дольше "
-            f"{settings.llm_vision_timeout_seconds} с — проверьте POLZA_BASE_URL и сеть "
-            "сервера, повторите запуск"
-        ),
-        "rate": "polza.ai просит подождать — повторите запуск через минуту",
-        "bad_request": (
+    """Что чинить администратору — и что ответил polza.ai: код и причину.
+
+    Коды «нет денег» и «нет модели» у polza.ai не проверены, поэтому его
+    собственная причина печатается всегда: по ней видно, что случилось на самом
+    деле, даже если подсказка не угадала.
+    """
+    detail = error.detail
+    if error.kind == "bad_request" and not (error.status == 400 and error.without_json_mode):
+        text = f"polza.ai отклонил запрос: {detail or 'причину не назвал'}"
+        detail = ""  # причина уже в тексте — в скобках только код
+    elif error.kind == "bad_request":
+        text = (
             "polza.ai отклонил запрос и в режиме JSON, и без него — проверьте "
             f"LLM_VISION_MODEL (сейчас «{settings.llm_vision_model}»): модель должна "
             "принимать картинки"
-        ),
-        "bad_reply": (
-            "ответ не похож на API polza.ai — проверьте POLZA_BASE_URL (сейчас "
-            f"«{settings.polza_base_url}»): нужен адрес API, обычно https://api.polza.ai/v1"
-        ),
-    }
-    text = hints.get(error.kind, str(error))
-    return text if error.status is None else f"{text} [{error.status}]"
+        )
+    elif error.kind in _LLM_HINTS:
+        text = _LLM_HINTS[error.kind].format(settings=settings)
+    else:
+        text = str(error)
+    said = " ".join(part for part in (str(error.status or ""), detail) if part)
+    return f"{text} [{said}]" if said else text
+
+
+_LLM_HINTS = {
+    "key": "ключ не принят — проверьте POLZA_API_KEY",
+    "no_money": "нет денег на счёте polza.ai — пополните баланс",
+    "not_found": (
+        "модель не найдена — проверьте LLM_VISION_MODEL (сейчас «{settings.llm_vision_model}»)"
+    ),
+    "unavailable": (
+        "нет связи с polza.ai или ответа нет дольше {settings.llm_vision_timeout_seconds} с "
+        "— проверьте POLZA_BASE_URL и сеть сервера, повторите запуск"
+    ),
+    "rate": "polza.ai просит подождать — повторите запуск через минуту",
+    "bad_reply": (
+        "ответ не похож на API polza.ai — проверьте POLZA_BASE_URL (сейчас "
+        "«{settings.polza_base_url}»): нужен адрес API, обычно https://api.polza.ai/v1"
+    ),
+}
+"""Что чинить администратору, по виду отказа. ``{settings…}`` подставляется."""
 
 
 # ---------------------------------------------------------------------------

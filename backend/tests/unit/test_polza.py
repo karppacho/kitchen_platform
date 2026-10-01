@@ -188,36 +188,40 @@ def test_refusals_are_not_repeated(status: int, kind: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("answers", "unpriced"),
+    ("answers", "cost", "unpriced"),
     [
-        ((ok(),), 0),
-        ((ok(usage=None),), 1),
-        ((httpx.ReadTimeout, ok()), 1),
-        ((httpx.RemoteProtocolError, ok()), 1),
-        ((refusal(502), ok(usage=None)), 2),
-        ((refusal(400), ok()), 0),
-        ((httpx.ConnectError, ok()), 0),
+        ((ok(),), Decimal("0.0123"), 0),
+        ((ok(usage=None),), None, 0),
+        ((httpx.ReadTimeout, ok()), Decimal("0.0123"), 1),
+        ((httpx.RemoteProtocolError, ok()), Decimal("0.0123"), 1),
+        ((refusal(502), ok(usage=None)), None, 1),
+        ((refusal(400), ok()), Decimal("0.0123"), 0),
+        ((httpx.ConnectError, ok()), Decimal("0.0123"), 0),
     ],
 )
 def test_attempts_without_known_price_are_counted(
-    answers: tuple[Answer, ...], unpriced: int
+    answers: tuple[Answer, ...], cost: Decimal | None, unpriced: int
 ) -> None:
-    """Таймаут, обрыв после отправки, 5xx, ответ без цены — polza.ai мог списать
-    деньги, а сколько — неизвестно. Журнал считает каждую такую попытку по
-    оценке. Не дошедший запрос (нет соединения) и отказ 4xx не стоят ничего."""
+    """Таймаут, обрыв после отправки, 5xx до ответа — polza.ai мог списать
+    деньги, а сколько — неизвестно: это ``unpriced_attempts``. Цена самой
+    ответившей попытки — ``cost_rub`` (``None`` — не сообщил), второй раз она
+    не считается. Не дошедший запрос и отказ 4xx не стоят ничего."""
     reply = _read(FakePolza(*answers))
 
+    assert reply.cost_rub == cost
     assert reply.unpriced_attempts == unpriced
 
 
 @pytest.mark.parametrize(
     ("answers", "cost", "unpriced"),
     [
-        ((httpx.ReadTimeout,), None, 2),
-        ((refusal(503),), None, 2),
+        ((httpx.ReadTimeout,), None, 1),
+        ((refusal(503),), None, 1),
         ((httpx.ConnectError,), Decimal("0"), 0),
+        ((httpx.ReadTimeout, httpx.ConnectError), Decimal("0"), 1),
         ((httpx.ReadTimeout, refusal(429)), Decimal("0"), 1),
         ((refusal(401),), Decimal("0"), 0),
+        ((httpx.Response(200, content=b"<html></html>"),), None, 0),
     ],
 )
 def test_failed_call_knows_its_unpriced_attempts(
@@ -228,6 +232,97 @@ def test_failed_call_knows_its_unpriced_attempts(
 
     assert caught.value.cost_rub == cost
     assert caught.value.unpriced_attempts == unpriced
+
+
+# ---------------------------------------------------------------------------
+# Причина отказа — от polza.ai, без ключа
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("answer", "reason"),
+    [
+        (refusal(402, "Insufficient balance"), "Insufficient balance"),
+        (httpx.Response(404, json={"message": "Model not found"}), "Model not found"),
+        (httpx.Response(422, json={"detail": "Image is too large"}), "Image is too large"),
+        (httpx.Response(429, json={"error": "Too many requests"}), "Too many requests"),
+        (httpx.Response(503, content=b"Service \n  Unavailable\n"), "Service Unavailable"),
+        (
+            httpx.Response(402, content=b'{"code": 402, "msg": "no funds"}'),
+            '{"code": 402, "msg": "no funds"}',
+        ),
+        (
+            httpx.Response(400, json={"error": {"message": "response_format_is_not_supported"}}),
+            "response_format_is_not_supported",
+        ),
+    ],
+)
+def test_reason_from_polza_is_kept(answer: httpx.Response, reason: str) -> None:
+    """Что ответил polza.ai — в ``detail`` и в журнале: первый живой запуск должен
+    показать настоящую причину, а не только код."""
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(answer))
+
+    assert caught.value.detail == reason
+    assert caught.value.describe().endswith(f": {reason}")
+
+
+def test_control_characters_are_dropped_from_reason() -> None:
+    """NUL роняет вставку в ``llm_calls`` (Postgres не хранит его в text), ESC
+    уходит в терминал администратора через ``--llm``. Из причины остаются только
+    печатаемые символы, остальной текст — на месте."""
+    nul, esc, delete = chr(0), chr(0x1B), chr(0x7F)
+    message = f"bad{nul}thing {esc}[31mred{esc}[0m end{delete}"
+
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(refusal(402, message)))
+
+    described = caught.value.describe()
+    assert all(char.isprintable() for char in described), repr(described)
+    assert caught.value.detail == "badthing [31mred[0m end"
+
+
+def test_long_reason_is_cut() -> None:
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(refusal(400, "очень длинно " * 100)))
+
+    assert 0 < len(caught.value.detail) <= 200
+
+
+_LOOKALIKE = "pza-" + "7f3c2a9e5d41" + "b8e0aa91c2d3"
+_BEARER = "sk-or-v1-" + "0123456789" + "abcdefABCDEF"
+"""Похожие на ключ строки собраны по частям: целиком их принял бы за настоящий
+ключ сканер секретов в CI (gitleaks, правило generic-api-key)."""
+
+
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    [
+        (f"Incorrect API key provided: {KEY}", KEY),
+        (f"Incorrect API key provided: {_LOOKALIKE}", _LOOKALIKE),
+        (f"Authorization: Bearer {_BEARER}", _BEARER),
+    ],
+)
+def test_key_in_reason_is_hidden(message: str, secret: str) -> None:
+    """Шлюзы любят повторять ключ в тексте ошибки. Ни наш ключ, ни похожая на
+    ключ строка в журнал не попадают; остальная причина — остаётся."""
+    with pytest.raises(LlmError) as caught:
+        _read(FakePolza(refusal(401, message)))
+
+    described = caught.value.describe()
+    assert secret not in described
+    assert KEY not in described
+    assert "Incorrect API key provided" in described or "Authorization" in described
+
+
+def test_json_mode_drop_is_known() -> None:
+    """Скрипт проверки говорит «отклонил и в режиме JSON, и без него» только
+    тогда, когда так и было."""
+    with pytest.raises(LlmError) as both:
+        _read(FakePolza(refusal(400, "image input is not supported")))
+    with pytest.raises(LlmError) as once:
+        _read(FakePolza(refusal(422, "bad image")))
+
+    assert both.value.without_json_mode
+    assert not once.value.without_json_mode
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +468,8 @@ def test_no_cost_is_none(usage: str | None) -> None:
     ("usage", "cost", "tokens"),
     [
         ('{"total_tokens": 2147483647, "cost_rub": 99999999.9999}', "99999999.9999", 2147483647),
+        ('{"total_tokens": 1, "cost_rub": 99999999.99994}', "99999999.99994", 1),
+        ('{"total_tokens": 1, "cost_rub": 99999999.99995}', None, 1),
         ('{"total_tokens": 2147483648, "cost_rub": 100000000}', None, None),
         ('{"total_tokens": -1, "cost_rub": 1e20}', None, None),
     ],
@@ -381,7 +478,9 @@ def test_absurd_cost_and_tokens_are_unknown(
     usage: str, cost: str | None, tokens: int | None
 ) -> None:
     """Колонки журнала — ``Numeric(12,4)`` и ``Integer``. Нелепое число уронило
-    бы вставку, и вызов выпал бы из бюджета; лучше «не знаем» и оценка."""
+    бы вставку, и вызов выпал бы из бюджета; лучше «не знаем» и оценка. Граница
+    — после округления до четырёх знаков, как его сделает Postgres:
+    99999999,99995 станет 100000000,0000 и не влезет."""
     reply = _read(FakePolza(ok(usage=usage)))
 
     assert reply.cost_rub == (None if cost is None else Decimal(cost))

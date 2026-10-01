@@ -19,9 +19,9 @@ polza.ai — OpenAI-совместимый шлюз, единственный п
   всё равно проверяет схема того, кто звал.
 * **Стоимость.** polza.ai кладёт ``cost_rub`` в ``usage``. SDK разобрал бы
   тело через ``float``; клиент читает сырое тело сам, дробные числа — через
-  ``Decimal``, с теми цифрами, что прислал polza.ai. Попытки, цена которых
-  неизвестна (таймаут, обрыв после отправки, 5xx, ответ без цены), клиент
-  считает: журнал вызовов добавляет за каждую оценку.
+  ``Decimal``, с теми цифрами, что прислал polza.ai. Неудачные попытки перед
+  последней, цена которых неизвестна (таймаут, обрыв после отправки, 5xx),
+  клиент считает: бюджет добавляет за каждую оценку.
 * **Таймауты** — свои, из настроек, на каждую фазу запроса. У SDK по
   умолчанию десять минут ожидания ответа.
 
@@ -35,9 +35,10 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Literal
 
 import httpx
@@ -72,8 +73,11 @@ _GARBAGE = "Модель ответила непонятно. Попробуйт
 _FREE = Decimal("0")
 """Цена попытки, до модели не дошедшей: отказ 4xx или запрос, не ушедший в сеть."""
 
-_COST_CEILING = Decimal("100000000")
-"""С этой цены — не цена: колонка журнала ``Numeric(12,4)`` её не вместит."""
+COST_CEILING = Decimal("100000000")
+"""С этой цены — не цена: колонка журнала ``Numeric(12,4)`` её не вместит.
+Единственное определение — его же проверяет журнал вызовов."""
+_COST_STEP = Decimal("0.0001")
+"""Четыре знака после запятой — до них Postgres округлит цену в журнале."""
 _TOKENS_CEILING = 2**31 - 1
 """Больше токенов колонка ``Integer`` не вмещает."""
 
@@ -93,11 +97,14 @@ class LlmError(RuntimeError):
     человека.
 
     ``status`` — код ответа polza.ai (``None`` — ответа не было); ``detail`` —
-    подробность для журнала. Для журнала же — ``cost_rub``: известная цена
-    последней попытки (``0`` — polza.ai отказал сразу или запрос не ушёл,
-    ``None`` — неизвестна); ``unpriced_attempts`` — сколько попыток могли
-    стоить денег, а сколько — неизвестно (последняя с ``cost_rub=None`` в их
-    числе); ``tokens``, ``duration_ms``.
+    подробность для журнала: что сказал polza.ai (до 200 знаков, ключ и
+    похожее на ключ скрыто) или вид сбоя связи. ``without_json_mode`` —
+    последняя попытка ушла без режима JSON: на 400 в нём был откат.
+
+    Для журнала же — ``cost_rub``: известная цена последней попытки (``0`` —
+    polza.ai отказал сразу или запрос не ушёл, ``None`` — неизвестна);
+    ``unpriced_attempts`` — сколько попыток **до неё** могли стоить денег, а
+    сколько — неизвестно; ``tokens``, ``duration_ms``.
     """
 
     def __init__(
@@ -107,6 +114,7 @@ class LlmError(RuntimeError):
         *,
         status: int | None = None,
         detail: str = "",
+        without_json_mode: bool = False,
         cost_rub: Decimal | None = None,
         unpriced_attempts: int = 0,
         tokens: int | None = None,
@@ -116,6 +124,7 @@ class LlmError(RuntimeError):
         self.kind: LlmErrorKind = kind
         self.status = status
         self.detail = detail
+        self.without_json_mode = without_json_mode
         self.cost_rub = cost_rub
         self.unpriced_attempts = unpriced_attempts
         self.tokens = tokens
@@ -174,8 +183,8 @@ class LlmReply:
     duration_ms: int
     """Сколько ждал повар — вместе с повтором, если он был."""
     unpriced_attempts: int = 0
-    """Попытки с неизвестной ценой: неудачные до ответа (таймаут, обрыв после
-    отправки, 5xx) и сам ответ, если polza.ai не сообщил цену."""
+    """Неудачные попытки до ответа, цена которых неизвестна: таймаут, обрыв
+    после отправки, 5xx. Цена самого ответа — в ``cost_rub``, здесь её нет."""
 
 
 def parse_json(text: str) -> object:
@@ -226,6 +235,8 @@ class PolzaClient:
         if not api_key:
             raise ValueError("Не задан ключ polza.ai — POLZA_API_KEY")
         self.base_url = base_url
+        # Только чтобы вычеркнуть ключ из текста ошибки, если шлюз его повторит.
+        self._secret = api_key
         self._clock = clock
         self._timeout_ns = round(timeout_seconds * 1_000_000_000)
         self._openai = openai.OpenAI(
@@ -271,20 +282,21 @@ class PolzaClient:
         started = self._clock()
         json_mode = True
         repeated = False
-        unpriced = 0
+        unpriced = 0  # попытки до последней, которые могли стоить денег
         while True:
             attempt = self._attempt(model, messages, max_tokens, json_mode=json_mode)
             if attempt.body is not None:
                 return _reply(attempt.body, model, self._elapsed_ms(started), unpriced)
             if attempt.status is None:
-                unpriced += int(attempt.maybe_sent)
                 if not repeated and self._time_for_another(started):
                     repeated = True
+                    unpriced += int(attempt.maybe_sent)
                     continue
                 raise LlmError(
                     "unavailable",
                     _UNAVAILABLE,
                     detail=attempt.detail,
+                    without_json_mode=not json_mode,
                     cost_rub=None if attempt.maybe_sent else _FREE,
                     unpriced_attempts=unpriced,
                     duration_ms=self._elapsed_ms(started),
@@ -292,12 +304,21 @@ class PolzaClient:
             if attempt.status == 400 and json_mode and self._time_for_another(started):
                 json_mode = False
                 continue
-            if _worth_repeating(attempt.status):
+            if (
+                _worth_repeating(attempt.status)
+                and not repeated
+                and self._time_for_another(started)
+            ):
+                repeated = True
                 unpriced += 1
-                if not repeated and self._time_for_another(started):
-                    repeated = True
-                    continue
-            raise _refusal(attempt.status, model, self._elapsed_ms(started), unpriced) from None
+                continue
+            raise _refusal(
+                attempt,
+                model,
+                without_json_mode=not json_mode,
+                duration_ms=self._elapsed_ms(started),
+                unpriced=unpriced,
+            ) from None
 
     def _attempt(
         self,
@@ -318,7 +339,10 @@ class PolzaClient:
             )
             return _Attempt(body=raw.text)
         except openai.APIStatusError as error:
-            return _Attempt(status=error.status_code)
+            # Из исключения — только код и причина из тела, не запрос с ключом.
+            return _Attempt(
+                status=error.status_code, detail=_reason(error.response.text, self._secret)
+            )
         except openai.APIConnectionError as error:  # в том числе APITimeoutError
             cause = error.__cause__
             return _Attempt(
@@ -355,41 +379,92 @@ def _worth_repeating(status: int) -> bool:
     return status >= 500 or status == 408
 
 
-def _refusal(status: int, model: str, duration_ms: int, unpriced: int) -> LlmError:
-    if _worth_repeating(status):
-        # Модель могла успеть поработать — цена неизвестна, попытка в unpriced.
-        return LlmError(
-            "unavailable",
-            _UNAVAILABLE,
-            status=status,
-            unpriced_attempts=unpriced,
-            duration_ms=duration_ms,
-        )
+def _refusal(
+    attempt: _Attempt, model: str, *, without_json_mode: bool, duration_ms: int, unpriced: int
+) -> LlmError:
+    """Отказ polza.ai (последняя попытка) → ошибка с видом, причиной и ценой."""
+    status = attempt.status or 0
     kind: LlmErrorKind
-    if status in (401, 403):
-        kind, message = "key", _KEY
+    if _worth_repeating(status):
+        # Модель могла успеть поработать — цена последней попытки неизвестна.
+        kind, message, cost = "unavailable", _UNAVAILABLE, None
+    elif status in (401, 403):
+        kind, message, cost = "key", _KEY, _FREE
     elif status == 402:
-        kind, message = "no_money", _NO_MONEY
+        kind, message, cost = "no_money", _NO_MONEY, _FREE
     elif status == 404:
-        kind, message = "not_found", _NOT_FOUND.format(model=model)
+        kind, message, cost = "not_found", _NOT_FOUND.format(model=model), _FREE
     elif status == 429:
-        kind, message = "rate", _RATE
+        kind, message, cost = "rate", _RATE, _FREE
     else:
-        kind, message = "bad_request", _BAD_REQUEST
+        kind, message, cost = "bad_request", _BAD_REQUEST, _FREE
     return LlmError(
         kind,
         message,
         status=status,
-        cost_rub=_FREE,
+        detail=attempt.detail,
+        without_json_mode=without_json_mode,
+        cost_rub=cost,
         unpriced_attempts=unpriced,
         duration_ms=duration_ms,
     )
 
 
+_REASON_LIMIT = 200
+_REASON_SOURCE_LIMIT = 20_000
+_SECRET_LIKE = re.compile(r"(?i)\bbearer\s+\S+|[A-Za-z0-9_\-]{20,}")
+"""«Bearer …» и длинные слитные строки — кандидаты в ключи. Квантификаторы не
+вложены и не делят символы: поиск линейный."""
+
+
+def _reason(body: str, secret: str) -> str:
+    """Короткая причина отказа из тела ответа polza.ai — для журнала и администратора.
+
+    Берётся текст ошибки (``error.message``, ``error``, ``message``, ``detail``
+    — как отдаёт шлюз), иначе само тело; пробелы схлопнуты, не длиннее
+    200 знаков. Ключ платформы и всё, что похоже на ключ, вычёркивается:
+    шлюзы любят повторять его в тексте ошибки.
+    """
+    text = body[:_REASON_SOURCE_LIMIT]
+    try:
+        payload: object = json.loads(text)
+    except (ValueError, RecursionError):
+        payload = text
+    found = (_message(payload, depth=0) or text).replace(secret, "***")
+    cleaned = printable_line(_SECRET_LIKE.sub(_masked, found))
+    if len(cleaned) <= _REASON_LIMIT:
+        return cleaned
+    return cleaned[: _REASON_LIMIT - 1].rstrip() + "…"
+
+
+def _message(payload: object, *, depth: int) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+    if not isinstance(payload, dict) or depth > 2:
+        return ""
+    for key in ("error", "message", "detail"):
+        found = _message(payload.get(key), depth=depth + 1)
+        if found:
+            return found
+    return ""
+
+
+def _masked(match: re.Match[str]) -> str:
+    """Похожее на ключ → «***»: «Bearer …» всегда, длинная строка — если в ней и
+    буквы, и цифры (идентификаторы вроде ``response_format_not_supported``
+    остаются)."""
+    found = match.group(0)
+    if found[:6].lower() == "bearer":
+        return "Bearer ***"
+    letters = any(char.isalpha() for char in found)
+    digits = any(char.isdigit() for char in found)
+    return "***" if letters and digits else found
+
+
 def _reply(body: str, model: str, duration_ms: int, unpriced: int) -> LlmReply:
     """Тело ответа chat/completions → :class:`LlmReply`.
 
-    Ответ, который не разобрать, — тоже попытка с неизвестной ценой.
+    Цена ответа, который не разобрать, неизвестна: ``cost_rub=None``.
     """
 
     def bad(detail: str) -> LlmError:
@@ -397,7 +472,7 @@ def _reply(body: str, model: str, duration_ms: int, unpriced: int) -> LlmReply:
             "bad_reply",
             _BAD_REPLY,
             detail=detail,
-            unpriced_attempts=unpriced + 1,
+            unpriced_attempts=unpriced,
             duration_ms=duration_ms,
         )
 
@@ -425,7 +500,7 @@ def _reply(body: str, model: str, duration_ms: int, unpriced: int) -> LlmReply:
         cost_rub=cost,
         tokens=_tokens(tokens),
         duration_ms=duration_ms,
-        unpriced_attempts=unpriced + int(cost is None),
+        unpriced_attempts=unpriced,
     )
 
 
@@ -443,9 +518,33 @@ def _cost(value: object) -> Decimal | None:
             return None
     else:
         return None
-    if not number.is_finite() or not _FREE <= number < _COST_CEILING:
+    return storable_cost(number)
+
+
+def storable_cost(number: Decimal) -> Decimal | None:
+    """Цена как есть, если журнал её сохранит, иначе ``None`` — «не знаем».
+
+    Отрицательная, бесконечная, NaN или не влезающая в ``Numeric(12,4)`` — не
+    цена. Граница проверяется после округления до четырёх знаков (половина —
+    вверх, как у Postgres): 99999999,99995 станет 100000000,0000 и уронило бы
+    вставку, а с ней пропала бы и строка журнала.
+    """
+    if not number.is_finite() or number < _FREE or number >= COST_CEILING:
+        return None
+    if number.quantize(_COST_STEP, rounding=ROUND_HALF_UP) >= COST_CEILING:
         return None
     return number
+
+
+def printable_line(text: str) -> str:
+    """Текст в одну строку из печатаемых символов.
+
+    Управляющие символы выбрасываются: NUL роняет вставку в text-колонку
+    Postgres, ESC и прочие уходят в терминал администратора. Пробелы любого
+    вида схлопываются в один.
+    """
+    kept = "".join(char for char in text if char.isprintable() or char.isspace())
+    return " ".join(kept.split())
 
 
 def _tokens(value: object) -> int | None:

@@ -13,7 +13,7 @@ import json
 import re
 import struct
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import check_cards_setup
 import httpx
@@ -34,9 +34,6 @@ from tests.fake_polza import (
     ok,
     refusal,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 FAKE_PRIVATE_KEY = (
     "-----BEGIN PRIVATE KEY-----\nNE-NASTOYASHCHII-KLYUCH\n-----END PRIVATE KEY-----\n"
@@ -534,6 +531,15 @@ def test_platform_key_with_bom(setup: Setup, capsys: pytest.CaptureFixture[str])
     assert setup.opened == []
 
 
+def test_bom_is_not_a_literal_in_the_source() -> None:
+    """Невидимый символ в исходнике легко потерять при правке — и проверка
+    «начинается с BOM» стала бы «начинается с пустой строки»: с BOM любой ключ."""
+    source = Path(check_cards_setup.__file__).read_text(encoding="utf-8")
+
+    assert chr(0xFEFF) not in source
+    assert chr(0xFEFF) == check_cards_setup.BOM
+
+
 def test_bot_key_with_bom(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
     bot_key = _key(setup.tmp_path / "bot.json", BOT, encoding="utf-8-sig")
 
@@ -608,7 +614,11 @@ def test_no_llm_call_without_the_flag(setup: Setup, capsys: pytest.CaptureFixtur
         (refusal(404), "модель не найдена"),
         (httpx.ConnectError, "нет связи"),
         (httpx.ReadTimeout, "нет связи"),
+        (refusal(400, "image input is not supported"), "и в режиме JSON, и без него"),
+        (refusal(400, "image input is not supported"), "image input is not supported"),
         (refusal(400), "LLM_VISION_MODEL"),
+        (refusal(422, "Unprocessable image"), "отклонил запрос: Unprocessable image"),
+        (refusal(402, "Insufficient balance"), "Insufficient balance"),
         (httpx.Response(200, content=b"<html>login</html>"), "POLZA_BASE_URL"),
     ],
 )
@@ -624,6 +634,10 @@ def test_llm_probe_failure_is_explained(
     assert "ОШИБКА" in out
     assert KEY not in out
     assert "Сообщите администратору" not in out, "скрипт читает администратор — нужна подсказка"
+    [failure] = _lines(out, "пробный вызов не прошёл")
+    if isinstance(answer, httpx.Response):
+        reason = answer.json()["error"]["message"] if answer.status_code != 200 else ""
+        assert not reason or failure.count(reason) == 1, f"причина — один раз: {failure}"
 
 
 def test_llm_probe_without_key(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
