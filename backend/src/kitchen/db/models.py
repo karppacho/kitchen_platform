@@ -579,10 +579,15 @@ class CardDraft(Base):
     recognition_warnings: Mapped[list[str]] = mapped_column(
         JSONB, default=list, server_default=text("'[]'::jsonb")
     )
-    """Замечания повару к полям черновика: что заметило распознавание на
-    этикетке и что не так с КБЖУ сейчас. Проверку КБЖУ правка повара
-    пересчитывает (``kitchen.cards.drafts.renew_nutrient_warnings``)."""
+    """Замечания самой этикетки — что заметило распознавание: срок, основа
+    КБЖУ, неясные числа. Проверка КБЖУ здесь не хранится: её черновик
+    считает при каждой выдаче по своим числам (``kitchen.cards.drafts``)."""
 
+    submit_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    """Когда началась отправка в лист; пусто — не идёт. Пока отметка свежая,
+    фото черновика не меняются и не уходят в корзину: ссылки на них уже летят
+    в лист. Старше предела — процесс умер посреди записи, отправка снова
+    разрешена (``kitchen.cards.submit``)."""
     submitted_row: Mapped[int | None] = mapped_column(Integer)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     sheet_write_id: Mapped[int | None] = mapped_column(

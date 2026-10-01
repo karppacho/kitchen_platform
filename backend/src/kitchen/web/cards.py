@@ -1,7 +1,9 @@
-"""Ручки карточек ингредиентов: черновик, фото, подсказки.
+"""Ручки карточек ингредиентов: черновик, фото, подсказки, распознавание, отправка.
 
 Тонкие: разобрать запрос, позвать слой приложения (``kitchen.cards``),
-отдать ответ. Всё, что решает, — там.
+отдать ответ. Всё, что решает, — там. Внешние участники — Drive, чтец
+этикеток (polza.ai), писатель строки и перенос книги в базу — приходят
+зависимостями из ``app.state``: тест подменяет их фальшивками.
 
 Ручки — для тех, кто заводит карточки: повар, шеф, разработчик. Коммерсу
 раздел не нужен — 403. Черновик видит только его владелец: чужой — 404,
@@ -16,7 +18,7 @@ JSON их бы исказила.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -24,11 +26,16 @@ from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
-from kitchen.cards import drafts
+from kitchen.cards import drafts, recognize, submit
+from kitchen.config import Settings
 from kitchen.db.models import CardDraft
 from kitchen.domain.cards import TEXT_LIMITS
+from kitchen.llm.budget import LlmLimits
+from kitchen.llm.label import LabelReader
+from kitchen.sync.cycle import SyncCycle
 from kitchen.sync.drive import DriveClient
-from kitchen.web.auth import CurrentUser, SessionDep, require
+from kitchen.sync.writer import CardSheetWriter
+from kitchen.web.auth import CurrentUser, SessionDep, get_settings, require
 
 # Типы зависимостей импортируются в рантайме, а не под TYPE_CHECKING: с
 # `from __future__ import annotations` FastAPI разрешает их по именам модуля
@@ -37,6 +44,7 @@ from kitchen.web.auth import CurrentUser, SessionDep, require
 router = APIRouter(prefix="/api/cards", tags=["карточки"])
 
 CardsUserDep = Annotated[CurrentUser, Depends(require("cook", "chef", "developer"))]
+SettingsDep = Annotated[Settings, Depends(get_settings)]
 
 PhotoKind = Literal["label", "package", "before", "after"]
 
@@ -47,7 +55,34 @@ def get_drive(request: Request) -> DriveClient:
     return drive
 
 
+def get_label_reader(request: Request) -> LabelReader | None:
+    """Чтец этикеток — один на процесс; ``None`` — ключа polza.ai нет."""
+    reader: LabelReader | None = request.app.state.label_reader()
+    return reader
+
+
+def get_card_writer(request: Request) -> CardSheetWriter | None:
+    """Писатель строки карточки; ``None`` — книга карточек не настроена."""
+    writer: CardSheetWriter | None = request.app.state.card_writer()
+    return writer
+
+
+def get_sync_cycle(request: Request) -> SyncCycle:
+    """Перенос листов в базу — тот же, что у воркера."""
+    cycle: SyncCycle = request.app.state.sync_cycle()
+    return cycle
+
+
+def get_submit_window(settings: SettingsDep) -> timedelta:
+    """Сколько отметка «отправка идёт» считается живой."""
+    return submit.submit_window(settings)
+
+
 DriveDep = Annotated[DriveClient, Depends(get_drive)]
+LabelReaderDep = Annotated[LabelReader | None, Depends(get_label_reader)]
+WriterDep = Annotated[CardSheetWriter | None, Depends(get_card_writer)]
+CycleDep = Annotated[SyncCycle, Depends(get_sync_cycle)]
+SubmitWindowDep = Annotated[timedelta, Depends(get_submit_window)]
 
 
 # ---------------------------------------------------------------------------
@@ -78,8 +113,13 @@ class DraftOut(BaseModel):
     photos: dict[str, bool]
     """Какие из четырёх фото есть. Сами фото — ``GET …/photos/{вид}``."""
     recognition_status: str | None
+    """Распознавание этикетки: ``running`` — идёт (опрашивайте черновик),
+    ``done``, ``failed``; ``null`` — не запускали или этикетку заменили."""
+    recognition_error: str | None
+    """Почему не удалось последнее распознавание — текст для повара."""
     warnings: list[str]
-    """Замечания повару: что заметило распознавание и что не так с КБЖУ."""
+    """Замечания повару: что заметило распознавание на этикетке и что не так
+    с КБЖУ, — по числам, что стоят в черновике сейчас."""
     missing: list[str]
     """Чего не хватает для отправки — названиями для повара."""
     created_at: datetime
@@ -140,6 +180,30 @@ class NameCheckOut(BaseModel):
     """Имена из справочника — только имена, без цен."""
 
 
+class ShiftedOut(BaseModel):
+    """Прежняя попытка записи, раскладку которой не подтвердили."""
+
+    row: int
+    journal_id: int
+
+
+class SubmitOut(BaseModel):
+    """Карточка в листе: «Записано в строку N»."""
+
+    row: int
+    already_written: bool
+    """Карточка легла раньше — повтором отправки или прерванной попыткой."""
+    imported: bool
+    """Карточка уже на сайте; ``false`` — появится при следующем обновлении."""
+    name: str
+    not_written: list[str]
+    """Правки, не попавшие в лист, — названиями колонок листа."""
+    shifted: ShiftedOut | None
+    """Строка и запись журнала, которые повар показывает шефу."""
+    notes: list[str]
+    """Оговорки повару готовыми фразами — показать как есть."""
+
+
 def _number(value: Decimal | None) -> str | None:
     """Число строкой, без хвостовых нулей и экспоненты: 12.500 → «12.5», 100 → «100»."""
     return None if value is None else format(value.normalize(), "f")
@@ -168,7 +232,8 @@ def _out(draft: CardDraft) -> DraftOut:
         approval=draft.approval,
         photos=drafts.photos(draft),
         recognition_status=draft.recognition_status,
-        warnings=list(draft.recognition_warnings),
+        recognition_error=recognize.recognition_error(draft),
+        warnings=drafts.draft_warnings(draft),
         missing=list(drafts.missing(draft)),
         created_at=draft.created_at,
         updated_at=draft.updated_at,
@@ -235,11 +300,63 @@ def update_draft(
 
 @router.delete("/drafts/{draft_id}", status_code=status.HTTP_204_NO_CONTENT)
 def cancel_draft(
-    draft_id: uuid.UUID, session: SessionDep, user: CardsUserDep, drive: DriveDep
+    draft_id: uuid.UUID,
+    session: SessionDep,
+    user: CardsUserDep,
+    drive: DriveDep,
+    window: SubmitWindowDep,
 ) -> Response:
     """«Начать заново»."""
-    drafts.cancel_draft(session, drive, user.id, draft_id)
+    drafts.cancel_draft(session, drive, user.id, draft_id, submit_window=window)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/drafts/{draft_id}/submit", response_model=SubmitOut)
+def submit_draft(
+    draft_id: uuid.UUID,
+    session: SessionDep,
+    user: CardsUserDep,
+    writer: WriterDep,
+    cycle: CycleDep,
+    window: SubmitWindowDep,
+) -> SubmitOut:
+    """«Отправить в таблицу»: одна запись в лист и перенос карточки в базу.
+
+    Повтор (ответ потерялся в сети) — та же строка, без второй записи."""
+    sent = submit.submit(session, writer, cycle, user.id, draft_id, window=window)
+    return SubmitOut(
+        row=sent.row,
+        already_written=sent.already_written,
+        imported=sent.imported,
+        name=sent.name,
+        not_written=list(sent.not_written),
+        shifted=None
+        if sent.shifted is None
+        else ShiftedOut(row=sent.shifted.row, journal_id=sent.shifted.id),
+        notes=list(sent.notes),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Распознавание этикетки
+# ---------------------------------------------------------------------------
+@router.post("/recognize/{draft_id}", response_model=DraftOut)
+def recognize_label(
+    draft_id: uuid.UUID,
+    session: SessionDep,
+    user: CardsUserDep,
+    drive: DriveDep,
+    reader: LabelReaderDep,
+    settings: SettingsDep,
+) -> DraftOut:
+    """Распознать фото этикетки черновика: поля и замечания — в черновик.
+
+    Идёт до трёх минут; телефон мог уснуть — результат ждёт в черновике
+    (``recognition_status``)."""
+    draft = recognize.recognize(
+        session, drive, reader, LlmLimits.from_settings(settings), user.id, draft_id
+    )
+    return _out(draft)
 
 
 # ---------------------------------------------------------------------------
@@ -253,13 +370,23 @@ def put_photo(
     session: SessionDep,
     user: CardsUserDep,
     drive: DriveDep,
+    window: SubmitWindowDep,
 ) -> DraftOut:
-    """Фото в слот черновика (multipart, поле ``photo``, JPEG до 8 МБ)."""
+    """Фото в слот черновика (multipart, поле ``photo``, JPEG до 8 МБ).
+
+    Новая этикетка сбрасывает распознавание прежней."""
     # На байт больше предела: этого хватает, чтобы узнать «слишком большое»,
     # не читая в память всё, что прислали.
     content = photo.file.read(drafts.PHOTO_LIMIT + 1)
     draft = drafts.put_photo(
-        session, drive, user.id, draft_id, kind, content, now=datetime.now(UTC)
+        session,
+        drive,
+        user.id,
+        draft_id,
+        kind,
+        content,
+        now=datetime.now(UTC),
+        submit_window=window,
     )
     return _out(draft)
 
@@ -271,8 +398,9 @@ def remove_photo(
     session: SessionDep,
     user: CardsUserDep,
     drive: DriveDep,
+    window: SubmitWindowDep,
 ) -> DraftOut:
-    return _out(drafts.remove_photo(session, drive, user.id, draft_id, kind))
+    return _out(drafts.remove_photo(session, drive, user.id, draft_id, kind, submit_window=window))
 
 
 @router.get("/drafts/{draft_id}/photos/{kind}")
@@ -306,21 +434,38 @@ ERROR_STATUS: dict[type[drafts.CardsError], int] = {
     drafts.PhotoMissingError: status.HTTP_404_NOT_FOUND,
     drafts.DraftExistsError: status.HTTP_409_CONFLICT,
     drafts.PhotoNeedsNamesError: status.HTTP_409_CONFLICT,
+    drafts.DraftConflictError: status.HTTP_409_CONFLICT,
+    submit.DuplicateCardError: status.HTTP_409_CONFLICT,
     drafts.PhotoTooLargeError: status.HTTP_413_CONTENT_TOO_LARGE,
     drafts.NotJpegError: status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
     drafts.DraftFieldError: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    submit.MissingFieldsError: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    recognize.RecognitionLimitError: status.HTTP_429_TOO_MANY_REQUESTS,
     drafts.StorageError: status.HTTP_502_BAD_GATEWAY,
+    recognize.RecognitionFailedError: status.HTTP_502_BAD_GATEWAY,
+    submit.SubmitFailedError: status.HTTP_502_BAD_GATEWAY,
     drafts.StorageNotConfiguredError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    recognize.RecognitionNotConfiguredError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    submit.SubmitUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
 }
 """Отказ слоя приложения → код ответа. Новый отказ без кода — тест краснеет."""
 
 
+def status_for(error_type: type[drafts.CardsError]) -> int | None:
+    """Код ответа отказа — по цепочке наследования: наследник отказа с кодом
+    отвечает тем же кодом. Сам ``CardsError`` кода не имеет."""
+    for cls in error_type.__mro__:
+        if cls in ERROR_STATUS:
+            return ERROR_STATUS[cls]
+    return None
+
+
 async def cards_error(request: Request, error: Exception) -> JSONResponse:
-    """Отказ — текстом для повара в ``detail``, как во всём API; у отказа
-    правки — ещё и ``field``: какое поле подсветить."""
+    """Отказ — текстом для повара в ``detail``, как во всём API, и тем, что
+    ещё нужно экрану: у отказа правки — ``field`` (какое поле подсветить), у
+    дубля — ``row``, у неполного черновика — ``missing``."""
     if not isinstance(error, drafts.CardsError):  # pragma: no cover — регистрируется на CardsError
         raise error
-    body: dict[str, str] = {"detail": str(error)}
-    if isinstance(error, drafts.DraftFieldError):
-        body["field"] = error.field
-    return JSONResponse(body, status_code=ERROR_STATUS[type(error)])
+    body: dict[str, object] = {"detail": str(error), **error.extra()}
+    code = status_for(type(error))
+    return JSONResponse(body, status_code=code or status.HTTP_500_INTERNAL_SERVER_ERROR)

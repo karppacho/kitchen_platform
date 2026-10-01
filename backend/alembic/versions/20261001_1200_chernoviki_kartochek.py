@@ -8,6 +8,11 @@
 закрытой папке Drive, состояние распознавания этикетки и след отправки в
 лист. Один активный черновик на повара.
 
+`submit_started_at` — когда началась отправка в лист (пусто — не идёт).
+Пока она свежая, фото черновика не меняются и не уходят в корзину: ссылки
+на них уже летят в лист. Колонка добавлена в эту же ревизию, а не новой:
+ревизия ещё не выложена ни на одну боевую базу (задачи 7–8 этапа 5).
+
 Чек-лист (его же проверяет агент migration-guard):
 
   * **downgrade работает.** Ревизия только создаёт таблицу; откат сносит её
@@ -84,6 +89,7 @@ def upgrade() -> None:
             server_default=sa.text("'[]'::jsonb"),
             nullable=False,
         ),
+        sa.Column("submit_started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("submitted_row", sa.Integer(), nullable=True),
         sa.Column("submitted_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("sheet_write_id", sa.BigInteger(), nullable=True),

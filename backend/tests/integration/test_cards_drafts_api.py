@@ -48,6 +48,7 @@ from tests.integration.test_database import _url
 
 if TYPE_CHECKING:
     import httpx
+    import requests
     from sqlalchemy.orm import Session, sessionmaker
 
 pytestmark = pytest.mark.integration
@@ -64,6 +65,8 @@ NINE_MB = b"\xff\xd8\xff\xe0" + bytes(9 * 1024 * 1024) + b"\xff\xd9"
 NO_END = b"\xff\xd8\xff\xe0" + bytes(200)
 
 STORAGE_MISSING = "Хранилище фото не настроено — сообщите администратору"
+STORAGE_DOWN = "Хранилище фото недоступно — попробуйте позже"
+STORAGE_BROKEN = "Хранилище фото недоступно — сообщите администратору"
 
 ENDPOINTS = [
     ("GET", "/api/cards/options"),
@@ -244,6 +247,26 @@ def test_card_roles_may_start_a_draft(people: None, drive: FakeDrive, role: str)
     client = make_client(drive, roles=(role,))
 
     assert start(client)["step"] == "supplier"
+
+
+@pytest.mark.parametrize("role", ["chef", "developer"])
+def test_chef_and_developer_may_edit_and_handle_photos(
+    people: None, drive: FakeDrive, role: str
+) -> None:
+    """Шеф и разработчик заводят карточки наравне с поваром — не только
+    «Начать», но и правка, и фото."""
+    client = make_client(drive, roles=(role,))
+    draft = start(client)
+
+    edited = patch(client, draft["id"], supplier="Метро", name="Соус Барбекю")
+    uploaded_reply = put_photo(client, draft["id"])
+    shown = client.get(photo_url(draft["id"]))
+    removed = client.delete(photo_url(draft["id"]), headers=CSRF)
+
+    assert [edited.status_code, uploaded_reply.status_code, shown.status_code] == [200, 200, 200]
+    assert shown.content == JPEG
+    assert removed.status_code == 200
+    assert removed.json()["photos"]["label"] is False
 
 
 def test_changing_request_without_csrf_header_is_403(
@@ -440,9 +463,10 @@ def test_manual_edit_renews_nutrient_warnings(cook: TestClient) -> None:
 def test_label_notes_survive_manual_edit_without_duplicates(
     cook: TestClient, sessions: sessionmaker[Session]
 ) -> None:
-    """Распознавание (задача 8) кладёт в черновик поля и замечания домена.
-    Правка повара пересчитывает только проверку чисел: замечания о самой
-    этикетке остаются, проверка не дублируется."""
+    """Распознавание кладёт в черновик числа и замечания самой этикетки —
+    без проверки КБЖУ: её черновик считает при каждой выдаче по своим числам.
+    Правка повара меняет только проверку: замечания этикетки остаются,
+    проверка не дублируется и в базе не хранится."""
     draft = start(cook)
     values, notes = label_fields_from_extraction(
         {
@@ -453,17 +477,18 @@ def test_label_notes_survive_manual_edit_without_duplicates(
             "nutrition_basis": "на 100 г",
         }
     )
+    recognized = check_nutrients(Decimal("120"), None, Decimal("10"), Decimal("300"))
+    label_notes = [note for note in notes if note not in recognized]
+    assert label_notes, "у этикетки есть свои замечания — про жиры"
+    assert recognized, "и проверка чисел нашла белки больше 100 г"
     with sessions.begin() as session:
         record = session.get(models.CardDraft, uuid.UUID(str(draft["id"])))
         assert record is not None
         for field in ("protein", "fat", "carbs", "kcal"):
             setattr(record, field, values[field])
-        record.recognition_warnings = list(notes)
-    recognized = check_nutrients(Decimal("120"), None, Decimal("10"), Decimal("300"))
-    label_notes = [note for note in notes if note not in recognized]
-    assert label_notes, "у этикетки есть свои замечания — про жиры"
-    assert recognized, "и проверка чисел нашла белки больше 100 г"
+        record.recognition_warnings = label_notes
 
+    shown = current(cook)["warnings"]  # type: ignore[index]
     after_protein = patch(cook, draft["id"], protein="12").json()["warnings"]
     again = patch(cook, draft["id"], protein="12").json()["warnings"]
     after_fat = patch(cook, draft["id"], fat="0,5").json()["warnings"]
@@ -471,9 +496,13 @@ def test_label_notes_survive_manual_edit_without_duplicates(
 
     mismatch = check_nutrients(Decimal("12"), Decimal("0.5"), Decimal("10"), Decimal("300"))
     assert mismatch, "по Б, Ж, У выходит около 93 ккал, а указано 300"
+    assert shown == label_notes + list(recognized)
     assert after_protein == again == label_notes
     assert after_fat == label_notes + list(mismatch)
     assert after_kcal == label_notes
+    assert row(sessions, draft["id"])["recognition_warnings"] == label_notes, (
+        "проверка чисел в базе не хранится"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -540,34 +569,67 @@ def test_storage_not_configured_is_503_before_drive(people: None, drive: FakeDri
 
 
 @pytest.mark.parametrize(
-    ("status", "reason", "text"),
+    ("status", "reason", "text", "logged"),
     [
-        (500, "backendError", "Google Drive сейчас не отвечает"),
-        (403, "storageQuotaExceeded", "нет места для фото"),
+        (500, "backendError", STORAGE_DOWN, "Google Drive сейчас не отвечает"),
+        (403, "storageQuotaExceeded", STORAGE_BROKEN, "нет места для фото"),
     ],
+    ids=["drive-down", "quota"],
 )
 def test_drive_failure_changes_nothing(
     cook: TestClient,
     drive: FakeDrive,
     sessions: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
     status: int,
     reason: str,
     text: str,
+    logged: str,
 ) -> None:
-    """Сначала Drive, потом база: загрузка не удалась — прежнее фото на месте."""
+    """Сначала Drive, потом база: загрузка не удалась — прежнее фото на месте.
+    Повару — что делать, подробности Google — в лог."""
     draft = named(cook)
     assert put_photo(cook, draft["id"]).status_code == 200
     before = row(sessions, draft["id"])
     drive.fail_next(status, reason, method="POST")
 
-    reply = put_photo(cook, draft["id"], content=JPEG_2)
+    with caplog.at_level(logging.WARNING):
+        reply = put_photo(cook, draft["id"], content=JPEG_2)
 
     assert reply.status_code == 502
-    assert text in reply.json()["detail"]
+    assert reply.json() == {"detail": text}
     assert "Service Accounts" not in reply.text, "сырой ответ Google повару не показываем"
+    assert any(logged in record.getMessage() for record in caplog.records)
     assert row(sessions, draft["id"]) == before
     assert trashed(drive) == []
     assert cook.get(photo_url(draft["id"])).content == JPEG
+
+
+def test_unreadable_google_key_is_told_neutrally(
+    people: None,
+    drive: FakeDrive,
+    sessions: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Ключ сервисного аккаунта не прочитан: повару — нейтральный текст, а имя
+    переменной окружения и путь — только администратору, в лог."""
+    client = make_client(drive)
+    draft = named(client)
+
+    def no_key() -> requests.Session:
+        raise FileNotFoundError("service_account.json")
+
+    client.app.dependency_overrides[cards.get_drive] = lambda: DriveClient(  # type: ignore[attr-defined]
+        no_key, folder_id=FOLDER_ID, timeout=(5, 30)
+    )
+
+    with caplog.at_level(logging.WARNING):
+        reply = put_photo(client, draft["id"])
+
+    assert reply.status_code == 502
+    assert reply.json() == {"detail": STORAGE_BROKEN}
+    assert any("GOOGLE_CREDENTIALS_PATH" in record.getMessage() for record in caplog.records)
+    assert row(sessions, draft["id"])["label_file_id"] is None
 
 
 def test_unknown_photo_kind_is_422(cook: TestClient, drive: FakeDrive) -> None:
@@ -849,8 +911,9 @@ def test_proxy_when_drive_lost_the_file(
         reply = cook.get(photo_url(draft["id"]))
 
     assert reply.status_code == 502
-    assert reply.json()["detail"].startswith("Не найдено в Google Drive")
+    assert reply.json() == {"detail": "Фото пропало из хранилища — сфотографируйте ещё раз"}
     assert orphan_logs(caplog, file_id)
+    assert any("Не найдено в Google Drive" in line for line in orphan_logs(caplog, file_id))
 
 
 # ---------------------------------------------------------------------------

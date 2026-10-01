@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -29,17 +30,24 @@ from kitchen.cards.drafts import (
     check_jpeg,
     match_names,
     ranked,
-    renew_nutrient_warnings,
+    shown_warnings,
+    storage_text,
     submit_request_key,
     validate_changes,
 )
+from kitchen.cards.recognize import STALE_AFTER, RecognitionFailedError
+from kitchen.cards.submit import submit_window
+from kitchen.config import Settings
 from kitchen.domain.cards import (
     DEFAULT_CATEGORIES,
     PHOTO_KINDS,
     TEXT_LIMITS,
     check_nutrients,
 )
-from kitchen.web.cards import ERROR_STATUS
+from kitchen.llm.polza import TOTAL_DEADLINE_SECONDS
+from kitchen.sync.drive import DriveError
+from kitchen.sync.writer import LOCK_TIMEOUT, hold_limit
+from kitchen.web.cards import ERROR_STATUS, status_for
 from tests.unit.test_web_auth import make_client
 
 _D = Decimal
@@ -94,9 +102,58 @@ def test_submit_key_is_per_draft() -> None:
     assert submit_request_key(draft) == f"card-draft:{draft}"
 
 
+def _descendants(cls: type[CardsError]) -> set[type[CardsError]]:
+    found: set[type[CardsError]] = set()
+    for child in cls.__subclasses__():
+        found |= {child, *_descendants(child)}
+    return found
+
+
 def test_every_refusal_has_a_status_code() -> None:
-    """Новый отказ без кода ответа ушёл бы повару ошибкой 500."""
-    assert set(CardsError.__subclasses__()) == set(ERROR_STATUS)
+    """Новый отказ без кода ответа ушёл бы повару ошибкой 500.
+
+    Отказы — во всех модулях слоя (черновик, распознавание, отправка), и у
+    наследника код ищется по цепочке наследования: внук отказа с кодом — с
+    кодом. Сам ``CardsError`` кода не имеет, иначе проверка была бы пустой."""
+    refusals = _descendants(CardsError)
+
+    assert RecognitionFailedError in refusals, "отказы распознавания и отправки — тоже в счёт"
+    assert CardsError not in ERROR_STATUS
+    assert {cls for cls in refusals if status_for(cls) is None} == set()
+
+
+def test_status_is_found_along_the_inheritance_chain() -> None:
+    class GrandchildError(DraftFieldError):
+        pass
+
+    assert status_for(GrandchildError) == ERROR_STATUS[DraftFieldError] == 422
+
+
+_LATER = "Хранилище фото недоступно — попробуйте позже"
+_ADMIN = "Хранилище фото недоступно — сообщите администратору"
+_GONE = "Фото пропало из хранилища — сфотографируйте ещё раз"
+
+
+@pytest.mark.parametrize(
+    ("kind", "download", "upload"),
+    [
+        ("unavailable", _LATER, _LATER),
+        ("bad_reply", _LATER, _LATER),
+        ("quota", _ADMIN, _ADMIN),
+        ("forbidden", _ADMIN, _ADMIN),
+        # Скачивали фото — его нет или подменили: нужно новое. Загружали —
+        # «не найдено» относится к папке, и чинит её администратор.
+        ("not_found", _GONE, _ADMIN),
+        ("too_large", _GONE, _ADMIN),
+    ],
+)
+def test_storage_trouble_is_told_neutrally(kind: str, download: str, upload: str) -> None:
+    """Повару — что делать; подробности Google и имена переменных окружения —
+    только в лог."""
+    error = DriveError(kind, "Не прочитан ключ — проверьте GOOGLE_CREDENTIALS_PATH")  # type: ignore[arg-type]
+
+    assert storage_text(error) == download
+    assert storage_text(error, upload=True) == upload
 
 
 def test_cors_allows_photo_upload() -> None:
@@ -113,6 +170,23 @@ def test_cors_allows_photo_upload() -> None:
 
     assert reply.status_code == 200
     assert "PUT" in reply.headers["access-control-allow-methods"]
+
+
+# ---------------------------------------------------------------------------
+# Пределы «зависло»: распознавание и отправка
+# ---------------------------------------------------------------------------
+def test_stale_recognition_outlives_the_longest_model_call() -> None:
+    """«Идёт» старше этого — процесс умер посреди вызова. Раньше — нельзя:
+    живой вызов с повтором длится до общего срока клиента polza.ai."""
+    assert timedelta(seconds=TOTAL_DEADLINE_SECONDS + 30) <= STALE_AFTER
+
+
+def test_submit_window_outlives_the_longest_write() -> None:
+    """Отметка отправки старше этого — процесс умер посреди записи. Живая
+    отправка ждёт очередь писателей и держит её не дольше ``hold_limit``."""
+    settings = Settings(google_connect_timeout=5, google_read_timeout=30)
+
+    assert submit_window(settings) > hold_limit(settings) + LOCK_TIMEOUT
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +308,9 @@ def test_first_error_wins_and_nothing_is_returned() -> None:
 
 # ---------------------------------------------------------------------------
 # Замечания к КБЖУ
+#
+# В черновике хранятся только замечания самой этикетки; проверка КБЖУ
+# считается при каждой выдаче по числам, что стоят в черновике сейчас.
 # ---------------------------------------------------------------------------
 _LABEL_NOTE = "Жиры: «<0,5» — не точное число, впишите значение сами"
 _NONE4: tuple[Decimal | None, ...] = (None, None, None, None)
@@ -246,26 +323,27 @@ def _check(*values: Decimal | None) -> list[str]:
 
 def test_plausibility_follows_the_numbers() -> None:
     wrong = (_D("120"), None, None, None)
-    notes = renew_nutrient_warnings([], _NONE4, wrong)
-    assert notes == _check(*wrong)
-    assert renew_nutrient_warnings(notes, wrong, (_D("12"), None, None, None)) == []
+    assert shown_warnings([], wrong) == _check(*wrong)
+    assert shown_warnings([], (_D("12"), None, None, None)) == []
+    assert shown_warnings([], _NONE4) == []
 
 
 def test_label_notes_stay_when_numbers_change() -> None:
     recognized = (_D("120"), None, _D("10"), _D("300"))
-    notes = [_LABEL_NOTE, *_check(*recognized)]
-
     fixed = (_D("12"), None, _D("10"), _D("300"))
-    renewed = renew_nutrient_warnings(notes, recognized, fixed)
 
+    assert shown_warnings([_LABEL_NOTE], recognized) == [_LABEL_NOTE, *_check(*recognized)]
+    renewed = shown_warnings([_LABEL_NOTE], fixed)
     assert renewed == [_LABEL_NOTE, *_check(*fixed)]
     assert renewed.count(_LABEL_NOTE) == 1
 
 
 def test_same_numbers_do_not_duplicate_notes() -> None:
+    """Проверка, однажды попавшая в замечания этикетки, не повторяется рядом
+    с самой собой."""
     numbers = (_D("120"), None, None, None)
     notes = [_LABEL_NOTE, *_check(*numbers)]
-    assert renew_nutrient_warnings(notes, numbers, numbers) == notes
+    assert shown_warnings(notes, numbers) == notes
 
 
 # ---------------------------------------------------------------------------

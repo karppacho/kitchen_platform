@@ -251,6 +251,77 @@ def test_api_location_exists() -> None:
     assert re.search(r"location\s+/api/\s*\{", text), "location /api/ пропал из конфига"
 
 
+def _location_body(path: str) -> str:
+    """Тело блока ``location <path> { … }`` — ровно этого префикса."""
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    for start, end in _location_block_spans(text):
+        opening = text.rfind("location", 0, start)
+        if re.fullmatch(rf"location\s+{re.escape(path)}\s*\{{", text[opening:start]):
+            return text[start:end]
+    raise AssertionError(f"в конфиге nginx нет location {path}")
+
+
+def _server_level(text: str) -> str:
+    """Конфиг без тел всех location и server — то, что лежит в http-контексте
+    (conf.d подключается именно туда)."""
+    outside = text
+    for start, end in sorted(_location_block_spans(text), reverse=True):
+        outside = outside[:start] + outside[end:]
+    return re.sub(r"server\s*\{.*?\n\}", "", outside, flags=re.DOTALL)
+
+
+def test_recognize_location_limits_calls_to_the_model() -> None:
+    """Распознавание этикетки — вызов модели, а каждый вызов стоит денег.
+
+    Частоту держит зона ``llm`` с ответом 429 (а не 503 по умолчанию: «слишком
+    часто» — не «сервер лёг», фронтенд показывает разное). Таймаут — не меньше
+    180 с: клиент polza.ai укладывает вызов с повтором в 170 с, и nginx не
+    должен оборвать его раньше, оставив повара без ответа, а деньги — списанными.
+    """
+    body = _location_body("/api/cards/recognize/")
+
+    assert re.search(r"^\s*limit_req\s+zone=llm\s+burst=3\s+nodelay;", body, re.MULTILINE)
+    assert re.search(r"^\s*limit_req_status\s+429;", body, re.MULTILINE)
+    timeout = re.search(r"^\s*proxy_read_timeout\s+(\d+)s;", body, re.MULTILINE)
+    assert timeout and int(timeout.group(1)) >= 180, "nginx оборвёт распознавание раньше модели"
+    assert re.search(r"^\s*proxy_pass\s+http://api:8080;", body, re.MULTILINE)
+    assert "add_header" not in body
+
+
+def test_llm_zone_is_declared_in_http_context() -> None:
+    """Зона ``limit_req_zone`` объявляется только в http-контексте: внутри
+    server или location nginx не стартует вовсе."""
+    text = NGINX_CONF.read_text(encoding="utf-8")
+
+    assert re.search(r"^limit_req_zone\s+\S+\s+zone=llm:\S+\s+rate=", _server_level(text), re.M)
+
+
+def test_draft_uploads_are_capped_before_login_check() -> None:
+    """Тело multipart разбирается до проверки входа: без своего предела запрос
+    без входа с телом до 25 МБ целиком писался бы во временный файл. Сервер
+    принимает фото не больше 8 МБ — nginx режет на 9 МБ."""
+    body = _location_body("/api/cards/drafts/")
+
+    assert re.search(r"^\s*client_max_body_size\s+9m;", body, re.MULTILINE)
+    assert re.search(r"^\s*proxy_pass\s+http://api:8080;", body, re.MULTILINE)
+    timeout = re.search(r"^\s*proxy_read_timeout\s+(\d+)s;", body, re.MULTILINE)
+    assert timeout and int(timeout.group(1)) >= 300, "отправка в лист идёт до минут"
+    assert "add_header" not in body
+
+
+@pytest.mark.parametrize("path", ["/api/cards/recognize/", "/api/cards/drafts/"])
+def test_card_locations_pass_the_same_headers_as_api(path: str) -> None:
+    """Свой location — своя копия proxy_set_header: без X-Forwarded-Proto
+    защита от подделки запросов не узнала бы свой адрес."""
+    api = _location_body("/api/")
+    wanted = re.findall(r"^\s*(proxy_set_header\s+.+;)$", api, re.MULTILINE)
+    body = _location_body(path)
+
+    assert wanted
+    for header in wanted:
+        assert header in body, f"{path}: нет «{header}»"
+
+
 def test_cache_control_header_is_at_server_level() -> None:
     """Cache-Control объявлен один раз на server, а не раскидан по location.
 

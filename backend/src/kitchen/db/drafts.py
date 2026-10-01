@@ -13,19 +13,25 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from sqlalchemy import exists, select
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from kitchen.db import models
 
 if TYPE_CHECKING:
     import uuid
+    from datetime import datetime, timedelta
 
     from sqlalchemy.orm import Session
 
 ACTIVE = "active"
 SUBMITTED = "submitted"
 CANCELLED = "cancelled"
+
+RUNNING = "running"
+DONE = "done"
+FAILED = "failed"
+"""Состояния распознавания этикетки (пусто — не запускали)."""
 
 ACTIVE_OWNER_INDEX = "ux_card_drafts_active_owner"
 """Индекс «один активный черновик на повара» — по его имени узнаётся отказ."""
@@ -92,6 +98,136 @@ def add_draft(session: Session, owner_id: uuid.UUID) -> models.CardDraft:
             raise ActiveDraftExistsError from error
         raise
     return draft
+
+
+def own_draft(
+    session: Session, owner_id: uuid.UUID, draft_id: uuid.UUID
+) -> models.CardDraft | None:
+    """Черновик повара в любом состоянии — чтобы отличить «уже отправлен» от
+    «нет такого». Чужой — ``None``, как несуществующий."""
+    return session.scalar(
+        select(models.CardDraft).where(
+            models.CardDraft.id == draft_id, models.CardDraft.owner_id == owner_id
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Отправка в лист: отметка «идёт»
+#
+# Часы — базы (`now()`), а не процесса: отметку ставит и читает база, и
+# расхождение часов контейнеров не делает свежую отметку зависшей.
+# ---------------------------------------------------------------------------
+def claim_submit(
+    session: Session, owner_id: uuid.UUID, draft_id: uuid.UUID, window: timedelta
+) -> models.CardDraft | None:
+    """Поставить отметку «отправка идёт» и взять черновик, каким он ушёл в лист.
+
+    Одним запросом: отметка ставится, только если её нет или она старше
+    ``window`` (процесс умер посреди записи), — вторая отправка разом её не
+    поставит. Поля и id фото берутся из этого же запроса: замена фото после
+    него ждёт снятия отметки. ``None`` — черновика нет, он не активен или
+    отправка уже идёт. Коммитит вызывающий — до записи в лист.
+    """
+    statement = (
+        update(models.CardDraft)
+        .where(
+            models.CardDraft.id == draft_id,
+            models.CardDraft.owner_id == owner_id,
+            models.CardDraft.status == ACTIVE,
+            or_(
+                models.CardDraft.submit_started_at.is_(None),
+                models.CardDraft.submit_started_at < func.now() - window,
+            ),
+        )
+        .values(submit_started_at=func.now())
+        .returning(models.CardDraft)
+        .execution_options(populate_existing=True)
+    )
+    return session.scalars(statement).one_or_none()
+
+
+def submitting(session: Session, draft_id: uuid.UUID, window: timedelta) -> bool:
+    """Идёт ли отправка черновика сейчас — отметка моложе ``window``."""
+    query = select(models.CardDraft.submit_started_at >= func.now() - window).where(
+        models.CardDraft.id == draft_id
+    )
+    return bool(session.scalar(query))
+
+
+def end_submit(session: Session, draft_id: uuid.UUID) -> None:
+    """Снять отметку «отправка идёт»: запись не состоялась, черновик активен."""
+    session.execute(
+        update(models.CardDraft)
+        .where(models.CardDraft.id == draft_id)
+        .values(submit_started_at=None)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def mark_submitted(session: Session, draft_id: uuid.UUID, *, row: int, sheet_write_id: int) -> bool:
+    """Черновик отправлен: строка в листе и запись журнала. ``False`` —
+    черновик уже не активен (его закрыли, пока шла запись)."""
+    result = session.execute(
+        update(models.CardDraft)
+        .where(models.CardDraft.id == draft_id, models.CardDraft.status == ACTIVE)
+        .values(
+            status=SUBMITTED,
+            submitted_row=row,
+            submitted_at=func.now(),
+            sheet_write_id=sheet_write_id,
+            submit_started_at=None,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    return bool(result.rowcount)  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Распознавание этикетки: отметка «идёт»
+# ---------------------------------------------------------------------------
+def recognition_running(session: Session, draft_id: uuid.UUID, stale_after: timedelta) -> bool:
+    """Идёт ли распознавание сейчас — «идёт» моложе ``stale_after``."""
+    query = select(
+        and_(
+            models.CardDraft.recognition_status == RUNNING,
+            models.CardDraft.recognition_started_at >= func.now() - stale_after,
+        )
+    ).where(models.CardDraft.id == draft_id)
+    return bool(session.scalar(query))
+
+
+def start_recognition(
+    session: Session,
+    owner_id: uuid.UUID,
+    draft_id: uuid.UUID,
+    label_file_id: str,
+    stale_after: timedelta,
+) -> datetime | None:
+    """Отметить «распознавание идёт» — если не идёт (или зависло дольше
+    ``stale_after``) и этикетка та же, что скачана для модели.
+
+    Отдаёт метку начала: по ней результат узнаёт, что он всё ещё про этот
+    запуск. ``None`` — не начато. Коммитит вызывающий.
+    """
+    statement = (
+        update(models.CardDraft)
+        .where(
+            models.CardDraft.id == draft_id,
+            models.CardDraft.owner_id == owner_id,
+            models.CardDraft.status == ACTIVE,
+            models.CardDraft.label_file_id == label_file_id,
+            or_(
+                models.CardDraft.recognition_status.is_distinct_from(RUNNING),
+                models.CardDraft.recognition_started_at < func.now() - stale_after,
+            ),
+        )
+        .values(recognition_status=RUNNING, recognition_started_at=func.now())
+        .returning(models.CardDraft.recognition_started_at)
+        .execution_options(synchronize_session=False)
+    )
+    started: datetime | None = session.scalar(statement)
+    return started
 
 
 def sheet_write_exists(session: Session, request_key: str) -> bool:

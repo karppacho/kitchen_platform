@@ -19,8 +19,17 @@
   папке и пишется в лог. А фото черновика, по которому уже была попытка
   записи в лист, в корзину не идут вовсе: строка могла лечь, и ссылки на
   них у шефа должны открываться.
+* **Пока карточка отправляется, фото не трогаются.** Ссылки на них уже
+  летят в лист: замена, удаление фото и «Начать заново» ждут конца отправки
+  (409), иначе фото, на которое сошлётся строка шефа, ушло бы в корзину.
 * **Текст повара не обрезается молча** — длиннее предела поля отказ с
   пределом; КБЖУ разбирает домен, неясное число — отказ с названием поля.
+* **Проверка КБЖУ не хранится.** В черновике — только замечания самой
+  этикетки; проверку чисел черновик считает при каждой выдаче по тем числам,
+  что в нём сейчас: правка повара или новая формулировка проверки не
+  оставляют устаревших замечаний.
+* **Повару — что делать, а не что ответил Google.** Подробности сбоя Drive
+  (код, причина, имя переменной окружения) — только в лог.
 """
 
 from __future__ import annotations
@@ -55,15 +64,13 @@ from kitchen.sync.drive import DriveError
 if TYPE_CHECKING:
     import uuid
     from collections.abc import Iterable, Mapping, Sequence
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from decimal import Decimal
 
     from sqlalchemy.orm import Session
 
     from kitchen.db.models import CardDraft
     from kitchen.sync.drive import DriveClient
-
-__all__ = ["CardName", "ReferenceName"]
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +136,10 @@ def submit_request_key(draft_id: uuid.UUID) -> str:
 class CardsError(Exception):
     """Отказ, который увидит повар: текст исключения — для него."""
 
+    def extra(self) -> dict[str, object]:
+        """Что ещё положить в тело отказа рядом с текстом (поле, строку…)."""
+        return {}
+
 
 class DraftNotFoundError(CardsError):
     """Черновика нет, он не этого повара или уже не активен."""
@@ -148,6 +159,9 @@ class DraftFieldError(CardsError):
     def __init__(self, field: str, message: str) -> None:
         super().__init__(message)
         self.field = field
+
+    def extra(self) -> dict[str, object]:
+        return {"field": self.field}
 
 
 class PhotoTooLargeError(CardsError):
@@ -176,7 +190,50 @@ class StorageNotConfiguredError(CardsError):
 
 
 class StorageError(CardsError):
-    """Google Drive не сделал, что просили; текст — из ``explain_drive_error``."""
+    """Google Drive не сделал, что просили; текст — :func:`storage_text`."""
+
+
+class DraftConflictError(CardsError):
+    """С черновиком так сейчас нельзя: идёт отправка в лист, распознавание
+    уже идёт, нет фото этикетки, этикетку только что заменили."""
+
+
+WAIT_FOR_SUBMIT = "Карточка отправляется — подождите"
+
+
+def storage_text(error: DriveError, *, upload: bool = False) -> str:
+    """Сбой Drive — словами для повара: что делать, без подробностей Google.
+
+    «Попробуйте позже» — когда это лечится временем; «сообщите
+    администратору» — когда чинить настройку (место, доступ, ключ). При
+    скачивании файла нет или его подменили — фото для черновика больше нет,
+    нужно новое; при загрузке «не найдено» — это папка, и чинит её
+    администратор. Что именно ответил Google — в лог, рядом с id черновика.
+    """
+    if error.kind in ("unavailable", "bad_reply"):
+        return "Хранилище фото недоступно — попробуйте позже"
+    if not upload and error.kind in ("not_found", "too_large"):
+        return "Фото пропало из хранилища — сфотографируйте ещё раз"
+    return "Хранилище фото недоступно — сообщите администратору"
+
+
+def _storage_trouble(
+    error: DriveError, draft_id: uuid.UUID, *, file_id: str | None
+) -> StorageError:
+    """В лог — что ответил Google; повару — :func:`storage_text`.
+
+    ``file_id`` — какое фото скачивали; ``None`` — загружали новое."""
+    log.warning(
+        "фото %s черновика %s %s: %s (код %s, причина %s): %s",
+        file_id or "—",
+        draft_id,
+        "не загружено в Drive" if file_id is None else "не скачано из Drive",
+        error.kind,
+        error.status,
+        error.reason or "—",
+        error,
+    )
+    return StorageError(storage_text(error, upload=file_id is None))
 
 
 # ---------------------------------------------------------------------------
@@ -225,33 +282,27 @@ def _nutrient(name: str, raw: str | None) -> Decimal | None:
         raise DraftFieldError(name, f"{title}: {error}") from error
 
 
-def renew_nutrient_warnings(
-    notes: Sequence[str],
-    before: Sequence[Decimal | None],
-    after: Sequence[Decimal | None],
-) -> list[str]:
-    """Замечания черновика после того, как поменялись белки, жиры, углеводы или ккал.
+def shown_warnings(notes: Sequence[str], numbers: Sequence[Decimal | None]) -> list[str]:
+    """Замечания повару: замечания этикетки и проверка КБЖУ по ``numbers``.
 
-    В замечаниях — два рода текста. Что заметило распознавание на самой
-    этикетке (число не прочитано, пищевая ценность на 100 мл, срок неясен),
-    правкой чисел не исправляется и остаётся. Проверка правдоподобия чисел
-    (:func:`check_nutrients`) говорит о числах, которые стоят в черновике
-    сейчас: прежняя её выдача уходит, новая — приходит. ``before`` и
-    ``after`` — четвёрки (белки, жиры, углеводы, ккал).
-
-    Опирается на то, что проверка в замечаниях всегда посчитана по числам
-    черновика: распознавание кладёт её вместе с самими числами, правка —
-    здесь. Одинаковые замечания не повторяются.
+    Два рода текста. Что заметило распознавание на самой этикетке (число не
+    прочитано, пищевая ценность на 100 мл, срок неясен), правкой чисел не
+    исправляется и хранится в черновике до следующего распознавания или
+    замены этикетки. Проверка правдоподобия (:func:`check_nutrients`)
+    говорит о числах, что стоят в черновике сейчас, — поэтому она не
+    хранится, а считается здесь, при каждой выдаче. ``numbers`` — четвёрка
+    (белки, жиры, углеводы, ккал). Одинаковые замечания не повторяются.
     """
-    stale = set(_check(before))
-    kept = [note for note in notes if note not in stale]
-    fresh = [warning for warning in _check(after) if warning not in kept]
-    return kept + fresh
+    protein, fat, carbs, kcal = numbers
+    kept = list(notes)
+    return kept + [
+        check for check in check_nutrients(protein, fat, carbs, kcal) if check not in kept
+    ]
 
 
-def _check(values: Sequence[Decimal | None]) -> tuple[str, ...]:
-    protein, fat, carbs, kcal = values
-    return check_nutrients(protein, fat, carbs, kcal)
+def draft_warnings(draft: CardDraft) -> list[str]:
+    """Замечания черновика, какими их видит повар (:func:`shown_warnings`)."""
+    return shown_warnings(draft.recognition_warnings, _nutrients(draft))
 
 
 def _nutrients(draft: CardDraft) -> tuple[Decimal | None, ...]:
@@ -282,33 +333,34 @@ def update_draft(
 ) -> CardDraft:
     """Правка черновика: только переданные поля, целиком или никак.
 
-    Поменялись числа КБЖУ — замечания к ним пересчитываются
-    (:func:`renew_nutrient_warnings`).
-    """
-    draft = _active(session, owner_id, draft_id, lock=True)
+    Проверка КБЖУ не хранится — новые числа она увидит при выдаче сама
+    (:func:`draft_warnings`)."""
+    draft = require_active(session, owner_id, draft_id, lock=True)
     values = validate_changes(changes)
-    before = _nutrients(draft)
     for name, value in values.items():
         setattr(draft, name, value)
-    after = _nutrients(draft)
-    if after != before:
-        draft.recognition_warnings = renew_nutrient_warnings(
-            draft.recognition_warnings, before, after
-        )
     session.commit()
     return draft
 
 
 def cancel_draft(
-    session: Session, drive: DriveClient, owner_id: uuid.UUID, draft_id: uuid.UUID
+    session: Session,
+    drive: DriveClient,
+    owner_id: uuid.UUID,
+    draft_id: uuid.UUID,
+    *,
+    submit_window: timedelta,
 ) -> None:
     """«Начать заново»: черновик отменён, его фото — в корзину Drive.
 
     Сначала база: не удалась корзина — черновик всё равно отменён, а фото
     остаются сиротами в закрытой папке (лог). Была попытка записи в лист —
-    фото не трогаются вовсе.
+    фото не трогаются вовсе. Идёт отправка (отметка моложе
+    ``submit_window``) — :class:`DraftConflictError`: черновик может вот-вот лечь
+    в лист.
     """
-    draft = _active(session, owner_id, draft_id, lock=True)
+    draft = require_active(session, owner_id, draft_id, lock=True)
+    _not_submitting(session, draft.id, submit_window)
     draft.status = store.CANCELLED
     files = [file_id for file_id in _photo_ids(draft).values() if file_id]
     keep = bool(files) and store.sheet_write_exists(session, submit_request_key(draft.id))
@@ -353,13 +405,19 @@ def photos(draft: CardDraft) -> dict[str, bool]:
     return {kind: bool(file_id) for kind, file_id in _photo_ids(draft).items()}
 
 
-def _active(
+def require_active(
     session: Session, owner_id: uuid.UUID, draft_id: uuid.UUID, *, lock: bool = False
 ) -> CardDraft:
+    """Активный черновик повара; иначе — :class:`DraftNotFoundError`."""
     draft = store.active_draft(session, owner_id, draft_id, lock=lock)
     if draft is None:
         raise DraftNotFoundError
     return draft
+
+
+def _not_submitting(session: Session, draft_id: uuid.UUID, window: timedelta) -> None:
+    if store.submitting(session, draft_id, window):
+        raise DraftConflictError(WAIT_FOR_SUBMIT)
 
 
 def _photo_ids(draft: CardDraft) -> dict[str, str | None]:
@@ -403,19 +461,27 @@ def put_photo(
     content: bytes,
     *,
     now: datetime,
+    submit_window: timedelta,
 ) -> CardDraft:
     """Положить фото в слот черновика: сначала Drive, потом база.
 
     Прежнее фото слота после этого уходит в корзину — кроме случая, когда
-    по черновику уже была попытка записи в лист.
+    по черновику уже была попытка записи в лист. Идёт отправка (отметка
+    моложе ``submit_window``) — :class:`DraftConflictError`, и до загрузки, и
+    после неё: отправка могла начаться, пока фото летело в Drive.
+
+    Новая этикетка сбрасывает распознавание — статус, прочитанное и
+    замечания этикетки: они о прежнем фото. Поля черновика остаются (повар
+    их видел и мог править); проверка КБЖУ пересчитается по ним сама.
     """
     slot = _slot(kind)
-    draft = _active(session, owner_id, draft_id)
+    draft = require_active(session, owner_id, draft_id)
     if not drive.folder_id:
         raise StorageNotConfiguredError
     check_jpeg(content)
     if not draft.supplier or not draft.name:
         raise PhotoNeedsNamesError
+    _not_submitting(session, draft.id, submit_window)
     name = photo_file_name(draft.supplier, draft.name, kind, now)
     properties = {"cardDraft": str(draft.id), "photoKind": kind}
 
@@ -424,22 +490,28 @@ def put_photo(
     try:
         file_id = drive.upload_jpeg(content, name=name, app_properties=properties)
     except DriveError as error:
-        log.warning(
-            "фото черновика %s не загружено в Drive: %s (код %s, причина %s)",
-            draft_id,
-            error.kind,
-            error.status,
-            error.reason or "—",
-        )
-        raise StorageError(str(error)) from error
+        raise _storage_trouble(error, draft_id, file_id=None) from error
 
     # Черновик могли отменить, пока шла загрузка: тогда файл — сирота.
     locked = store.active_draft(session, owner_id, draft_id, lock=True)
     if locked is None:
         _discard(drive, [file_id], draft_id, reason="черновик закрыт во время загрузки", keep=False)
         raise DraftNotFoundError
+    # А могли и начать отправку: ссылка на прежнее фото уже летит в лист —
+    # слот не меняем, новое фото — сирота.
+    if store.submitting(session, locked.id, submit_window):
+        session.rollback()
+        _discard(
+            drive, [file_id], draft_id, reason="во время загрузки началась отправка", keep=False
+        )
+        raise DraftConflictError(WAIT_FOR_SUBMIT)
     previous: str | None = getattr(locked, slot)
     setattr(locked, slot, file_id)
+    if kind == "label":
+        locked.recognition_status = None
+        locked.recognition_started_at = None
+        locked.recognition = None
+        locked.recognition_warnings = []
     keep = bool(previous) and store.sheet_write_exists(session, submit_request_key(locked.id))
     session.commit()
     if previous:
@@ -448,11 +520,18 @@ def put_photo(
 
 
 def remove_photo(
-    session: Session, drive: DriveClient, owner_id: uuid.UUID, draft_id: uuid.UUID, kind: str
+    session: Session,
+    drive: DriveClient,
+    owner_id: uuid.UUID,
+    draft_id: uuid.UUID,
+    kind: str,
+    *,
+    submit_window: timedelta,
 ) -> CardDraft:
     """Убрать фото из слота; файл — в корзину по тем же правилам, что при замене."""
     slot = _slot(kind)
-    draft = _active(session, owner_id, draft_id, lock=True)
+    draft = require_active(session, owner_id, draft_id, lock=True)
+    _not_submitting(session, draft.id, submit_window)
     previous: str | None = getattr(draft, slot)
     setattr(draft, slot, None)
     keep = bool(previous) and store.sheet_write_exists(session, submit_request_key(draft.id))
@@ -467,11 +546,20 @@ def photo_bytes(
 ) -> bytes:
     """Содержимое фото черновика — для прокси. Файл берётся только из слота."""
     slot = _slot(kind)
-    draft = _active(session, owner_id, draft_id)
+    draft = require_active(session, owner_id, draft_id)
     file_id: str | None = getattr(draft, slot)
     if not file_id:
         raise PhotoMissingError
     session.rollback()
+    return fetch_photo(drive, file_id, draft_id)
+
+
+def fetch_photo(drive: DriveClient, file_id: str, draft_id: uuid.UUID) -> bytes:
+    """Скачать фото черновика из Drive — не больше :data:`PROXY_LIMIT`.
+
+    Транзакцию базы вызывающий закрывает сам: запрос к Google идёт до минуты.
+    Сбой — :class:`StorageError` с текстом для повара, подробности — в лог.
+    """
     try:
         return drive.download(file_id, max_bytes=PROXY_LIMIT)
     except DriveError as error:
@@ -482,15 +570,8 @@ def photo_bytes(
                 draft_id,
                 PROXY_LIMIT,
             )
-        else:
-            log.warning(
-                "фото %s черновика %s не скачано из Drive: %s (код %s)",
-                file_id,
-                draft_id,
-                error.kind,
-                error.status,
-            )
-        raise StorageError(str(error)) from error
+            raise StorageError(storage_text(error)) from error
+        raise _storage_trouble(error, draft_id, file_id=file_id) from error
 
 
 def _discard(

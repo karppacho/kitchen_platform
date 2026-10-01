@@ -330,6 +330,26 @@ jobs:
           grep -qi '^content-type: application/json' /tmp/h_api.txt || { echo "::error::GET /api/nope: Content-Type не application/json — похоже, отдался index.html вместо заглушки API"; exit 1; }
           grep -q '"detail"' /tmp/b_api.txt || { echo "::error::GET /api/nope: тело не похоже на ответ заглушки API"; exit 1; }
 
+      # Распознавание этикетки — вызов модели за деньги: зона llm пускает
+      # запрос и три сверху (burst=3), пятый подряд — 429, а не 503. Черновики
+      # карточек режут тело на 9 МБ ещё в nginx: до входа сервер его не читает.
+      - name: "Карточки: распознавание идёт к API с пределом частоты, большое фото — 413"
+        run: |
+          recognize() {
+            curl -sk -o /dev/null -w '%{http_code}' -X POST \
+              --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/cards/recognize/x
+          }
+          for i in 1 2 3 4; do
+            code=$(recognize)
+            test "$code" = "404" || { echo "::error::POST /api/cards/recognize/ №$i вернул $code, а не 404 заглушки API"; exit 1; }
+          done
+          code=$(recognize)
+          test "$code" = "429" || { echo "::error::пятый POST /api/cards/recognize/ подряд вернул $code, а не 429 (limit_req_status)"; exit 1; }
+          head -c 10485760 /dev/zero > /tmp/big_photo.bin
+          code=$(curl -sk -o /dev/null -w '%{http_code}' -X PUT --data-binary @/tmp/big_photo.bin \
+            --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/cards/drafts/x/photos/label)
+          test "$code" = "413" || { echo "::error::PUT 10 МБ в /api/cards/drafts/ вернул $code, а не 413 (client_max_body_size 9m)"; exit 1; }
+
       - name: "GET /api без слэша — 404"
         run: |
           code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api)
