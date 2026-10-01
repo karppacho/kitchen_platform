@@ -412,6 +412,13 @@ jobs:
           grep -qi '^content-type: application/json' /tmp/h_big.txt || { echo "::error::413 черновиков — не JSON"; exit 1; }
           grep -q '"detail"' /tmp/b_big.txt || { echo "::error::в теле 413 черновиков нет detail"; exit 1; }
           grep -qi '^content-security-policy:' /tmp/h_big.txt || { echo "::error::413 черновиков без CSP — add_header в location?"; exit 1; }
+          # «Начать» шлёт POST ровно на /api/cards/drafts (без слеша). Блок со
+          # слешем на конце nginx «дополнял» до 301, и браузер повторял POST как
+          # GET — черновик не создавался (выкладка 01.10.2026). Здесь запрос
+          # обязан дойти до заглушки API (404), а не получить редирект.
+          code=$(curl -sk -o /dev/null -w '%{http_code}' -X POST \
+            --resolve art.karppacho.ru:8443:127.0.0.1 https://art.karppacho.ru:8443/api/cards/drafts)
+          test "$code" = "404" || { echo "::error::POST /api/cards/drafts вернул $code, а не 404 заглушки API (301 — слеш на конце location)"; exit 1; }
 
       - name: "GET /api без слэша — 404"
         run: |

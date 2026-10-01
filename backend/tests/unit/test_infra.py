@@ -254,6 +254,36 @@ def test_api_location_exists() -> None:
     assert re.search(r"location\s+/api/\s*\{", text), "location /api/ пропал из конфига"
 
 
+def test_proxied_slash_locations_do_not_shadow_api_routes() -> None:
+    """Блок ``location /x/ { proxy_pass … }`` nginx сам «дополняет»: на запрос
+    ровно ``/x`` отвечает 301 на ``/x/``. Браузер повторяет POST после 301 уже
+    как GET, и ручка API без слеша на конце становится недостижимой.
+
+    Так 01.10.2026 сломалось «Начать» нового ингредиента: блок
+    ``/api/cards/drafts/`` перехватил ``POST /api/cards/drafts``, повар видел
+    «Нет связи с сервером». Тест сверяет префиксы nginx с настоящими путями
+    приложения, а не со списком из головы.
+    """
+    from kitchen.config import Settings
+    from kitchen.web.app import create_app
+
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    prefixes = re.findall(r"location\s+(/\S*/)\s*\{", text)
+    proxied = [p for p in prefixes if "proxy_pass" in _location_body(p)]
+    assert "/api/" in proxied, "разбор сломан: /api/ должен быть среди проксируемых"
+
+    # Пути — из схемы OpenAPI самого приложения: подключённые роутеры FastAPI
+    # не раскрывают пути через app.routes, а схема видит все ручки разом.
+    app = create_app(Settings(_env_file=None, app_env="test"))
+    routes = set(app.openapi()["paths"])
+    assert "/api/cards/drafts" in routes, "разбор сломан: ручки создания черновика нет"
+    shadowed = sorted(p for p in proxied if p.rstrip("/") in routes)
+    assert not shadowed, (
+        f"nginx ответит 301 на ручки API без слеша: {shadowed} — уберите слеш на конце "
+        f"префикса location"
+    )
+
+
 def _location_body(path: str) -> str:
     """Тело блока ``location <path> { … }`` — ровно этого префикса."""
     text = NGINX_CONF.read_text(encoding="utf-8")
@@ -303,7 +333,7 @@ def test_draft_uploads_are_capped_before_login_check() -> None:
     """Тело multipart разбирается до проверки входа: без своего предела запрос
     без входа с телом до 25 МБ целиком писался бы во временный файл. Сервер
     принимает фото не больше 8 МБ — nginx режет на 9 МБ."""
-    body = _location_body("/api/cards/drafts/")
+    body = _location_body("/api/cards/drafts")
 
     assert re.search(r"^\s*client_max_body_size\s+9m;", body, re.MULTILINE)
     assert re.search(r"^\s*proxy_pass\s+http://api:8080;", body, re.MULTILINE)
@@ -325,7 +355,7 @@ def test_recognize_takes_no_body() -> None:
     ("path", "code", "detail"),
     [
         ("/api/cards/recognize/", 429, "Слишком часто — подождите минуту"),
-        ("/api/cards/drafts/", 413, "Фото больше 8 МБ — сфотографируйте ещё раз"),
+        ("/api/cards/drafts", 413, "Фото больше 8 МБ — сфотографируйте ещё раз"),
     ],
 )
 def test_nginx_refusals_on_card_paths_are_json(path: str, code: int, detail: str) -> None:
@@ -346,7 +376,7 @@ def test_nginx_refusals_on_card_paths_are_json(path: str, code: int, detail: str
     assert "add_header" not in named
 
 
-@pytest.mark.parametrize("path", ["/api/cards/recognize/", "/api/cards/drafts/"])
+@pytest.mark.parametrize("path", ["/api/cards/recognize/", "/api/cards/drafts"])
 def test_card_locations_pass_the_same_headers_as_api(path: str) -> None:
     """Свой location — своя копия proxy_set_header: без X-Forwarded-Proto
     защита от подделки запросов не узнала бы свой адрес."""
