@@ -21,6 +21,7 @@ Postgres.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -54,7 +55,7 @@ from kitchen.db.links import card_candidates, known_reference_ids
 from kitchen.domain.cards import APPROVED, REJECTED
 from kitchen.domain.reference_row import NotFound, ReferenceFormError
 from kitchen.sync import specs
-from kitchen.sync.cycle import SyncCycle
+from kitchen.sync.cycle import BookOutcome, CycleResult, SyncCycle
 from kitchen.sync.importer import take_import_lock
 from kitchen.sync.ownership import ForbiddenWriteError
 from kitchen.sync.reader import SheetsReader
@@ -758,24 +759,31 @@ def _change_ingredient(sessions: sessionmaker[Session], legacy_id: str, **values
     ids=["other-name", "removed"],
 )
 def test_written_row_but_not_our_ingredient_on_site_is_imported_false(
-    sessions, client, change: dict[str, object]
+    sessions, client, caplog, change: dict[str, object]
 ) -> None:
     """Строку записали мы, перенос прошёл, а на сайте под id 131 не наш
     ингредиент: лист меняли между записью и переносом — у id другое название
-    или его убрали. Наш ингредиент на сайте не виден — ``imported=false``, и
-    оговорка «пока не перенесён» при этом есть всегда."""
+    или его убрали. Запись состоялась — ответ удачный, а не «не сделано»;
+    наш ингредиент на сайте не виден — ``imported=false``, пара не
+    подтверждена. Оговорка — что проверить в листе, без обещания «появится
+    через несколько минут»: само это не пройдёт. И ERROR в лог: экрана
+    журнала пока нет."""
     card = _card(sessions, "Соус Барбекю")
     books = _TransferThen(
         _cycle(client, sessions), lambda: _change_ingredient(sessions, "131", **change)
     )
 
-    with sessions() as session:
+    with (
+        caplog.at_level(logging.ERROR, logger="kitchen.cards"),
+        sessions() as session,
+    ):
         done = to_reference(session, _filler(client, sessions), books, card.id, FORM, actor_id=None)
 
     assert (done.row, done.ref_id, done.already) == (6, "131", False)
     assert (done.imported, done.linked, done.ingredient_id) == (False, False, None)
-    assert done.notes == (NOT_IMPORTED, _OTHER_ON_SITE)
+    assert done.notes == (_OTHER_ON_SITE,)
     assert _card(sessions, "Соус Барбекю").link_confirmed_at is None
+    assert "строка 6 листа ING записана (id 131" in caplog.text
 
 
 def test_pair_not_confirmed_but_our_ingredient_on_site_is_imported_true(
@@ -861,6 +869,62 @@ def test_pair_not_confirmed_and_transfer_failed_is_imported_false(sessions, clie
     assert (done.imported, done.linked, done.ingredient_id) == (False, False, None)
     assert done.notes == (NOT_IMPORTED, PAIR_NOT_CONFIRMED)
     assert _ingredient(sessions, "131") is None
+
+
+class _Imported:
+    """Перенос, который отвечает «перенесено», ничего не делая: база уже
+    такая, какой её сделал бы перенос."""
+
+    def run(self, *, force=False, books=None):
+        return CycleResult(outcomes={book: BookOutcome("imported") for book in books or ()})
+
+
+def test_pair_is_confirmed_only_in_the_import_queue(sessions, client, worker) -> None:
+    """Подтверждение пары после переноса стоит в очереди импорта: импорт,
+    начатый раньше и записавший позже, вернул бы карточке «спорную» пару
+    поверх подтверждённой — и навсегда. Перенос ответил «перенесено», а
+    очередь держит воркер дольше ожидания — пару не подтверждаем: пара не
+    тронута, оговорка — только о паре (наш «Кетчуп» 129 на сайте виден)."""
+    card = _card(sessions, "Кетчуп")
+    ketchup = _ingredient_id(sessions, "129")
+    worker()
+
+    with sessions() as session:
+        done = to_reference(
+            session,
+            _filler(client, sessions),
+            _Imported(),
+            card.id,
+            FORM,
+            actor_id=None,
+            wait=SHORT_WAIT,
+        )
+
+    assert (done.row, done.ref_id, done.already) == (4, "129", True)
+    assert (done.imported, done.linked, done.ingredient_id) == (True, False, None)
+    assert done.notes == (PAIR_NOT_CONFIRMED,)
+    assert _pair(_card(sessions, "Кетчуп")) == (ketchup, "linked", False)
+
+
+def test_id_long_in_the_database_confirms_the_pair_even_if_this_transfer_failed(
+    sessions, client
+) -> None:
+    """«Уже в справочнике»: «Кетчуп» с id 129 давно на сайте, перенос сейчас
+    упал, очередь импорта свободна. Ингредиент в базе тот же — пару
+    подтверждаем: ``imported=true``, без оговорок."""
+    card = _card(sessions, "Кетчуп")
+    ketchup = _ingredient_id(sessions, "129")
+
+    with sessions() as session:
+        done = to_reference(
+            session, _filler(client, sessions), _FailedTransfer(), card.id, FORM, actor_id=None
+        )
+
+    assert (done.row, done.ref_id, done.already) == (4, "129", True)
+    assert (done.imported, done.linked, done.ingredient_id) == (True, True, ketchup)
+    assert done.notes == ()
+    assert _pair(_card(sessions, "Кетчуп")) == (ketchup, "linked", True)
+    assert _writes(client) == []
 
 
 def test_ingredient_long_on_site_is_imported_even_if_this_transfer_failed(

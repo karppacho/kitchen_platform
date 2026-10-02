@@ -263,10 +263,11 @@ def _loss(field: str, raw: str | None, errors: dict[str, str]) -> Decimal:
     percent = _number(field, raw, errors, percent=True)
     if percent is None:
         return _ZERO
-    # 100 % — от продукта ничего не остаётся: расчёт делит на (1 − потери),
-    # и стоимость молча стала бы нулём, а формулы листа — «#ДЕЛ/0!».
+    # 100 % — от продукта ничего не остаётся: при 100 % в Q или R калькулятор
+    # молча обнуляет стоимость (domain/costs.py). Тепловые S в расчёт не идут,
+    # но правило у всех трёх одно.
     if not _ZERO <= percent < _HUNDRED:
-        errors[field] = f"{FORM_TITLES[field]} — от 0 до 100 %, меньше 100"
+        errors[field] = f"{FORM_TITLES[field]} — от 0 до 99,99 %"
         return _ZERO
     return percent / _HUNDRED
 

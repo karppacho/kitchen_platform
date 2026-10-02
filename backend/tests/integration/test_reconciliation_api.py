@@ -43,7 +43,7 @@ from kitchen.db.links import known_reference_ids
 from kitchen.domain.cards import APPROVED, REJECTED
 from kitchen.domain.reference_row import NotFound
 from kitchen.sync import ownership, specs
-from kitchen.sync.reference_writer import BUSY, HEADER_DRIFT, NOT_CONFIRMED, ReferenceRowFiller
+from kitchen.sync.reference_writer import HEADER_DRIFT, NOT_CONFIRMED, ReferenceRowFiller
 from kitchen.sync.sheet_write import SHEET_WRITE_LOCK_KEY
 from kitchen.web import auth, reconciliation
 from kitchen.web.app import create_app
@@ -60,6 +60,7 @@ from tests.integration.test_reference_flow import (
     _ing,
     _ingredient_id,
     _pair,
+    _TransferThen,
     _writes,
 )
 
@@ -647,12 +648,35 @@ def test_row_already_in_reference_is_200_without_writing(
 
 
 @pytest.mark.parametrize(
-    ("cards", "name", "reason"),
+    ("cards", "name", "reason", "text"),
     [
-        (CARDS_ORDER, "Майонез", NotFound.NOT_APPROVED),
-        ((*CARDS_ORDER[:-1], ("Горчица", APPROVED)), "Горчица", NotFound.NOT_YET),
-        ((("Горчица", APPROVED), *CARDS_ORDER[:-1]), "Соус Барбекю", NotFound.SHIFTED),
-        ((*CARDS_ORDER, ("Соус Барбекю", APPROVED)), "Соус Барбекю", NotFound.AMBIGUOUS),
+        (
+            CARDS_ORDER,
+            "Майонез",
+            NotFound.NOT_APPROVED,
+            "Карточка не согласована — в справочник попадают только «Да»",
+        ),
+        (
+            (*CARDS_ORDER[:-1], ("Горчица", APPROVED)),
+            "Горчица",
+            NotFound.NOT_YET,
+            "Строка ещё не появилась в справочнике — таблица подтягивает карточки с задержкой, "
+            "попробуйте через несколько минут",
+        ),
+        (
+            (("Горчица", APPROVED), *CARDS_ORDER[:-1]),
+            "Соус Барбекю",
+            NotFound.SHIFTED,
+            "Строки справочника сдвинуты относительно карточек — запись не сделана, проверьте "
+            "лист ING",
+        ),
+        (
+            (*CARDS_ORDER, ("Соус Барбекю", APPROVED)),
+            "Соус Барбекю",
+            NotFound.AMBIGUOUS,
+            "Согласованных карточек с таким названием несколько — не понять, какая строка "
+            "справочника относится к этой. Запись не сделана: переименуйте одну из карточек",
+        ),
     ],
     ids=["not-approved", "not-yet", "shifted", "ambiguous"],
 )
@@ -662,12 +686,14 @@ def test_row_not_found_is_409_and_preview_says_the_same(
     cards: Sequence[tuple[str, str]],
     name: str,
     reason: NotFound,
+    text: str,
 ) -> None:
     """Карточка не «Да»; строки ещё нет (``IMPORTRANGE`` не подтянул «Горчицу»,
     согласованную минуту назад); название и место расходятся («Горчицу»
     согласовали в начале книги карточек); «Да» с этим названием две. Свежее
-    чтение решает, а не база: в базе «Горчица» ещё не «Да». 409 словами спеки,
-    записи нет; предпросмотр говорит то же самое кодом 200."""
+    чтение решает, а не база: в базе «Горчица» ещё не «Да». 409 словами спеки
+    — строкой, а не постоянной кода: поменяй кто текст, тест это увидит; записи
+    нет; предпросмотр говорит то же самое кодом 200."""
     fresh = _sheets(cards=cards)
     client = make_client(fresh)
     card = _card(sessions, name)
@@ -676,11 +702,11 @@ def test_row_not_found_is_409_and_preview_says_the_same(
     seen = preview(client, card.id)
 
     assert reply.status_code == 409, reply.text
-    assert reply.json() == {"detail": reason.message, "reason": reason.value, "row": None}
+    assert reply.json() == {"detail": text, "reason": reason.value, "row": None}
     assert (seen.status_code, seen.json()["reason"], seen.json()["message"]) == (
         200,
         reason.value,
-        reason.message,
+        text,
     )
     assert _writes(fresh) == []
 
@@ -739,7 +765,7 @@ def test_busy_sheet_is_503(sessions: sessionmaker[Session], world: FakeSheetsCli
         holder.close()
 
     assert reply.status_code == 503
-    assert reply.json() == {"detail": BUSY}
+    assert reply.json() == {"detail": "Таблица занята — попробуйте ещё раз"}
     assert len(world.opened) == opened
 
 
@@ -854,6 +880,37 @@ def test_transfer_whose_import_failed_is_200_with_note(
     body = reply.json()
     assert (body["row"], body["ref_id"], body["already"]) == (7, "131", False)
     assert (body["imported"], body["linked"], body["notes"]) == (False, False, [NOT_IMPORTED])
+
+
+def test_pair_not_confirmed_after_writing_is_200_with_note(
+    sessions: sessionmaker[Session], world: FakeSheetsClient
+) -> None:
+    """Строка записана и перенесена, а карточку убрали из книги карточек,
+    пока шёл перенос: пару подтверждать не с чем. Запись состоялась — 200,
+    ингредиент на сайте; оговорка — что пару подтвердить не удалось и что
+    повтор второй записи не даст."""
+    card = _card(sessions, "Соус Барбекю")
+
+    def card_removed() -> None:
+        with sessions.begin() as session:
+            session.execute(
+                update(models.IngredientCard)
+                .where(models.IngredientCard.id == card.id)
+                .values(removed_at=func.now())
+            )
+
+    client = make_client(world, books=lambda: _TransferThen(_cycle(world, sessions), card_removed))
+
+    reply = transfer(client, card.id)
+
+    assert reply.status_code == 200, reply.text
+    body = reply.json()
+    assert (body["row"], body["ref_id"], body["already"]) == (7, "131", False)
+    assert (body["imported"], body["linked"], body["ingredient_id"]) == (True, False, None)
+    assert body["notes"] == [
+        "Пару карточки и ингредиента подтвердить не удалось — если карточка осталась на "
+        "«Сверке», откройте её ещё раз: второй записи не будет"
+    ]
 
 
 @pytest.mark.parametrize("missing", ["sheets_id_kitchen", "sheets_id_ingredient_cards"])

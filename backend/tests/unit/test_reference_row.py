@@ -19,6 +19,7 @@ from kitchen.domain.reference_row import (
     ACTIVE_STATUS,
     ANCHOR_BROKEN,
     ANCHOR_LETTER,
+    FORM_TITLES,
     ID_LETTER,
     LOSSES_TOTAL_LETTER,
     MANUAL_LETTERS,
@@ -187,13 +188,15 @@ def test_losses_default_to_zero() -> None:
 def test_each_loss_is_from_0_to_below_100(field: str, raw: str) -> None:
     """100 % потерь — от продукта ничего не остаётся.
 
-    Расчёт делит на (1 − потери): у калькулятора стоимость молча
-    становится нулём, у формул листа — «#ДЕЛ/0!». Поэтому 100 — отказ.
+    При 100 % в Q или R калькулятор молча обнуляет стоимость
+    (``domain/costs.py``); тепловые S в расчёт не идут, но правило у всех
+    трёх одно. Поэтому 100 — отказ, и текст называет предел без
+    противоречия.
     """
     errors = _errors(**{field: raw})
 
     assert set(errors) == {field}
-    assert "от 0 до 100 %, меньше 100" in errors[field]
+    assert errors[field] == f"{FORM_TITLES[field]} — от 0 до 99,99 %"
 
 
 def test_loss_that_is_not_a_number_is_refused() -> None:
