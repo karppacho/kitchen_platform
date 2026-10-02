@@ -448,6 +448,10 @@ test('отказ «Сверки» несёт причину и ошибки фо
         { status: 422 },
       ),
     ),
+    // Пустой объект — не «ошибки у полей»: показать надо текст отказа.
+    http.post('/api/reconciliation/10/to-reference', () =>
+      HttpResponse.json({ detail: 'Форма не принята', errors: {} }, { status: 422 }),
+    ),
   )
 
   await expect(api('/reconciliation/7/to-reference', { method: 'POST' })).rejects.toMatchObject({
@@ -462,6 +466,10 @@ test('отказ «Сверки» несёт причину и ошибки фо
   })
   await expect(api('/reconciliation/9/to-reference', { method: 'POST' })).rejects.toMatchObject({
     reason: null,
+    errors: null,
+  })
+  await expect(api('/reconciliation/10/to-reference', { method: 'POST' })).rejects.toMatchObject({
+    message: 'Форма не принята',
     errors: null,
   })
 })

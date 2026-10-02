@@ -32,12 +32,13 @@ export class ApiError extends Error {
   }
 }
 
-/** Ошибки по полям: объект «поле → текст», все значения — строки. Иное —
- *  не ошибки формы, а мусор: экрану их не показывать. */
+/** Ошибки по полям: непустой объект «поле → текст», все значения — строки.
+ *  Иное — не ошибки формы, а мусор: экрану их не показывать. Пустой объект
+ *  — тоже не ошибки у полей: иначе отказ прошёл бы молча, без текста. */
 function oshibkiPoPolyam(errors: unknown): Readonly<Record<string, string>> | null {
   if (typeof errors !== 'object' || errors === null || Array.isArray(errors)) return null
   const zapisi = Object.entries(errors)
-  return zapisi.every(([, tekst]) => typeof tekst === 'string')
+  return zapisi.length > 0 && zapisi.every(([, tekst]) => typeof tekst === 'string')
     ? (Object.fromEntries(zapisi) as Record<string, string>)
     : null
 }

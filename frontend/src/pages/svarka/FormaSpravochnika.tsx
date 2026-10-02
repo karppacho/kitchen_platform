@@ -58,16 +58,19 @@ const PORYADOK: readonly Pole[] = [
 /** Короткое имя длиннее сервер не примет — набрать больше не даём. */
 const PREDEL_IMENI = 100
 
-/** Причины, при которых строку стоит перечитать: таблица подтянет её сама
- *  или шеф поправит лист. */
-const PROVERIT_ESHCHYO: readonly ReferenceRowReason[] = [
-  'not_yet',
+/** Строки сдвинуты, тёзок несколько, ячейки не те — нужен человек в листе:
+ *  запись повторила бы тот же отказ, сначала — свежая проверка строки. */
+const NUZHEN_CHELOVEK: readonly string[] = [
   'shifted',
   'ambiguous',
   'formula',
   'percent',
   'losses_empty',
-]
+] satisfies readonly ReferenceRowReason[]
+
+/** Причины, при которых строку стоит перечитать: таблица подтянет её сама
+ *  или шеф поправит лист. Те же у предпросмотра и у отказа записи. */
+const PROVERIT_ESHCHYO: readonly string[] = ['not_yet', ...NUZHEN_CHELOVEK]
 
 /** Все попытки оборвались или не дождались ответа. Запись могла и лечь —
  *  повтор это узнает и второй не сделает. */
@@ -136,7 +139,9 @@ function vTelo(znacheniya: Znacheniya, lFormula: boolean): ReferenceForm {
  */
 function tekstOtkaza(oshibka: unknown): string {
   if (!(oshibka instanceof ApiError) || oshibka.status === 0) return NE_DOSHLO
-  if (oshibka.status === 422 && oshibka.errors === null) return ISPORCHEN
+  // Тело FastAPI (`detail` — список) своего текста не даёт — запрос испорчен
+  // экраном. 422 с текстом, но без полей — текст сервера как есть.
+  if (oshibka.status === 422 && oshibka.message === NE_POLUCHILOS) return ISPORCHEN
   if (oshibka.status >= 500 && oshibka.message === NE_POLUCHILOS) return SERVER_NE_OTVETIL
   return oshibka.message
 }
@@ -154,9 +159,11 @@ function tekstOtkazaChteniya(oshibka: unknown): string {
 }
 
 function tekstKhoda(popytka: number, uzhe: boolean): string {
+  // Повтор — после обрыва или срока: сервер, скорее всего, ещё пишет, и
+  // ответ на повтор он даст по журналу.
   if (popytka > 1) {
     return (
-      `Связь прервалась — ${uzhe ? 'связываем' : 'записываем'} ещё раз ` +
+      `Ответа пока нет — спрашиваем ещё раз ` +
       `(попытка ${popytka} из ${POVTOROV_PERENOSA + 1}) — второй записи не будет.`
     )
   }
@@ -202,8 +209,12 @@ export function FormaSpravochnika({
   const dannye = predprosmotr.data
   const lFormula = dannye?.formulas.includes('L') ?? false
   const znacheniya: Znacheniya = { ...izStroki(dannye?.current), ...pravki }
-  const izmenit = (pole: Pole, znachenie: string) =>
+  // Пока идёт запись, форма правок не принимает: ушло то, что было при
+  // нажатии, и правка, которую форма показала бы, в лист не легла бы.
+  const izmenit = (pole: Pole, znachenie: string) => {
+    if (perenos.idyot) return
     zadatPravki((prezhnie) => ({ ...prezhnie, [pole]: znachenie }))
+  }
 
   const otkaz = perenos.oshibka
   const oshibkiPolej = otkaz instanceof ApiError && otkaz.status === 422 ? otkaz.errors : null
@@ -254,15 +265,22 @@ export function FormaSpravochnika({
 
   const chitaem = predprosmotr.isFetching
   const zanyato = perenos.idyot || chitaem
+  // Почему отказала запись — те же причины, что у предпросмотра.
+  const prichinaOtkaza = otkaz instanceof ApiError ? otkaz.reason : null
   // Строка ждёт переноса — или её ещё нет: таблица могла подтянуть её с тех
   // пор, а проверит сервер свежим чтением. Сдвиг, тёзки, не те ячейки —
-  // нужен человек в листе, отправлять нечего.
+  // нужен человек в листе, отправлять нечего, пока строку не перечитали
+  // (перечитывание забывает и отказ записи).
   const pokazatZapisat = dannye !== undefined && !neSoglasovana
-  const mozhnoZapisat = pokazatZapisat && (dannye.ready || dannye.reason === 'not_yet' || uzhe)
+  const mozhnoZapisat =
+    pokazatZapisat &&
+    (dannye.ready || dannye.reason === 'not_yet' || uzhe) &&
+    !(prichinaOtkaza !== null && NUZHEN_CHELOVEK.includes(prichinaOtkaza))
   const proverit =
-    !uzhe &&
     !neSoglasovana &&
-    (predprosmotr.isError || (dannye?.reason != null && PROVERIT_ESHCHYO.includes(dannye.reason)))
+    (predprosmotr.isError ||
+      (!uzhe && dannye?.reason != null && PROVERIT_ESHCHYO.includes(dannye.reason)) ||
+      (prichinaOtkaza !== null && PROVERIT_ESHCHYO.includes(prichinaOtkaza)))
 
   function otpravit(sobytie: FormEvent) {
     sobytie.preventDefault()
@@ -319,8 +337,20 @@ export function FormaSpravochnika({
 
           {dannye && !neSoglasovana && <Podtyanuto dannye={dannye} uzhe={uzhe} />}
 
+          {pokazatPolya && uzhe && (
+            <p className="svarka-zamechanie">
+              В таблицу эти значения не запишутся — они нужны только, чтобы связать карточку
+            </p>
+          )}
+
           {pokazatPolya && (
-            <Polya znacheniya={znacheniya} izmenit={izmenit} uPolya={uPolya} lFormula={lFormula} />
+            <Polya
+              znacheniya={znacheniya}
+              izmenit={izmenit}
+              uPolya={uPolya}
+              lFormula={lFormula}
+              tolkoChtenie={perenos.idyot}
+            />
           )}
 
           {obshchiyOtkaz !== null && (
@@ -369,6 +399,10 @@ function Podtyanuto({ dannye, uzhe }: { dannye: ReferenceRowPreview; uzhe: boole
         <>
           <dt>id</dt>
           <dd>{`будет ${dannye.next_id} — выдаётся при записи`}</dd>
+          {/* Статус — поле формы по спеке, но выбора в нём нет: запись
+              всегда ставит «активный». */}
+          <dt>Статус</dt>
+          <dd>активный (ставится при записи)</dd>
         </>
       )}
       {pulled && (
@@ -405,20 +439,24 @@ function Podtyanuto({ dannye, uzhe }: { dannye: ReferenceRowPreview; uzhe: boole
 }
 
 /**
- * Поля формы. Пока идёт запись, они не блокируются: ушло то, что было при
- * нажатии, а отключённое поле отняло бы фокус. Отказ — и форма снова уходит
- * с тем, что в полях сейчас.
+ * Поля формы. Пока идёт запись, они только для чтения: ушло то, что было при
+ * нажатии, и правка, которую форма приняла бы, молча пропала бы. Не
+ * `disabled`: отключённое поле отняло бы фокус, а только для чтения — нет,
+ * и читалка экрана так и объявит. Отказ — и форма снова уходит с тем, что в
+ * полях сейчас.
  */
 function Polya({
   znacheniya,
   izmenit,
   uPolya,
   lFormula,
+  tolkoChtenie,
 }: {
   znacheniya: Znacheniya
   izmenit: (pole: Pole, znachenie: string) => void
   uPolya: (pole: Pole) => string | null
   lFormula: boolean
+  tolkoChtenie: boolean
 }) {
   const oshibkaEdinitsy = uPolya('unit')
   const summa = summaPoter(POTERI.map((pole) => znacheniya[pole]))
@@ -429,6 +467,7 @@ function Polya({
       izmenit={izmenit}
       oshibka={uPolya(pole)}
       chislo={chislo}
+      tolkoChtenie={tolkoChtenie}
     />
   )
 
@@ -452,6 +491,8 @@ function Polya({
                 id={nomer === 0 ? idPolya('unit') : undefined}
                 value={edinitsa}
                 checked={znacheniya.unit === edinitsa}
+                // Только для чтения у переключателя нет: пока идёт запись,
+                // выбор не меняется — правку отбрасывает `izmenit`.
                 onChange={() => izmenit('unit', edinitsa)}
               />
               {edinitsa}
@@ -482,6 +523,7 @@ function Polya({
             oshibka={uPolya(pole)}
             podskazka={podskazkaPoteri(znacheniya[pole])}
             chislo
+            tolkoChtenie={tolkoChtenie}
           />
         ))}
         {/* Итог — как формула P листа: сумма трёх, для сверки с таблицей. */}
@@ -500,6 +542,7 @@ function Vvod({
   oshibka,
   podskazka = null,
   chislo,
+  tolkoChtenie,
 }: {
   pole: Pole
   znachenie: string
@@ -508,6 +551,7 @@ function Vvod({
   /** Подсказка формы — не отказ: решает сервер. */
   podskazka?: string | null
   chislo: boolean
+  tolkoChtenie: boolean
 }) {
   const idPodskazki = `svarka-podskazka-${pole}`
   const opisanie = [
@@ -527,6 +571,7 @@ function Vvod({
         maxLength={pole === 'short_name' ? PREDEL_IMENI : undefined}
         autoComplete="off"
         value={znachenie}
+        readOnly={tolkoChtenie}
         aria-invalid={oshibka !== null ? true : undefined}
         aria-describedby={opisanie === '' ? undefined : opisanie}
         onChange={(sobytie) => izmenit(pole, sobytie.target.value)}

@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vi
 import type {
   Ingredient,
   Reconciliation as Svodka,
+  ReferenceForm,
   ReferenceRowCurrent,
   ReferenceRowPreview,
   ReferenceTransfer,
@@ -26,6 +27,8 @@ const NE_POYAVILAS =
   'Строка ещё не появилась в справочнике — таблица подтягивает карточки с задержкой, ' +
   'попробуйте через несколько минут'
 const NE_KANDIDAT = 'Этого ингредиента нет среди кандидатов карточки — обновите страницу'
+const SDVINUTY =
+  'Строки справочника сдвинуты относительно карточек — запись не сделана, проверьте лист ING'
 const OSHIBKA_IMENI = 'Короткое имя для iiko — обязательно'
 const OSHIBKA_EDINITSY = 'Единица измерения — кг, л или шт'
 const NE_PERENESEN =
@@ -394,6 +397,13 @@ test('форма: подтянутое — только для чтения, id 
   expect(pole(forma, 'Цена за упаковку, ₽')).toBeInTheDocument()
 })
 
+test('форма: статус «активный» виден, но не поле — его ставит запись', async () => {
+  narisovat()
+  const forma = await otkrytFormu()
+  expect(within(forma).getByText('активный (ставится при записи)')).toBeInTheDocument()
+  expect(within(forma).queryByRole('textbox', { name: /Статус/ })).not.toBeInTheDocument()
+})
+
 test('форма: L без формулы — поле цены за единицу есть', async () => {
   otvetyPredprosmotra = [() => HttpResponse.json(stroka({ formulas: ['P'] }))]
   narisovat()
@@ -637,7 +647,77 @@ test('409 «ещё не появилась» — текст, форма с вв�
   expect(screen.getByRole('dialog')).toBe(forma)
   expect(pole(forma, 'Короткое имя для iiko')).toHaveValue('Сырный')
   expect(pole(forma, POTERI[0])).toHaveValue('5')
+  // Строка может появиться в любую минуту: записать можно сразу, а можно
+  // сначала проверить.
   expect(zapisat(forma)).toBeEnabled()
+  expect(within(forma).getByRole('button', { name: 'Проверить ещё раз' })).toBeEnabled()
+})
+
+test('запись отказала «строки сдвинуты» (409) — «Записать» ждёт «Проверить ещё раз»', async () => {
+  // Повтор записи дал бы тот же отказ: сначала шеф правит лист, потом —
+  // свежая проверка строки.
+  otvetyPerenosa = [
+    () => HttpResponse.json({ detail: SDVINUTY, reason: 'shifted', row: 8 }, { status: 409 }),
+  ]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.click(zapisat(forma))
+
+  expect(await within(forma).findByRole('alert')).toHaveTextContent(SDVINUTY)
+  expect(zapisat(forma)).toBeDisabled()
+
+  await userEvent.click(within(forma).getByRole('button', { name: 'Проверить ещё раз' }))
+
+  await waitFor(() => expect(zapisat(forma)).toBeEnabled())
+  expect(within(forma).queryByRole('alert')).not.toBeInTheDocument()
+  expect(predprosmotry).toEqual([7, 7])
+  expect(pole(forma, 'Короткое имя для iiko')).toHaveValue('Сырный')
+})
+
+test('422 с пустыми ошибками полей — текст сервера, а не молчание', async () => {
+  otvetyPerenosa = [
+    () => HttpResponse.json({ detail: 'Форма не принята', errors: {} }, { status: 422 }),
+  ]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.click(zapisat(forma))
+
+  expect(await within(forma).findByRole('alert')).toHaveTextContent('Форма не принята')
+})
+
+test('пока идёт запись, поля — только для чтения: правка не пропадает молча', async () => {
+  // Запись идёт до двух минут. Уходит то, что было при нажатии; правка,
+  // которую форма приняла бы, в лист не легла бы, а итог значений не
+  // показывает.
+  const otvet = otlozhennyi()
+  otvetyPerenosa = [
+    async () => {
+      await otvet.zhdat
+      return undefined
+    },
+  ]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.type(pole(forma, 'Цена за упаковку, ₽'), '100')
+  await userEvent.click(zapisat(forma))
+  expect(await within(forma).findByText(/Записываем в справочник/)).toBeInTheDocument()
+
+  const tsena = pole(forma, 'Цена за упаковку, ₽')
+  expect(tsena).toHaveAttribute('readonly')
+  await userEvent.type(tsena, '5')
+  expect(tsena).toHaveValue('100')
+  await userEvent.click(within(forma).getByRole('radio', { name: 'шт' }))
+  expect(within(forma).getByRole('radio', { name: 'кг' })).toBeChecked()
+  expect(within(forma).queryByLabelText('Вес 1 шт, г')).not.toBeInTheDocument()
+
+  otvet.otpustit()
+
+  expect(await screen.findByText(ZAPISANO)).toBeInTheDocument()
+  expect(perenosy).toHaveLength(1)
+  expect((perenosy[0]!.telo as ReferenceForm).price_per_pack).toBe('100')
 })
 
 test('двойное нажатие — один запрос; пока идёт запись, кнопки ждут', async () => {
@@ -688,7 +768,10 @@ test('срок ответа (120 с) вышел — тот же запрос е�
   expect(perenosy).toHaveLength(1)
 
   await vperyod(1_000)
-  expect(await within(forma).findByText(/попытка 2 из 3/)).toBeInTheDocument()
+  // Сервер, скорее всего, ещё пишет — не «связь прервалась», а «ответа нет».
+  expect(
+    await within(forma).findByText(/Ответа пока нет — спрашиваем ещё раз \(попытка 2 из 3\)/),
+  ).toBeInTheDocument()
   expect(within(forma).getByText(/второй записи не будет/)).toBeInTheDocument()
   await vperyod(2_000)
 
@@ -773,6 +856,12 @@ test('уже в справочнике, а в строке пусто корот
 
   const imya = await within(forma).findByLabelText('Короткое имя для iiko')
   expect(imya).toHaveAccessibleDescription(OSHIBKA_IMENI)
+  // Поля появились — сказано зачем: записи в таблицу не будет.
+  expect(
+    within(forma).getByText(
+      'В таблицу эти значения не запишутся — они нужны только, чтобы связать карточку',
+    ),
+  ).toBeInTheDocument()
   await userEvent.type(imya, 'Сырный')
   await userEvent.click(within(forma).getByRole('button', { name: 'Связать с карточкой' }))
 
