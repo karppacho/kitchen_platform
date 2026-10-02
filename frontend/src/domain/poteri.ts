@@ -10,10 +10,15 @@
 
 import { razobratDesyatichnoe, sravnitDesyatichnye, type Desyatichnoe } from './sravnenie'
 
-/** Текст подсказки — тот же смысл, что у отказа сервера: 100 % значит, что
- *  от продукта ничего не остаётся, и расчёт делил бы на ноль. */
-export const VNE_PREDELA = 'от 0 до 100 %, меньше 100'
-export const NE_CHISLO = 'не число'
+/** Текст подсказки — тот же, что у отказа сервера: 100 % значит, что от
+ *  продукта ничего не остаётся, и калькулятор обнулил бы стоимость. */
+export const VNE_PREDELA = 'от 0 до 99,99 %'
+export const NE_CHISLO = 'введите число, например 5 или 12,5'
+
+/** Подсказка у итога: каждая потеря меньше 100 %, а сумма — нет. Это не
+ *  отказ — решает человек (вопрос шефу, ROADMAP). */
+export const SUMMA_VNE_PREDELA =
+  'Сумма потерь 100 % и больше — себестоимость станет нулевой, проверьте'
 
 /**
  * Введённое — в десятичную запись: без разрядных пробелов и знака
@@ -36,6 +41,13 @@ export function podskazkaPoteri(vvod: string): string | null {
   if (chislo === null) return NE_CHISLO
   if (chislo.minus || sravnitDesyatichnye(vZapis(chislo), '100') >= 0) return VNE_PREDELA
   return null
+}
+
+/** Подсказка у итога «для сверки»; `null` — сумма меньше 100 % или итога
+ *  нет (какое-то поле не число — о нём подсказывает само поле). */
+export function podskazkaSummy(summa: string | null): string | null {
+  if (summa === null) return null
+  return sravnitDesyatichnye(summa, '100') >= 0 ? SUMMA_VNE_PREDELA : null
 }
 
 /**

@@ -180,19 +180,30 @@ async function popytkaPerenosa(cardId: number, forma: ReferenceForm): Promise<Re
  * «строка ещё не появилась» повтор через 2 с не вылечит — решает человек.
  *
  * Двойное нажатие даёт один запрос. Успех: карточка ушла со «Сверки», в
- * справочнике новый ингредиент — оба списка перечитываются.
+ * справочнике новый ингредиент — оба списка перечитываются. `onZapisano`
+ * получает и номер попытки, которая ответила: «уже» после повтора — это
+ * своя запись, подтверждённая повтором, а не чужая.
  */
-export function usePerenos(cardId: number, onZapisano: (otvet: ReferenceTransfer) => void) {
+export function usePerenos(
+  cardId: number,
+  onZapisano: (otvet: ReferenceTransfer, popytka: number) => void,
+) {
   const queries = useQueryClient()
   const [popytka, zadatPopytku] = useState(1)
+  // Номер попытки для итога: состояние в обработчике успеха было бы прежним.
+  const nomer = useRef(1)
   const idyot = useRef(false)
+  const nachat = (n: number) => {
+    nomer.current = n
+    zadatPopytku(n)
+  }
   const mutatsiya = useMutation({
-    onMutate: () => zadatPopytku(1),
+    onMutate: () => nachat(1),
     mutationFn: (forma: ReferenceForm) =>
-      sPovtoramiPriObryve(() => popytkaPerenosa(cardId, forma), POVTOROV_PERENOSA, zadatPopytku),
+      sPovtoramiPriObryve(() => popytkaPerenosa(cardId, forma), POVTOROV_PERENOSA, nachat),
     onSuccess: (otvet) => {
       perechitatPosleUspekha(queries)
-      onZapisano(otvet)
+      onZapisano(otvet, nomer.current)
     },
     onError: (oshibka) => {
       const status = kod(oshibka)

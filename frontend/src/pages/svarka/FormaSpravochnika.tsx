@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 
-import { ApiError, NE_POLUCHILOS } from '../../api/client'
+import { ApiError, NE_DOZHDALIS, NE_POLUCHILOS } from '../../api/client'
 import { POVTOROV_PERENOSA, usePerenos, useStrokaSpravochnika } from '../../api/svarka'
 import type {
   ReconciliationRow,
@@ -10,7 +10,7 @@ import type {
   ReferenceRowReason,
   ReferenceTransfer,
 } from '../../api/types'
-import { podskazkaPoteri, summaPoter } from '../../domain/poteri'
+import { podskazkaPoteri, podskazkaSummy, summaPoter } from '../../domain/poteri'
 import { Num } from '../../ui/Num'
 import './formaSpravochnika.css'
 
@@ -161,8 +161,12 @@ function tekstOtkaza(oshibka: unknown): string {
 }
 
 /** Что сказать об отказе чтения строки. Чтение ничего не пишет — о второй
- *  записи здесь говорить незачем. */
+ *  записи здесь говорить незачем. Вышел срок (60 с) — так и сказано: сервер
+ *  мог долго читать таблицы, связь при этом была. */
 function tekstOtkazaChteniya(oshibka: unknown): string {
+  if (oshibka instanceof ApiError && oshibka.status === 0 && oshibka.message === NE_DOZHDALIS) {
+    return `${NE_DOZHDALIS} и нажмите «Проверить ещё раз».`
+  }
   if (!(oshibka instanceof ApiError) || oshibka.status === 0) {
     return 'Нет связи с сервером — проверьте связь и нажмите «Проверить ещё раз».'
   }
@@ -170,6 +174,20 @@ function tekstOtkazaChteniya(oshibka: unknown): string {
     return 'Сервер не ответил — нажмите «Проверить ещё раз» через минуту.'
   }
   return oshibka.message
+}
+
+/**
+ * Итог записи для человека. Первая попытка оборвалась или не дождалась
+ * ответа, а запись легла: повтор нашёл её по журналу и ответил «уже». Но
+ * человек нажал «Записать» один раз — для него это запись, а не чужое «уже в
+ * справочнике». У «Связать с карточкой» «уже» — правда и без повтора.
+ */
+function itogZapisi(otvet: ReferenceTransfer, popytka: number, uzhe: boolean): ReferenceTransfer {
+  if (!otvet.already || popytka < 2 || uzhe) return otvet
+  return {
+    ...otvet,
+    message: `Записано в справочник: строка ${otvet.row}, id ${otvet.ref_id} (подтверждено повтором)`,
+  }
 }
 
 function tekstKhoda(popytka: number, uzhe: boolean): string {
@@ -213,7 +231,11 @@ export function FormaSpravochnika({
   onZapisano: (otvet: ReferenceTransfer) => void
 }) {
   const predprosmotr = useStrokaSpravochnika(stroka.card_id)
-  const perenos = usePerenos(stroka.card_id, onZapisano)
+  const dannye = predprosmotr.data
+  const uzhe = dannye?.reason === 'already'
+  const perenos = usePerenos(stroka.card_id, (otvet, popytka) =>
+    onZapisano(itogZapisi(otvet, popytka, uzhe)),
+  )
   // Только то, что человек поменял сам: прочее идёт из строки и обновляется
   // вместе с ней.
   const [pravki, zadatPravki] = useState<Partial<Znacheniya>>({})
@@ -222,7 +244,6 @@ export function FormaSpravochnika({
   // Кнопка, на которой был фокус, осталась под панелью — фокус в форму.
   useEffect(() => zagolovok.current?.focus(), [])
 
-  const dannye = predprosmotr.data
   const lFormula = dannye?.formulas.includes('L') ?? false
   const znacheniya: Znacheniya = { ...izStroki(dannye?.current), ...pravki }
   // Пока идёт запись, форма правок не принимает: ушло то, что было при
@@ -237,7 +258,6 @@ export function FormaSpravochnika({
   const neSoglasovana =
     dannye?.reason === 'not_approved' ||
     (otkaz instanceof ApiError && otkaz.reason === 'not_approved')
-  const uzhe = dannye?.reason === 'already'
   const bezFormy = dannye?.reason != null && BEZ_FORMY.includes(dannye.reason)
   // Набранное человеком не забывается и без формы: строка нашлась — поля
   // вернутся с его правками.
@@ -292,10 +312,13 @@ export function FormaSpravochnika({
   // после готового предпросмотра «Записать» не гасит: строку видели, в полях
   // её значения. Сдвиг, тёзки, не те ячейки, подтверждённая пара — отправлять
   // нечего, пока строку не перечитали (перечитывание забывает и отказ записи).
+  // Перечитать не удалось — данные строки прежние, а отказ записи забыт:
+  // строку так и не проверили, «Записать» ждёт.
   const pokazatZapisat = estForma
   const mozhnoZapisat =
     pokazatZapisat &&
     (dannye.ready || uzhe) &&
+    !predprosmotr.isError &&
     !(prichinaOtkaza !== null && NUZHEN_CHELOVEK.includes(prichinaOtkaza))
   const proverit =
     !neSoglasovana &&
@@ -535,6 +558,10 @@ function Polya({
         vvod('price_per_kg', true)
       )}
 
+      {/* Пустое уходит в лист как «не трогать»: в ячейке остаётся, что в
+          ней было, — умолчание заготовки или прежняя цена. */}
+      <p className="svarka-poyasnenie">Пустое поле не меняет ячейку таблицы</p>
+
       {znacheniya.unit === 'шт' && vvod('weight_per_piece_g', true)}
 
       <fieldset className="svarka-gruppa">
@@ -555,6 +582,10 @@ function Polya({
         <p className="svarka-itog-poter">
           Общие потери: <Num value={summa} unit="%" /> — для сверки с таблицей
         </p>
+        {/* Каждая меньше 100 %, а вместе — нет: подсказка, решает человек. */}
+        {podskazkaSummy(summa) !== null && (
+          <p className="svarka-podskazka">{podskazkaSummy(summa)}</p>
+        )}
       </fieldset>
     </>
   )

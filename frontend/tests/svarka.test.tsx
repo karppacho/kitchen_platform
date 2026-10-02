@@ -438,12 +438,61 @@ test('форма: потери по умолчанию 0, итог считае�
   await userEvent.type(pole(forma, POTERI[1]), '12,5')
   expect(itog).toHaveTextContent('Общие потери: 17,5 %')
 
-  // Каждая потеря — меньше 100 %. Это подсказка, решает сервер.
-  expect(within(forma).queryByText(/меньше 100/)).not.toBeInTheDocument()
+  // Каждая потеря — от 0 до 99,99 %, тем же текстом, что у сервера. Это
+  // подсказка, решает сервер.
+  expect(within(forma).queryByText(/от 0 до 99,99 %/)).not.toBeInTheDocument()
   await userEvent.clear(pole(forma, POTERI[2]))
   await userEvent.type(pole(forma, POTERI[2]), '100')
-  expect(pole(forma, POTERI[2])).toHaveAccessibleDescription(/от 0 до 100 %, меньше 100/)
+  expect(pole(forma, POTERI[2])).toHaveAccessibleDescription('от 0 до 99,99 %')
+  await userEvent.clear(pole(forma, POTERI[2]))
+  await userEvent.type(pole(forma, POTERI[2]), 'пять')
+  expect(pole(forma, POTERI[2])).toHaveAccessibleDescription('введите число, например 5 или 12,5')
   expect(zapisat(forma)).toBeEnabled()
+})
+
+const SUMMA_VNE = 'Сумма потерь 100 % и больше — себестоимость станет нулевой, проверьте'
+
+test('форма: сумма потерь 100 % и больше — подсказка у итога, решает человек', async () => {
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.clear(pole(forma, POTERI[0]))
+  await userEvent.type(pole(forma, POTERI[0]), '60')
+  expect(within(forma).queryByText(SUMMA_VNE)).not.toBeInTheDocument()
+
+  // Каждая меньше 100 %, а вместе — 100 %.
+  await userEvent.clear(pole(forma, POTERI[1]))
+  await userEvent.type(pole(forma, POTERI[1]), '40')
+
+  expect(within(forma).getByText(/Общие потери/)).toHaveTextContent('Общие потери: 100 %')
+  expect(within(forma).getByText(SUMMA_VNE)).toBeInTheDocument()
+  expect(zapisat(forma)).toBeEnabled()
+})
+
+test('форма: под ценами сказано, что пустое поле ячейку таблицы не меняет', async () => {
+  otvetyPredprosmotra = [() => HttpResponse.json(stroka({ formulas: ['P'] }))]
+  narisovat()
+  const forma = await otkrytFormu()
+  expect(within(forma).getByText('Пустое поле не меняет ячейку таблицы')).toBeInTheDocument()
+})
+
+test('предпросмотр не ответил за 60 с — «не ответил вовремя», а не «нет связи»', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyPredprosmotra = [
+    async () => {
+      await delay('infinite')
+      return undefined
+    },
+  ]
+  narisovat()
+  const kartochka = await screen.findByTestId('kartochka-7')
+  await polzovatel.click(within(kartochka).getByRole('button', { name: 'Добавить в справочник' }))
+  const forma = await screen.findByRole('dialog', { name: /в справочник/i })
+
+  await vperyod(60_000)
+
+  expect(await within(forma).findByRole('alert')).toHaveTextContent(
+    'Сервер не ответил вовремя — проверьте связь и нажмите «Проверить ещё раз».',
+  )
 })
 
 test('форма начинается с текущих значений строки — заготовки шефа', async () => {
@@ -799,6 +848,107 @@ test('запись отказала «строки сдвинуты» (409) — 
   expect(pole(forma, 'Короткое имя для iiko')).toHaveValue('Сырный')
 })
 
+test('«Проверить ещё раз» не удалась после «нужен человек» — «Записать» так и ждёт', async () => {
+  // Перечитывание забывает отказ записи, а данные строки остаются прежними:
+  // без проверки отказа чтения «Записать» открылась бы для той же строки.
+  otvetyPerenosa = [
+    () => HttpResponse.json({ detail: SDVINUTY, reason: 'shifted', row: 8 }, { status: 409 }),
+  ]
+  otvetyPredprosmotra = [
+    () => HttpResponse.json(stroka()),
+    () =>
+      HttpResponse.json(
+        {
+          detail:
+            'Google-таблица не ответила — в справочнике ничего не изменилось, нажмите ещё раз',
+        },
+        { status: 502 },
+      ),
+  ]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.click(zapisat(forma))
+  expect(await within(forma).findByRole('alert')).toHaveTextContent(SDVINUTY)
+
+  await userEvent.click(within(forma).getByRole('button', { name: 'Проверить ещё раз' }))
+
+  expect(await within(forma).findByText(/Google-таблица не ответила/)).toBeInTheDocument()
+  expect(zapisat(forma)).toBeDisabled()
+})
+
+test.each([
+  [
+    502,
+    {
+      detail: 'Не удалось подтвердить запись — нажмите ещё раз: второй записи не будет',
+      row: 8,
+      journal_id: 3,
+    },
+  ],
+  [503, { detail: 'Таблица занята — попробуйте ещё раз' }],
+])('запись: %i — текст сервера, набранное цело, «Записать» доступна', async (kod, telo) => {
+  otvetyPerenosa = [() => HttpResponse.json(telo, { status: kod })]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.click(zapisat(forma))
+
+  expect(await within(forma).findByRole('alert')).toHaveTextContent(telo.detail)
+  expect(pole(forma, 'Короткое имя для iiko')).toHaveValue('Сырный')
+  // Повтор безопасен: журнал на сервере второй записи не даст.
+  expect(zapisat(forma)).toBeEnabled()
+  expect(perenosy).toHaveLength(1)
+})
+
+test('запись: карточку сняли с согласования (409 «не Да») — формы нет, список перечитан', async () => {
+  otvetyPerenosa = [
+    () =>
+      HttpResponse.json(
+        { detail: NE_SOGLASOVANA, reason: 'not_approved', row: null },
+        { status: 409 },
+      ),
+  ]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.click(zapisat(forma))
+
+  expect(await within(forma).findByRole('alert')).toHaveTextContent(NE_SOGLASOVANA)
+  expect(within(forma).queryByLabelText('Короткое имя для iiko')).not.toBeInTheDocument()
+  expect(within(forma).queryByRole('button', { name: 'Записать в справочник' })).toBe(null)
+  expect(within(forma).queryByRole('button', { name: 'Проверить ещё раз' })).toBe(null)
+  await waitFor(() => expect(chteniyaSvodki).toBe(2))
+})
+
+test('ответ 200 оборвался посреди тела — повтор, итог «записано… подтверждено повтором»', async () => {
+  // Запись легла, а ответ не дошёл целиком — это обрыв, а не отказ. Повтор
+  // находит запись по журналу и отвечает «уже», но человек нажал
+  // «Записать» один раз: для него это запись, а не чужое «уже в справочнике».
+  const { polzovatel, vperyod } = chasy()
+  otvetyPerenosa = [
+    () =>
+      new HttpResponse('{"row": 8, "ref_id": "1', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    () => zapisano(7, { already: true, message: 'Ингредиент уже в справочнике — id 131' }),
+  ]
+  narisovat()
+  const forma = await otkrytFormu(7, 'Добавить в справочник', polzovatel)
+  await polzovatel.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await polzovatel.click(zapisat(forma))
+
+  expect(await within(forma).findByText(/попытка 2 из 3/)).toBeInTheDocument()
+  await vperyod(2_000)
+
+  expect(
+    await screen.findByText('Записано в справочник: строка 8, id 131 (подтверждено повтором)'),
+  ).toBeInTheDocument()
+  expect(perenosy).toHaveLength(2)
+  expect(perenosy[1]).toEqual(perenosy[0])
+})
+
 test('422 с пустыми ошибками полей — текст сервера, а не молчание', async () => {
   otvetyPerenosa = [
     () => HttpResponse.json({ detail: 'Форма не принята', errors: {} }, { status: 422 }),
@@ -957,6 +1107,27 @@ test('уже в справочнике — формы нет, «Связать �
       losses_thermal: '0',
     },
   ])
+})
+
+test('«Связать с карточкой» с повтором после обрыва — итог «уже в справочнике», как и было', async () => {
+  // Здесь «уже» — правда и без повтора: ингредиент был в справочнике до
+  // нажатия, записи не было.
+  const { polzovatel, vperyod } = chasy()
+  otvetyPredprosmotra = [() => HttpResponse.json(uzheVSpravochnike())]
+  otvetyPerenosa = [
+    () => HttpResponse.error(),
+    () => zapisano(7, { ref_id: '42', already: true, message: UZHE }),
+  ]
+  narisovat()
+  const forma = await otkrytFormu(7, 'Добавить в справочник', polzovatel)
+  await polzovatel.click(within(forma).getByRole('button', { name: 'Связать с карточкой' }))
+
+  expect(await within(forma).findByText(/попытка 2 из 3/)).toBeInTheDocument()
+  await vperyod(2_000)
+
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  expect(screen.getByText(UZHE)).toBeInTheDocument()
+  expect(screen.queryByText(/подтверждено повтором/)).not.toBeInTheDocument()
 })
 
 test('уже в справочнике, а в строке пусто короткое имя (422) — поля появляются с ошибкой', async () => {
