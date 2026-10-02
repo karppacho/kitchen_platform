@@ -357,6 +357,62 @@ def test_writing_over_query_output_is_refused() -> None:
     assert sheet.cell("B2") == Spill("Кетчуп")
 
 
+def _zone() -> tuple[FakeSpreadsheet, FakeWorksheet]:
+    """Строка 1 — шапка, 2 — якорь QUERY (вывод в B), 2–4 — вывод, A — ручные id."""
+    return _ing_book(
+        [
+            ["id", "Название"],
+            [1, Formula("=QUERY(X)", "Кетчуп")],
+            [2, Spill("Майонез")],
+            [3, Spill("Горчица")],
+        ]
+    )
+
+
+def test_rows_inserted_inside_query_output_leave_it_in_place() -> None:
+    """Как в Google: вывод QUERY привязан к якорю. Строка, вставленная ниже
+    якоря, сдвигает ручные ячейки, а вывод остаётся на своих номерах строк —
+    напротив «Майонеза» оказывается чужой id."""
+    book, sheet = _zone()
+
+    book.chef_inserts_rows("ING", above=3, moment="now")
+
+    assert _read(book, "'ING'!A2:B5", "UNFORMATTED_VALUE") == [
+        [1, "Кетчуп"],
+        ["", "Майонез"],
+        [2, "Горчица"],
+        [3],
+    ]
+    assert sheet.cell("B3") == Spill("Майонез")
+
+
+def test_rows_inserted_above_the_anchor_move_the_output_too() -> None:
+    book, _ = _zone()
+
+    book.chef_inserts_rows("ING", above=2, moment="now")
+
+    assert _read(book, "'ING'!A3:B5", "UNFORMATTED_VALUE") == [
+        [1, "Кетчуп"],
+        [2, "Майонез"],
+        [3, "Горчица"],
+    ]
+
+
+def test_rows_deleted_inside_query_output_leave_it_in_place() -> None:
+    """Удалённая строка ниже якоря: ручные ячейки подтягиваются вверх, вывод
+    QUERY — на прежних номерах строк."""
+    book, sheet = _zone()
+
+    book.chef_deletes_rows("ING", 3, moment="now")
+
+    assert _read(book, "'ING'!A2:B4", "UNFORMATTED_VALUE") == [
+        [1, "Кетчуп"],
+        [3, "Майонез"],
+        ["", "Горчица"],
+    ]
+    assert sheet.cell("B4") == Spill("Горчица")
+
+
 def test_ing_sheet_is_built_like_the_real_one() -> None:
     """Имитация листа ING: якорь QUERY в B и F строки 4, вывод QUERY виден в
     FORMATTED и пуст в FORMULA, P — формула во всех строках, L — формула в

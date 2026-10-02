@@ -497,12 +497,13 @@ def test_id_hidden_by_format_is_not_an_empty_a() -> None:
 # ---------------------------------------------------------------------------
 # Отказы по устройству строки и листа — ни одной записи
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("letter", ["E", "M", "N", "O", "S", "T"])
+@pytest.mark.parametrize("letter", ["A", "E", "M", "N", "O", "Q", "R", "S", "T"])
 def test_formula_in_a_manual_cell_is_refused(letter: str) -> None:
     """Формула в ручной ячейке, кроме L, — не то, что ждали: платформа её не
-    перезаписывает и не пропускает молча."""
+    перезаписывает и не пропускает молча. Формула в A здесь показывает
+    пусто: строка выглядит ждущей переноса, но писать в неё нельзя."""
     ing = ing_sheet()
-    ing.put(f"{letter}6", Formula(f"={letter}5", 0))
+    ing.put(f"{letter}6", Formula(f"={letter}5", "" if letter == "A" else 0))
     rig = _rig(ing=ing)
 
     with pytest.raises(RowRefusedError) as caught:
@@ -529,6 +530,26 @@ def test_loss_cell_not_in_percent_is_refused(letter: str) -> None:
         "Ячейки потерь в строке 6 оформлены не процентами — запись не сделана, проверьте лист ING"
     )
     assert caught.value.reason == "percent"
+    _nothing_written(rig)
+
+
+@pytest.mark.parametrize("letter", ["Q", "R", "S"])
+def test_empty_loss_cell_is_refused_with_its_own_text(letter: str) -> None:
+    """Пустая ячейка потерь ничего не показывает — оформление по ней не
+    проверить. Отказ, но не «оформлены не процентами»: человеку надо вписать
+    0 %, а не менять формат."""
+    ing = ing_sheet()
+    ing.put(f"{letter}6", "")
+    rig = _rig(ing=ing)
+
+    with pytest.raises(RowRefusedError) as caught:
+        rig.fill()
+
+    assert str(caught.value) == (
+        "Ячейки потерь в строке 6 пусты — оформление не проверить. Запись не сделана: впишите "
+        "в них 0 % в листе ING"
+    )
+    assert caught.value.reason == "losses_empty"
     _nothing_written(rig)
 
 
@@ -667,8 +688,9 @@ def test_hold_limit_outlasts_the_worst_fill() -> None:
 # ---------------------------------------------------------------------------
 def test_journal_keeps_the_fill() -> None:
     """След в журнале: действие fill, книга кухни, лист ING, строка, что
-    отправлено, снимок строки до записи (как видит шеф и формулами) и якорь.
-    Полный снимок листа после подтверждения больше не нужен."""
+    отправлено, снимок строки до записи (как видит шеф) и формулами — вместе с
+    соседями сверху и снизу, — якорь. Полный снимок листа (значения и
+    формулы) после подтверждения больше не нужен."""
     rig = _rig()
     before = rig.line(6)
 
@@ -681,9 +703,13 @@ def test_journal_keeps_the_fill() -> None:
     assert record.values["id"] == 131
     assert record.values["losses_unpacking"] == 0.125
     assert record.before["rows"] == {"6": before}
+    formula = record.before["formula"]
+    assert isinstance(formula, dict) and set(formula) == {"5", "6", "7"}
+    assert (formula["5"][0], formula["5"][11]) == (130, "=M5/5")
     assert record.before["anchor"] == 4
     assert record.before["name"] == "Соус Барбекю"
     assert "sheet" not in record.before
+    assert "sheet_formula" not in record.before
     assert record.content_hash is not None and len(record.content_hash) == 64
 
 
@@ -758,6 +784,61 @@ def test_cell_changed_after_write_returns_only_ours() -> None:
     assert record.status == ROLLED_BACK
     assert record.error is not None and "M" in record.error
     assert record.after is not None and record.after["restored"] == ["A", "E", "L", "Q", "R"]
+
+
+def test_chef_edit_of_a_cell_we_left_alone_is_not_touched() -> None:
+    """O ушла null — её мы не трогали. Шеф вписал в неё вес в ту же секунду:
+    строку правили одновременно с нами, наши ячейки возвращаются, а его O
+    остаётся, как он её вписал."""
+    rig = _rig()
+    rig.kitchen.tamper_after_write("'ING'!O6", "40")
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.fill()
+
+    assert caught.value.layout_confirmed
+    assert rig.line(6)[_index("O")] == "40"
+    restore = rig.sent("values_batch_update")[1]
+    data = restore["data"]
+    assert isinstance(data, list)
+    assert "'ING'!O6:O6" not in [item["range"] for item in data]
+    record = rig.journal.only()
+    assert record.status == ROLLED_BACK
+    assert record.error is not None and "колонках O;" in record.error
+
+
+def test_restore_that_did_not_hold_is_not_confirmed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Наши ячейки возвращали, а шеф тут же вписал цену в L. Перечитывание
+    после возврата видит в L не то, что было до записи: «вернули как было» —
+    неправда. Исход не подтверждён: failed, полный снимок листа, ERROR в лог."""
+    rig = _rig()
+    rig.kitchen.tamper_after_write("'ING'!M6", "999")
+    book = rig.kitchen
+    original = book.values_batch_update
+    calls: list[int] = []
+
+    def write(body: dict[str, object]) -> dict[str, object]:
+        answer = original(body)
+        calls.append(1)
+        if len(calls) == 2:
+            rig.ing.put("L6", 77)
+        return answer
+
+    monkeypatch.setattr(book, "values_batch_update", write)
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.fill()
+
+    assert not caught.value.layout_confirmed
+    assert str(caught.value) == (
+        "Лист ING меняли в ту же секунду — запись не подтверждена. Покажите шефу строку 6 "
+        "листа ING (запись журнала №1)"
+    )
+    record = rig.journal.only()
+    assert (record.status, record.note) == (FAILED, LAYOUT_UNCONFIRMED)
+    assert record.error is not None and "L" in record.error
+    assert "sheet" in record.before
+    assert rig.line(6)[_index("L")] == "77"
 
 
 def test_applied_then_timeout_is_success() -> None:
@@ -878,12 +959,59 @@ def test_rows_inserted_before_write_are_caught_and_not_cleaned(
     record = rig.journal.only()
     assert (record.status, record.note) == (FAILED, LAYOUT_UNCONFIRMED)
     assert "sheet" in record.before
+    assert "sheet_formula" in record.before
     assert "не подтверждена" in caplog.text
 
     retry = rig.fill()
 
     assert (retry.row, retry.ref_id) == (7, "132")
     assert retry.shifted == UnconfirmedWrite(id=1, row=6)
+
+
+def test_row_inserted_inside_the_zone_before_write_is_not_verified() -> None:
+    """Шеф вставил строку внутри зоны QUERY, над нашей, между чтением и
+    записью. Вывод QUERY привязан к якорю и не сдвигается: в строке 6
+    по-прежнему «Соус Барбекю». А ручные ячейки сдвинулись: в строке 6 теперь
+    id 130, L-формула и цены «Моцареллы», и наша запись легла поверх них.
+    Якорь, название и наш id на месте, но соседняя строка 5 уже не та, что
+    при чтении, — место не подтверждено: failed, ничего не трогаем, в журнале
+    — полный снимок листа значениями и формулами: по нему «Моцареллу»
+    возвращают руками."""
+    rig = _rig()
+    rig.kitchen.chef_inserts_rows("ING", above=5, moment="before_write")
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.fill()
+
+    assert not caught.value.layout_confirmed
+    assert rig.line(6)[_index("C")] == "Соус Барбекю", "вывод QUERY на месте"
+    assert rig.writes() == ["values_batch_update"], "ничего не возвращали"
+    record = rig.journal.only()
+    assert (record.status, record.note) == (FAILED, LAYOUT_UNCONFIRMED)
+    sheet_formula = record.before["sheet_formula"]
+    assert isinstance(sheet_formula, list)
+    assert (sheet_formula[4][0], sheet_formula[4][11]) == (130, "=M5/5"), "есть откуда вернуть"
+
+
+def test_row_deleted_inside_the_zone_before_write_is_not_verified() -> None:
+    """Шеф удалил строку «Моцареллы» внутри зоны между чтением и записью.
+    Вывод QUERY остался на своих номерах строк, ручные ячейки подтянулись
+    вверх: в строке 6 теперь заготовка «Соуса Сырного» с L-формулой, и наша
+    запись легла поверх неё. Соседняя строка 5 не та, что при чтении, — место
+    не подтверждено, ничего не трогаем, снимок формул в журнале."""
+    rig = _rig()
+    rig.kitchen.chef_deletes_rows("ING", 5, moment="before_write")
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.fill()
+
+    assert not caught.value.layout_confirmed
+    assert rig.writes() == ["values_batch_update"]
+    record = rig.journal.only()
+    assert (record.status, record.note) == (FAILED, LAYOUT_UNCONFIRMED)
+    sheet_formula = record.before["sheet_formula"]
+    assert isinstance(sheet_formula, list)
+    assert sheet_formula[6][11] == "=M7/5"
 
 
 # ---------------------------------------------------------------------------

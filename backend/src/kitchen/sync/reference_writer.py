@@ -37,12 +37,14 @@
    строки. B–D, F–K (вывод ``QUERY``) и P (формула шефа) в теле не бывают
    никогда.
 10. **Перечитать и сверить** — и когда запись упала. Раскладка: якорь
-    ``QUERY`` на месте, в C — название карточки, в A — наш id; значения —
-    точно, по FORMULA-чтению. Итог — в журнал: ``verified``;
+    ``QUERY`` на месте, в C — название карточки, в A — наш id, ручные ячейки
+    соседей сверху и снизу — как при чтении (вывод ``QUERY`` при вставке
+    строки внутри зоны не сдвигается, а ручные ячейки сдвигаются); значения
+    — точно, по FORMULA-чтению. Итог — в журнал: ``verified``;
     ``rolled_back`` — строку правили одновременно с нами: наши ячейки
     возвращены к тому, что в них было до записи, чужие не тронуты;
     ``failed`` — не легла или раскладку не подтвердили: ничего не трогаем,
-    полный снимок листа в журнале, ERROR в лог.
+    полный снимок листа (значения и формулы) в журнале, ERROR в лог.
 
 Возврат, а не очистка: в строке-заготовке до нас стояли умолчания шефа (цены
 0, «кг», потери 0% в процентном оформлении). Очистка стёрла бы их, а пустые
@@ -203,6 +205,8 @@ REASON_FORMULA = "formula"
 """Причина отказа: в ручной ячейке строки (кроме L) — формула."""
 REASON_PERCENT = "percent"
 """Причина отказа: ячейки потерь оформлены не процентами."""
+REASON_LOSSES_EMPTY = "losses_empty"
+"""Причина отказа: ячейки потерь пусты — оформление не проверить."""
 
 
 def _formula_text(row: int, letters: Sequence[str]) -> str:
@@ -220,6 +224,13 @@ def _percent_text(row: int) -> str:
     return (
         f"Ячейки потерь в строке {row} оформлены не процентами — запись не сделана, "
         "проверьте лист ING"
+    )
+
+
+def _losses_empty_text(row: int) -> str:
+    return (
+        f"Ячейки потерь в строке {row} пусты — оформление не проверить. Запись не сделана: "
+        "впишите в них 0 % в листе ING"
     )
 
 
@@ -447,23 +458,27 @@ def _read(kitchen: Spreadsheet, cards: Spreadsheet) -> _Sheets:
 def _row_values(sheet: _Sheets, row: int, planned: Mapping[str, SentValue]) -> dict[str, SentValue]:
     """Что пишем в найденную строку — после проверок её ячеек.
 
+    * Формула в ручной ячейке, кроме L, — отказ (в A тоже: формула, которая
+      показывает пусто, — не место для id); L-формула пропускается.
     * A пуст и в FORMULA-чтении: id под оформлением «;;;» в FORMATTED
       выглядит пустым — это не строка, ждущая переноса, а сдвиг.
-    * Формула в ручной ячейке, кроме L, — отказ; L-формула пропускается.
     * Ячейки потерь показывают «%»: доля в ячейке без процентного
-      оформления — «0,05» вместо «5%».
+      оформления — «0,05» вместо «5%». Пустая ячейка не показывает ничего,
+      и оформление по ней не проверить — отказ со своим текстом.
     * id — наибольший числовой id листа (FORMULA-чтение: числа числами)
       плюс один, JSON-целым.
     """
     raw = _row(sheet.formula, row)
     shown = _text_row(sheet.formatted, row)
-    if not _blank(raw[_ID.index]):
-        raise RowRefusedError(NotFound.SHIFTED.message, reason=NotFound.SHIFTED.value, row=row)
     formulas = formula_cells(raw)
     written = {c.letter for c in _WRITTEN}
     blocked = [letter for letter in formulas if letter in written and letter != _PRICE.letter]
     if blocked:
         raise RowRefusedError(_formula_text(row, blocked), reason=REASON_FORMULA, row=row)
+    if not _blank(raw[_ID.index]):
+        raise RowRefusedError(NotFound.SHIFTED.message, reason=NotFound.SHIFTED.value, row=row)
+    if any(_blank(shown[c.index]) for c in _LOSSES):
+        raise RowRefusedError(_losses_empty_text(row), reason=REASON_LOSSES_EMPTY, row=row)
     if any("%" not in shown[c.index] for c in _LOSSES):
         raise RowRefusedError(_percent_text(row), reason=REASON_PERCENT, row=row)
     ref_id = next_reference_id(_cell(line, _ID.index) for line in sheet.formula[SPEC.header_rows :])
@@ -488,8 +503,10 @@ class _Attempt:
     name: str
     """Название карточки — им сверяется C после записи."""
     before: Mapping[str, object]
-    """Снимок «до»: строка как видит шеф (``rows``) и формулами (``formula``),
-    якорь, название и, пока запись не подтверждена, весь лист (``sheet``)."""
+    """Снимок «до»: строка как видит шеф (``rows``); она и соседи сверху и
+    снизу формулами (``formula``); якорь, название и, пока запись не
+    подтверждена, весь лист значениями и формулами (``sheet``,
+    ``sheet_formula``)."""
     sent: Mapping[str, SentValue]
 
     @classmethod
@@ -506,22 +523,28 @@ class _Attempt:
 
     def line(self) -> list[str]:
         """Строка до записи, как её видел шеф, A–T."""
-        return [str(cell) for cell in self._snapshot("rows")[:_WIDTH]]
+        return [str(cell) for cell in self._snapshot("rows", self.row)[:_WIDTH]]
 
-    def raw_line(self) -> list[object]:
-        """Строка до записи формулами, A–T: числа — числами."""
-        return self._snapshot("formula")[:_WIDTH]
+    def raw_line(self, number: int | None = None) -> list[object]:
+        """Строка ``number`` (по умолчанию — наша) до записи формулами, A–T:
+        числа — числами. Есть наша и соседи сверху и снизу."""
+        return self._snapshot("formula", self.row if number is None else number)[:_WIDTH]
 
     def rows_only(self) -> dict[str, object]:
         """Снимок без листа целиком — у записи, раскладка которой подтверждена."""
-        return {key: value for key, value in self.before.items() if key != "sheet"}
+        return {key: value for key, value in self.before.items() if key not in _WHOLE_SHEET}
 
-    def _snapshot(self, key: str) -> list[object]:
+    def _snapshot(self, key: str, number: int) -> list[object]:
         rows = self.before.get(key)
-        line = rows.get(str(self.row)) if isinstance(rows, dict) else None
+        line = rows.get(str(number)) if isinstance(rows, dict) else None
         if not isinstance(line, list):
-            raise ValueError(f"в журнале №{self.journal_id} нет снимка строки {self.row}")
+            raise ValueError(f"в журнале №{self.journal_id} нет снимка строки {number}")
         return [*line, *[""] * (_WIDTH - len(line))]
+
+
+_WHOLE_SHEET = ("sheet", "sheet_formula")
+"""Полный снимок листа в журнале — значениями и формулами. Нужен, пока
+раскладку не подтвердили: по нему возвращают затёртое, в том числе формулы."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -534,8 +557,13 @@ class _Reread:
     """Строка формулами, A–T: числа — числами, формула — текстом."""
     anchor_cell: tuple[str, object]
     """Ячейка якоря: как видит шеф и формулой."""
+    neighbours: dict[str, list[object]]
+    """Соседи сверху и снизу формулами, A–T — по номеру строки."""
+    moved: tuple[str, ...]
+    """Соседи, чьи ручные ячейки не те, что при чтении, — номера строк."""
     place_holds: bool
-    """Якорь ``QUERY`` на месте и без ошибки, в C — название карточки."""
+    """Якорь ``QUERY`` на месте и без ошибки, в C — название карточки, ручные
+    ячейки соседей — как при чтении."""
     layout_confirmed: bool
     """Место то же, и в A — наш id."""
     untouched: bool
@@ -545,38 +573,64 @@ class _Reread:
         return {
             "rows": {str(attempt.row): self.line},
             "values": self.values,
+            "neighbours": self.neighbours,
             "anchor": {str(attempt.anchor): list(self.anchor_cell)},
         }
 
 
 def _look(book: Spreadsheet, attempt: _Attempt) -> _Reread:
-    """Перечитать якорь и строку — FORMATTED и FORMULA, по запросу на чтение.
+    """Перечитать якорь и строки N−1, N, N+1 — FORMATTED и FORMULA, по
+    запросу на чтение.
+
+    Место строки держат три вещи:
+
+    * якорь ``QUERY`` — на месте и без ошибки;
+    * в C — название карточки, и это вывод ``QUERY`` (в FORMULA пусто);
+    * ручные ячейки соседей сверху и снизу — те же, что при чтении. Вывод
+      ``QUERY`` привязан к якорю и при вставке или удалении строки внутри
+      зоны остаётся на своих номерах строк, а ручные ячейки сдвигаются. Тогда
+      в нашей строке прежнее название, но ручные ячейки соседа — и запись
+      легла поверх них. Сдвиг виден по соседям: id в листе уникальны.
 
     Значения сверяются по FORMULA-чтению: у ячейки без формулы это то же
     значение без оформления, что и UNFORMATTED (числа числами), а формулу,
     вписанную в нашу ячейку в окне записи, оно показывает формулой — чужой.
     """
-    ranges = [
-        f"{_TITLE}!{_ANCHOR.letter}{attempt.anchor}",
-        f"{_TITLE}!A{attempt.row}:{_LAST}{attempt.row}",
-    ]
-    shown_anchor, shown_row = read_ranges(book, ranges, FORMATTED)
-    raw_anchor, raw_row = read_ranges(book, ranges, FORMULA)
+    row = attempt.row
+    ranges = [f"{_TITLE}!{_ANCHOR.letter}{attempt.anchor}", f"{_TITLE}!A{row - 1}:{_LAST}{row + 1}"]
+    shown_anchor, shown_rows = read_ranges(book, ranges, FORMATTED)
+    raw_anchor, raw_rows = read_ranges(book, ranges, FORMULA)
     anchor_shown, anchor_formula = str(_first(shown_anchor)), _first(raw_anchor)
-    line = _text_row(shown_row, 1)[:_WIDTH]
-    values = _row(raw_row, 1)[:_WIDTH]
+    line = _text_row(shown_rows, 2)[:_WIDTH]
+    values = _row(raw_rows, 2)[:_WIDTH]
+    neighbours = {
+        str(row - 1): _row(raw_rows, 1)[:_WIDTH],
+        str(row + 1): _row(raw_rows, 3)[:_WIDTH],
+    }
+    moved = tuple(
+        number
+        for number, now in neighbours.items()
+        if _manual_changed(attempt.raw_line(int(number)), now)
+    )
     anchor_holds = is_query_formula(anchor_formula) and not anchor_shown.strip().startswith("#")
     # Название — вывод QUERY: видно в FORMATTED и пусто в FORMULA, как при поиске строки.
     same_name = normalise_name(line[_NAME.index]) == normalise_name(attempt.name)
-    place = anchor_holds and same_name and _blank(values[_NAME.index])
+    place = anchor_holds and same_name and _blank(values[_NAME.index]) and not moved
     return _Reread(
         line=line,
         values=values,
         anchor_cell=(anchor_shown, anchor_formula),
+        neighbours=neighbours,
+        moved=moved,
         place_holds=place,
         layout_confirmed=place and same_cell(attempt.sent[_ID.field], values[_ID.index]),
         untouched=place and line == attempt.line(),
     )
+
+
+def _manual_changed(before: Sequence[object], now: Sequence[object]) -> bool:
+    """Изменилась ли хоть одна ручная ячейка строки (A, E, L–O, Q–T)."""
+    return any(not same_cell(_as_sent(before[c.index]), now[c.index]) for c in _WRITTEN)
 
 
 # ---------------------------------------------------------------------------
@@ -680,10 +734,11 @@ class ReferenceRowFiller:
         sent = _row_values(sheet, row, planned)
         before: dict[str, object] = {
             "rows": {str(row): _text_row(sheet.formatted, row)},
-            "formula": {str(row): _row(sheet.formula, row)},
+            "formula": {str(n): _row(sheet.formula, n) for n in (row - 1, row, row + 1)},
             "anchor": sheet.anchor,
             "name": card_name,
             "sheet": sheet.formatted,
+            "sheet_formula": sheet.formula,
         }
         journal_id = self._journal.start(
             NewWrite(
@@ -853,9 +908,10 @@ class ReferenceRowFiller:
         раскладке. Наша ячейка — где лежит ровно отправленное; ей
         возвращается то, что в ней было до записи (пустое — пусто, умолчание
         заготовки — умолчание), одной записью RAW. Ячейки, где отправленное
-        совпадает с прежним, не трогаются. После возврата раскладка
-        перечитывается ещё раз: сдвинь шеф строки и в этом окне — возвращали,
-        возможно, не там, и это разбор по журналу.
+        совпадает с прежним, не трогаются. После возврата строка и соседи
+        перечитываются ещё раз: сдвинь шеф строки и в этом окне — возвращали,
+        возможно, не там; не лежит в возвращённой ячейке прежнее — в неё в
+        этом окне вписали своё. И то и другое — разбор по журналу.
         """
         row = attempt.row
         before = attempt.raw_line()
@@ -890,12 +946,30 @@ class ReferenceRowFiller:
                 f"ячейки, — что в ней осталось, неизвестно. Покажите шефу строку {row} листа ING "
                 f"(запись журнала №{attempt.journal_id})",
             ) from error
-        after["after_restore"] = {"rows": {str(row): again.line}, "values": again.values}
+        after["after_restore"] = {
+            "rows": {str(row): again.line},
+            "values": again.values,
+            "neighbours": again.neighbours,
+        }
         if not again.place_holds:
             raise self._unconfirmed(
                 attempt,
                 after,
-                "после возврата своих ячеек якорь или название в строке не те — строки сдвигали",
+                "после возврата своих ячеек якорь, название или соседние строки не те — строки "
+                "сдвигали",
+                _unconfirmed_text(row, attempt.journal_id),
+            )
+        # Возврат — тоже запись: в его окне шеф мог вписать своё. «Вернули как
+        # было» — только если перечитанное совпало с тем, что было до записи.
+        unrestored = [
+            c for c in ours if not same_cell(_as_sent(before[c.index]), again.values[c.index])
+        ]
+        if unrestored:
+            raise self._unconfirmed(
+                attempt,
+                after,
+                f"после возврата своих ячеек в них не то, что было до записи: "
+                f"{_letters(unrestored)}",
                 _unconfirmed_text(row, attempt.journal_id),
             )
         letters = ", ".join(c.letter for c in strangers)
@@ -1026,6 +1100,11 @@ def _shifted_note(shifted: UnconfirmedWrite | None) -> str:
 
 
 def _shift_reason(seen: _Reread) -> str:
+    if seen.moved:
+        return (
+            f"ручные ячейки соседних строк {', '.join(seen.moved)} не те, что при чтении, — "
+            "строки внутри зоны QUERY сдвигали; ничего не возвращено"
+        )
     if seen.place_holds:
         return (
             "в A нет нашего id, а якорь и название на месте — id стёрли или вписали своё; "

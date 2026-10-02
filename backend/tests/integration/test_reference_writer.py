@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from kitchen.db import models
-from kitchen.db.journal import VERIFIED, DbJournal, NewWrite
+from kitchen.db.journal import FAILED, PENDING, ROLLED_BACK, VERIFIED, DbJournal, NewWrite
 from kitchen.domain.reference_row import ReferenceForm
 from kitchen.sync.reference_writer import FillResult, ReferenceRowFiller
 from tests.conftest import (
@@ -184,16 +184,23 @@ def _new(key: str, action: str) -> NewWrite:
     )
 
 
-def test_fill_migration_round_trip_with_data(sessions) -> None:
-    """upgrade → downgrade → upgrade на непустой базе. Откат возвращает
-    прежний CHECK и стирает записи `fill` — прежний CHECK их не допускает;
-    записи `append` остаются. Повторный подъём снова принимает `fill`."""
-    journal = DbJournal(sessions)
-    journal.start(_new("card-draft:1", "append"))
-    journal.start(_new("ing-fill:1", "fill"))
+def _config() -> Config:
     config = Config(str(BACKEND / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND / "alembic"))
     config.set_main_option("sqlalchemy.url", _url())
+    return config
+
+
+def test_fill_migration_round_trip_with_data(sessions) -> None:
+    """upgrade → downgrade → upgrade на непустой базе. Откат возвращает
+    прежний CHECK и стирает завершённые записи `fill` (verified,
+    rolled_back) — прежний CHECK их не допускает; записи `append` остаются.
+    Повторный подъём снова принимает `fill`."""
+    journal = DbJournal(sessions)
+    journal.start(_new("card-draft:1", "append"))
+    journal.finish(journal.start(_new("ing-fill:1", "fill")), status=VERIFIED, content_hash="0")
+    journal.finish(journal.start(_new("ing-fill:2", "fill")), status=ROLLED_BACK, error="чужое")
+    config = _config()
     engine = create_engine(_url())
     try:
         command.downgrade(config, BEFORE_FILL)
@@ -214,3 +221,24 @@ def test_fill_migration_round_trip_with_data(sessions) -> None:
         assert "fill" in checks["ck_sheet_writes_action"]
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("status", [PENDING, FAILED])
+def test_fill_migration_refuses_downgrade_while_snapshots_remain(sessions, status: str) -> None:
+    """Запись `fill`, которая не закончилась (pending) или не подтвердилась
+    (failed), хранит снимок листа ING — единственный материал, чтобы вернуть
+    затёртое руками. Откат её не стирает: отказывает понятной ошибкой, и
+    база остаётся на новой ревизии."""
+    journal = DbJournal(sessions)
+    write_id = journal.start(_new("ing-fill:1", "fill"))
+    if status == FAILED:
+        journal.finish(write_id, status=FAILED, error="раскладка не подтверждена")
+    config = _config()
+
+    with pytest.raises(RuntimeError, match="Откат невозможен") as caught:
+        command.downgrade(config, BEFORE_FILL)
+
+    assert f"№{write_id}" in str(caught.value)
+    [record] = _journal(sessions)
+    assert (record.action, record.status) == ("fill", status)
+    journal.start(_new("ing-fill:2", "fill"))  # CHECK новый: база осталась на этой ревизии

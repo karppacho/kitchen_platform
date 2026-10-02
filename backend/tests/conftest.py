@@ -217,14 +217,70 @@ class FakeWorksheet:
     def _insert_rows(self, index: int, count: int) -> None:
         """Вставить ``count`` пустых строк перед строкой с индексом ``index``
         (с нуля): всё ниже съезжает вместе с оформлением, сетка растёт — как
-        у Google."""
-        if index < len(self._cells):
-            self._cells[index:index] = [[] for _ in range(count)]
-        self._formats = {
-            (r + count if r >= index else r, c): pattern
-            for (r, c), pattern in self._formats.items()
-        }
+        у Google. Кроме вывода формулы-массива (:meth:`_move_rows`)."""
+        self._move_rows(index, count)
         self._grid_rows += count
+
+    def _delete_rows(self, index: int, count: int) -> None:
+        """Удалить ``count`` строк, начиная с индекса ``index`` (с нуля): всё
+        ниже подтягивается вверх вместе с оформлением, сетка сжимается."""
+        self._move_rows(index, -count)
+        self._grid_rows -= count
+
+    def _array_anchor(self) -> int | None:
+        """Индекс строки якоря формулы-массива: формула прямо над верхней
+        ячейкой вывода в её колонке или сама эта строка (вывод в соседних
+        колонках начинается на строке якоря). Вывода нет — ``None``."""
+        tops: dict[int, int] = {}
+        for r, line in enumerate(self._cells):
+            for c, cell in enumerate(line):
+                if isinstance(cell, Spill):
+                    tops.setdefault(c, r)
+        if not tops:
+            return None
+        return min(r - 1 if isinstance(self._at(r - 1, c), Formula) else r for c, r in tops.items())
+
+    def _move_rows(self, index: int, shift: int) -> None:
+        """Сдвинуть строки от индекса ``index`` на ``shift`` (вниз — вставка,
+        вверх — удаление строк ``index … index−shift−1``).
+
+        Как в Google: вывод формулы-массива (:class:`Spill`) привязан к её
+        якорю. Вставка или удаление ниже якоря сдвигает ручные ячейки и
+        формулы строк, а вывод остаётся на своих номерах строк. Вставка выше
+        якоря сдвигает и якорь, и весь вывод. Ручная ячейка, съехавшая на
+        место вывода, в Google сломала бы формулу (#REF!) — фальшивка этого
+        не моделирует: AssertionError.
+        """
+        anchor = self._array_anchor()
+        deleted = range(index, index - shift) if shift < 0 else range(0)
+        if anchor is None or index <= anchor:
+            # Вывода нет или правка выше якоря — съезжает всё.
+            if shift < 0:
+                del self._cells[index : index - shift]
+            elif index < len(self._cells):
+                self._cells[index:index] = [[] for _ in range(shift)]
+        else:
+            placed: dict[tuple[int, int], Cell] = {}
+            moving: list[tuple[int, int, Cell]] = []
+            for r, line in enumerate(self._cells):
+                for c, cell in enumerate(line):
+                    if isinstance(cell, Spill):
+                        placed[(r, c)] = cell
+                    elif r not in deleted:
+                        moving.append((r + shift if r >= index else r, c, cell))
+            for r, c, cell in moving:
+                if (r, c) in placed:
+                    assert cell == "", f"ручная ячейка съехала на вывод QUERY: {cell!r}"
+                elif cell != "":
+                    placed[(r, c)] = cell
+            self._cells = [[] for _ in range(max(len(self._cells) + shift, 0))]
+            for (r, c), cell in sorted(placed.items()):
+                self._put(r, c, cell)
+        self._formats = {
+            (r + shift if r >= index else r, c): pattern
+            for (r, c), pattern in self._formats.items()
+            if r not in deleted
+        }
 
 
 class OpenedWorksheet:
@@ -386,6 +442,19 @@ class FakeSpreadsheet:
         sheet = self._sheets[title]
         assert above <= sheet._grid_rows, f"строки {above} нет в сетке листа «{title}»"
         self._order(moment, lambda: sheet._insert_rows(above - 1, count))
+
+    def chef_deletes_rows(self, title: str, row: int, count: int = 1, *, moment: str) -> None:
+        """Шеф удалил ``count`` строк, начиная со строки ``row`` листа
+        ``title``, — в окне ``moment``. Всё ниже подтягивается вверх, сетка
+        сжимается; вывод формулы-массива ниже её якоря остаётся на своих
+        номерах строк — как в Google."""
+        assert moment in _MOMENTS, f"шеф не действует в окне «{moment}»: есть {_MOMENTS}"
+        assert title in self._sheets, f"листа «{title}» нет"
+        assert row >= 1, f"строки считаются с единицы, а не «{row}»"
+        assert count >= 1, f"удалить можно хотя бы одну строку, а не «{count}»"
+        sheet = self._sheets[title]
+        assert row + count - 1 <= sheet._grid_rows, f"строк {row}… нет в сетке листа «{title}»"
+        self._order(moment, lambda: sheet._delete_rows(row - 1, count))
 
     def _order(self, moment: str, action: Callable[[], None]) -> None:
         if moment == "now":
