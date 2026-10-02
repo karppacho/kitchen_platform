@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 
 from kitchen.db import models
 from kitchen.db.journal import FAILED, PENDING, ROLLED_BACK, VERIFIED, DbJournal, NewWrite
+from kitchen.db.links import known_reference_ids
 from kitchen.domain.reference_row import ReferenceForm
 from kitchen.sync.reference_writer import FillResult, ReferenceRowFiller
 from tests.conftest import (
@@ -78,7 +79,11 @@ def _requests(client: FakeSheetsClient) -> int:
 
 def _filler(client: FakeSheetsClient, sessions: sessionmaker[Session]) -> ReferenceRowFiller:
     return ReferenceRowFiller(
-        client, DbJournal(sessions), kitchen_id=IDS["kitchen"], cards_id=IDS["ingredient_cards"]
+        client,
+        DbJournal(sessions),
+        kitchen_id=IDS["kitchen"],
+        cards_id=IDS["ingredient_cards"],
+        known_ids=lambda: known_reference_ids(sessions),
     )
 
 

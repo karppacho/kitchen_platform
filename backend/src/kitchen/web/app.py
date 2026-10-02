@@ -23,6 +23,7 @@ from kitchen.cards.reference import KITCHEN
 from kitchen.cards.submit import BOOK, IMPORT_GOOGLE_TIMEOUT, IMPORT_LOCK_WAIT
 from kitchen.config import Settings, load_settings
 from kitchen.db.journal import DbJournal
+from kitchen.db.links import known_reference_ids
 from kitchen.db.session import make_session_factory
 from kitchen.llm.label import label_reader_from_settings
 from kitchen.logs import configure_logging
@@ -210,6 +211,7 @@ def _reference_filler(
         DbJournal(sessions),
         kitchen_id=config.sheets_id_kitchen,
         cards_id=config.sheets_id_ingredient_cards,
+        known_ids=lambda: known_reference_ids(sessions),
         hold=reference_writer.hold_limit(config),
     )
 

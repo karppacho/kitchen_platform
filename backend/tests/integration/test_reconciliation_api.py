@@ -39,6 +39,7 @@ from kitchen.cards.submit import IMPORT_GOOGLE_TIMEOUT
 from kitchen.config import Settings
 from kitchen.db import models
 from kitchen.db.journal import DbJournal
+from kitchen.db.links import known_reference_ids
 from kitchen.domain.cards import APPROVED, REJECTED
 from kitchen.domain.reference_row import NotFound
 from kitchen.sync import ownership, specs
@@ -538,6 +539,34 @@ def test_transfer_answers_row_and_id(
     assert _row_of(chef, "Соус Барбекю") is None
 
 
+def test_new_id_never_repeats_an_id_the_database_remembers(
+    sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
+) -> None:
+    """Шеф удалил из листа строку с id 131 — в листе наибольший 130, а база
+    помнит 131: ингредиент скрыт отметкой, его ТТК и пары на месте. Новый
+    перенос получает 132 — и в предпросмотре, и при записи: с 131 импорт
+    «воскресил» бы удалённый ингредиент под новым названием и ценами."""
+    with sessions.begin() as session:
+        session.add(
+            models.Ingredient(legacy_id="131", name="Соус Устричный", removed_at=func.now())
+        )
+    card = _card(sessions, "Соус Барбекю")
+
+    seen = preview(chef, card.id)
+    reply = transfer(chef, card.id)
+
+    assert seen.json()["next_id"] == "132"
+    assert reply.status_code == 200, reply.text
+    assert (reply.json()["row"], reply.json()["ref_id"]) == (7, "132")
+    assert _ing(world).cell("A7") == 132
+    new = _ingredient_id(sessions, "132")
+    assert _pair(_card(sessions, "Соус Барбекю")) == (new, "linked", True)
+    with sessions() as session:
+        old = session.scalar(select(models.Ingredient).where(models.Ingredient.legacy_id == "131"))
+        assert old is not None
+        assert (old.name, old.removed_at is not None) == ("Соус Устричный", True)
+
+
 def test_repeat_after_lost_answer_is_already_without_second_write(
     sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
 ) -> None:
@@ -655,6 +684,7 @@ def test_busy_sheet_is_503(sessions: sessionmaker[Session], world: FakeSheetsCli
             DbJournal(sessions),
             kitchen_id=IDS["kitchen"],
             cards_id=IDS["ingredient_cards"],
+            known_ids=lambda: known_reference_ids(sessions),
             lock_timeout=timedelta(seconds=1),
         ),
     )
@@ -727,12 +757,11 @@ def test_unclear_outcome_is_502_and_repeat_is_already_written(
     assert _ing(world).cell("A7") == 131
 
 
-def test_form_errors_are_422_by_field_before_google(
+def test_form_errors_are_422_by_field_before_writing(
     sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
 ) -> None:
-    """Ошибка в поле формы — 422 с полями по-русски, все сразу, до Google."""
-    opened = len(world.opened)
-
+    """Ошибка в поле формы — 422 с полями по-русски, все сразу, до записи:
+    ни запроса записи, ни следа в журнале."""
     reply = transfer(chef, _card(sessions, "Соус Барбекю").id, {"unit": "ящик"})
 
     assert reply.status_code == 422
@@ -743,7 +772,21 @@ def test_form_errors_are_422_by_field_before_google(
             "unit": "Единица измерения — кг, л или шт",
         },
     }
-    assert len(world.opened) == opened
+    _untouched(sessions, world)
+
+
+def test_row_already_in_reference_needs_no_form(
+    sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
+) -> None:
+    """«Связать с карточкой»: id в строке уже стоит — форма не нужна, и
+    значения, которые она не приняла бы (пустое короткое имя, «уп»), не
+    мешают: 200, пара подтверждена, записи нет."""
+    reply = transfer(chef, _card(sessions, "Кетчуп").id, {"short_name": "", "unit": "уп"})
+
+    assert reply.status_code == 200, reply.text
+    body = reply.json()
+    assert (body["row"], body["ref_id"], body["already"], body["linked"]) == (5, "129", True, True)
+    assert _writes(world) == []
 
 
 def test_unknown_form_field_is_422(sessions: sessionmaker[Session], chef: TestClient) -> None:

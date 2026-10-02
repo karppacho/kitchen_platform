@@ -184,7 +184,7 @@ class RowFiller(Protocol):
     def fill(
         self,
         card_name: str,
-        form: ReferenceForm,
+        form: ReferenceForm | ReferenceFormError,
         *,
         actor_id: uuid.UUID | None,
         request_key: str,
@@ -322,16 +322,24 @@ def to_reference(
     (:meth:`~kitchen.domain.reference_row.ReferenceForm.parse`). Ключ запроса —
     один на карточку: повторное нажатие второй записи не даёт.
 
+    Форма нужна, только если строка ждёт переноса: у повтора состоявшегося
+    переноса и у «уже в справочнике» писать нечего. Поэтому её ошибки не
+    отказ сразу — писатель поднимает их сам, найдя строку, ждущую переноса
+    (422 до записи). Иначе «Связать с карточкой» со значениями строки шефа
+    (пустое короткое имя, единица «уп») отвечал бы 422, а введённое человеком
+    всё равно не записалось бы.
+
     Отказы — наследники :class:`~kitchen.cards.drafts.CardsError` с текстом
     для человека; при любом отказе пара не подтверждается.
     """
     name = _card_name(session, card_id)
     if filler is None:
         raise ReferenceUnavailableError(NOT_CONFIGURED)
+    form: ReferenceForm | ReferenceFormError
     try:
         form = ReferenceForm.parse(raw_form)
     except ReferenceFormError as error:
-        raise ReferenceFormInvalidError(error.errors) from error
+        form = error
     result = _fill(filler, card_id, name, form, actor_id)
     found_in_sheet = result.journal_id is None
     if found_in_sheet:
@@ -354,7 +362,7 @@ def _fill(
     filler: RowFiller,
     card_id: int,
     name: str,
-    form: ReferenceForm,
+    form: ReferenceForm | ReferenceFormError,
     actor_id: uuid.UUID | None,
 ) -> FillResult:
     """Одна запись писателем — отказы словами для человека."""

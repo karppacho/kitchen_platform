@@ -12,10 +12,9 @@
 Порядок :meth:`ReferenceRowFiller.fill` — механика писателя карточек
 (:mod:`kitchen.sync.writer`):
 
-1. **Ворота и значения** — до первого запроса к Google: право записи всех
-   десяти ручных полей (ворота «книга → лист → колонки» строк не знают —
-   строки держит этот писатель); числа — JSON-числами без потери точности,
-   пустое — null.
+1. **Ворота** — до первого запроса к Google: право записи всех десяти
+   ручных полей (ворота «книга → лист → колонки» строк не знают — строки
+   держит этот писатель).
 2. **Очередь писателей** — та же, что у писателя карточек. Ждать дольше
    30 с — «Таблица занята».
 3. **Журнал по ключу запроса** ``ing-fill:<id карточки>``. Состоявшаяся
@@ -26,10 +25,15 @@
    (где формулы; id — числами), — и книга карточек (порядок «Да»). Шапки —
    той же проверкой, что у импорта; якорь ``QUERY`` — один и без ошибки.
 5. **Строка** — по названию и по месту среди «Да» сразу
-   (:func:`~kitchen.domain.reference_row.locate_row`). A пуст и в FORMATTED,
-   и в FORMULA. Ни одна ручная ячейка, кроме L, не формула; L-формула
-   пропускается. Ячейки потерь оформлены процентами.
-6. **id** — наибольший числовой id листа плюс один, под очередью.
+   (:func:`~kitchen.domain.reference_row.locate_row`). id в ней уже стоит —
+   «уже в справочнике», писать нечего. Иначе: A пуст и в FORMATTED, и в
+   FORMULA; ни одна ручная ячейка, кроме L, не формула; L-формула
+   пропускается; ячейки потерь оформлены процентами.
+6. **Форма и id** — только для строки, ждущей переноса. Форма нужна лишь
+   здесь: у повтора по журналу и у «уже в справочнике» писать нечего, и её
+   ошибки там не мешают; здесь они — отказ до журнала. Числа — JSON-числами
+   без потери точности, пустое — null. id — наибольший числовой id листа и
+   базы (и удалённых из листа) плюс один, под очередью.
 7. **Журнал** ``pending`` со снимком строки и листа — своим коммитом, до
    записи.
 8. **Очередь ещё наша?** Её могла оборвать база — тогда отказ до записи.
@@ -60,6 +64,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
+from itertools import chain
 from typing import TYPE_CHECKING, NoReturn
 
 from kitchen.db.journal import (
@@ -334,9 +339,10 @@ class RowPreview:
     """Строка ING карточки для формы переноса — свежим чтением, без записи."""
 
     next_id: str
-    """id, который получила бы строка сейчас: наибольший числовой id листа плюс
-    один. Справочно — при записи его выдают заново, под очередью писателей:
-    между предпросмотром и записью его может занять другой перенос."""
+    """id, который получила бы строка сейчас: наибольший числовой id листа и
+    базы (и удалённых из листа) плюс один. Справочно — при записи его выдают
+    заново, под очередью писателей: между предпросмотром и записью его может
+    занять другой перенос."""
     row: int | None
     """Строка листа, с единицы, — если её нашли по названию и месту."""
     ready: bool
@@ -366,18 +372,19 @@ class RowPreview:
 # ---------------------------------------------------------------------------
 # Значения
 # ---------------------------------------------------------------------------
-def _planned(form: ReferenceForm) -> dict[str, SentValue]:
-    """Поля формы для тела записи (без id) — до первого запроса к Google.
+def _planned(form: ReferenceForm | ReferenceFormError) -> dict[str, SentValue]:
+    """Поля формы для тела записи (без id) — когда строка нашлась и ждёт
+    переноса, до журнала.
 
-    Право записи — первым и на все десять полей: закрытые ворота отказывают
-    по правилу владения, а не по виду значения. Короткое имя, единица и
-    статус — текстом; цены, вес и потери (доли) — JSON-числами через
-    :func:`~kitchen.sync.sheet_write.sheet_number`: строка «0.05» при RAW
-    легла бы текстом, и формула P её не сложила бы. Пустое — ``None``
-    (null): ячейку не трогать. Число, которое через ``float`` стало бы
-    другим, — ошибка поля формы.
+    Форма с ошибками — её :class:`ReferenceFormError`: здесь форма нужна.
+    Короткое имя, единица и статус — текстом; цены, вес и потери (доли) —
+    JSON-числами через :func:`~kitchen.sync.sheet_write.sheet_number`: строка
+    «0.05» при RAW легла бы текстом, и формула P её не сложила бы. Пустое —
+    ``None`` (null): ячейку не трогать. Число, которое через ``float`` стало
+    бы другим, — ошибка поля формы.
     """
-    SPEC.check_writable(*FIELDS)
+    if isinstance(form, ReferenceFormError):
+        raise form
     sent: dict[str, SentValue] = {}
     errors: dict[str, str] = {}
     for field, value in form.row_values().items():
@@ -554,17 +561,23 @@ def _current_value(column: Column, raw: object, shown: str) -> PreviewValue:
     return _shown_value(column, shown)
 
 
-def _next_id(sheet: _Sheets) -> str:
-    """Наибольший числовой id листа плюс один — по FORMULA-чтению: числа
-    числами, оформление ячейки id не исказит."""
-    return next_reference_id(_cell(line, _ID.index) for line in sheet.formula[SPEC.header_rows :])
+def _next_id(sheet: _Sheets, known: Iterable[str]) -> str:
+    """Наибольший числовой id листа и базы плюс один.
+
+    Лист — по FORMULA-чтению: числа числами, оформление ячейки id не исказит.
+    ``known`` — id, которые помнит база, и удалённых из листа тоже: строку с
+    наибольшим id шеф мог удалить, а ингредиент под ним в базе только скрыт —
+    повтори его id, и импорт «воскресил» бы его под новым названием.
+    """
+    in_sheet = (_cell(line, _ID.index) for line in sheet.formula[SPEC.header_rows :])
+    return next_reference_id(chain(in_sheet, known))
 
 
-def _row_values(sheet: _Sheets, row: int, planned: Mapping[str, SentValue]) -> dict[str, SentValue]:
-    """Что пишем в найденную строку — после проверок её ячеек
-    (:func:`_check_row`). id — :func:`_next_id`, JSON-целым."""
-    formulas = _check_row(sheet, row)
-    ref_id = _next_id(sheet)
+def _row_values(
+    formulas: Sequence[str], ref_id: str, planned: Mapping[str, SentValue]
+) -> dict[str, SentValue]:
+    """Что пишем в найденную строку: id — JSON-целым, остальное — из формы;
+    L-формулу (``formulas`` — из :func:`_check_row`) пропускаем."""
     values: dict[str, SentValue] = {_ID.field: sheet_number(Decimal(ref_id))}
     for field in FIELDS[1:]:
         if field == _PRICE.field and _PRICE.letter in formulas:
@@ -732,22 +745,26 @@ class ReferenceRowFiller:
         *,
         kitchen_id: str,
         cards_id: str,
+        known_ids: Callable[[], Iterable[str]],
         lock_timeout: timedelta = LOCK_TIMEOUT,
         hold: timedelta = HOLD_LIMIT,
     ) -> None:
         """``kitchen_id`` и ``cards_id`` — идентификаторы книги кухни и книги
-        карточек; ``hold`` — :func:`hold_limit` от настроек таймаутов Google."""
+        карточек; ``known_ids`` — id справочника, которые помнит база, и
+        удалённых из листа тоже (:func:`kitchen.db.links.known_reference_ids`);
+        ``hold`` — :func:`hold_limit` от настроек таймаутов Google."""
         self._client = client
         self._journal = journal
         self._kitchen_id = kitchen_id
         self._cards_id = cards_id
+        self._known_ids = known_ids
         self._lock_timeout = lock_timeout
         self._hold = hold
 
     def fill(
         self,
         card_name: str,
-        form: ReferenceForm,
+        form: ReferenceForm | ReferenceFormError,
         *,
         actor_id: uuid.UUID | None,
         request_key: str,
@@ -755,12 +772,16 @@ class ReferenceRowFiller:
         """Заполнить строку ING карточки ``card_name`` значениями ``form``.
 
         ``card_name`` — название карточки, как в колонке B книги карточек;
-        сравнивается как ключ карточки при импорте. ``request_key`` —
+        сравнивается как ключ карточки при импорте. ``form`` — разобранная
+        форма или её ошибки: форма нужна, только если строка ждёт переноса, —
+        тогда её ошибки и поднимаются. ``request_key`` —
         :func:`fill_request_key` от id карточки. Ошибки —
         :class:`~kitchen.domain.reference_row.ReferenceFormError` (поле формы)
         и наследники :class:`WriteRefusedError` с текстом для человека.
         """
-        planned = _planned(form)
+        # Ворота — первыми и на все десять полей: закрытые отказывают по
+        # правилу владения, до первого запроса к Google.
+        SPEC.check_writable(*FIELDS)
         if not normalise_name(card_name):
             raise ValueError("Пустое название карточки — строку справочника не найти")
         try:
@@ -768,7 +789,7 @@ class ReferenceRowFiller:
                 SHEET_WRITE_LOCK_KEY, self._lock_timeout, self._hold
             ) as lock:
                 result = self._fill(
-                    lock, card_name, planned, actor_id=actor_id, request_key=request_key
+                    lock, card_name, form, actor_id=actor_id, request_key=request_key
                 )
         except WritersBusyError as error:
             raise SheetBusyError(BUSY) from error
@@ -793,7 +814,7 @@ class ReferenceRowFiller:
             CARDS.title, "открыть книгу карточек", lambda: self._client.open(self._cards_id)
         )
         sheet = _read(kitchen, cards)
-        next_id = _next_id(sheet)
+        next_id = _next_id(sheet, self._known_ids())
         found = locate_row(sheet.formatted, sheet.formula, sheet.anchor, sheet.approved, card_name)
         if isinstance(found, NotFound):
             return RowPreview(
@@ -836,7 +857,7 @@ class ReferenceRowFiller:
         self,
         lock: WritersLock,
         card_name: str,
-        planned: Mapping[str, SentValue],
+        form: ReferenceForm | ReferenceFormError,
         *,
         actor_id: uuid.UUID | None,
         request_key: str,
@@ -871,7 +892,11 @@ class ReferenceRowFiller:
             return FillResult(found.row, found.ref_id, None, True, shifted)
 
         row = found.row
-        sent = _row_values(sheet, row, planned)
+        formulas = _check_row(sheet, row)
+        # Форма нужна только здесь — строка ждёт переноса: её ошибки — отказ
+        # до журнала. id — под очередью: второй перенос ждёт её за нами.
+        planned = _planned(form)
+        sent = _row_values(formulas, _next_id(sheet, self._known_ids()), planned)
         before: dict[str, object] = {
             "rows": {str(row): _text_row(sheet.formatted, row)},
             "formula": {str(n): _row(sheet.formula, n) for n in (row - 1, row, row + 1)},

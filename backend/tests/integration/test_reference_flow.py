@@ -50,7 +50,7 @@ from kitchen.cards.reference import (
 from kitchen.cards.submit import IMPORT_LOCK_WAIT
 from kitchen.db import models
 from kitchen.db.journal import VERIFIED, DbJournal
-from kitchen.db.links import card_candidates
+from kitchen.db.links import card_candidates, known_reference_ids
 from kitchen.domain.cards import APPROVED, REJECTED
 from kitchen.domain.reference_row import NotFound, ReferenceFormError
 from kitchen.sync import specs
@@ -144,7 +144,11 @@ def _broken_cycle(sessions: sessionmaker[Session]) -> SyncCycle:
 
 def _filler(client: FakeSheetsClient, sessions: sessionmaker[Session]) -> ReferenceRowFiller:
     return ReferenceRowFiller(
-        client, DbJournal(sessions), kitchen_id=IDS["kitchen"], cards_id=IDS["ingredient_cards"]
+        client,
+        DbJournal(sessions),
+        kitchen_id=IDS["kitchen"],
+        cards_id=IDS["ingredient_cards"],
+        known_ids=lambda: known_reference_ids(sessions),
     )
 
 
@@ -936,10 +940,15 @@ def test_preview_refusal_reaches_the_human(sessions, client, error, kind, code: 
     assert status_for(type(caught.value)) == code
 
 
-def test_form_errors_come_before_google(sessions, client) -> None:
-    """Ошибки формы — все сразу, по полям, и до первого запроса к Google."""
+def _journal(sessions: sessionmaker[Session]) -> list[models.SheetWrite]:
+    with sessions() as session:
+        return list(session.scalars(select(models.SheetWrite)))
+
+
+def test_form_errors_come_before_the_write(sessions, client) -> None:
+    """Строка ждёт переноса — ошибки формы все сразу, по полям, и до записи:
+    ни запроса записи, ни следа в журнале, ни переноса в базу."""
     card = _card(sessions, "Соус Барбекю")
-    opened = len(client.opened)
 
     with sessions() as session, pytest.raises(ReferenceFormInvalidError) as caught:
         to_reference(
@@ -953,7 +962,36 @@ def test_form_errors_come_before_google(sessions, client) -> None:
 
     assert set(caught.value.extra()["errors"]) == {"short_name", "unit", "losses_cutting"}
     assert status_for(type(caught.value)) == 422
-    assert len(client.opened) == opened
+    assert _writes(client) == []
+    assert _journal(sessions) == []
+
+
+BROKEN_FORM = {"short_name": "", "unit": "уп"}
+"""Значения строки шефа, которые форма не примет: короткого имени нет,
+единица «уп» — не кг, л или шт."""
+
+
+def test_row_already_filled_needs_no_form(sessions, client) -> None:
+    """id в строке уже стоит — писать нечего, и форма не нужна: «Связать с
+    карточкой» шлёт значения строки шефа как есть, и даже те, что форма не
+    приняла бы, не мешают подтвердить пару. Строка, ждущая переноса, с той же
+    формой — 422 до записи."""
+    ketchup = _card(sessions, "Кетчуп")
+    barbecue = _card(sessions, "Соус Барбекю")
+    filler = _filler(client, sessions)
+
+    with sessions() as session:
+        done = to_reference(
+            session, filler, _cycle(client, sessions), ketchup.id, BROKEN_FORM, actor_id=None
+        )
+    with sessions() as session, pytest.raises(ReferenceFormInvalidError) as caught:
+        to_reference(session, filler, _NoImport(), barbecue.id, BROKEN_FORM, actor_id=None)
+
+    assert (done.row, done.ref_id, done.already, done.linked) == (4, "129", True, True)
+    assert _pair(_card(sessions, "Кетчуп")) == (_ingredient_id(sessions, "129"), "linked", True)
+    assert set(caught.value.errors) == {"short_name", "unit"}
+    assert _writes(client) == []
+    assert _journal(sessions) == []
 
 
 def test_not_configured_book_is_503(sessions, client) -> None:

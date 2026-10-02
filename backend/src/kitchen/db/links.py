@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from datetime import datetime
 
-    from sqlalchemy.orm import Session
+    from sqlalchemy.orm import Session, sessionmaker
 
 LINKED, AMBIGUOUS, CANDIDATE, ORPHAN = models.IngredientCard.LINK_STATUSES
 
@@ -118,6 +118,23 @@ def live_card(session: Session, card_id: int) -> models.IngredientCard | None:
             models.IngredientCard.removed_at.is_(None),
         )
     )
+
+
+def known_reference_ids(sessions: sessionmaker[Session]) -> list[str]:
+    """id справочника, которые помнит база, — и удалённых из листа тоже.
+
+    Источник для писателя строки ING (:mod:`kitchen.sync.reference_writer`):
+    новый id не должен совпасть ни с одним из них. Шеф удалил строку с
+    наибольшим id — в листе его больше нет, а в базе ингредиент только скрыт
+    (``removed_at``), с ТТК и парами. Выдай перенос тот же id — импорт нашёл
+    бы старый ингредиент по нему и «воскресил» под новым названием и ценами, а
+    ТТК со старым id молча считались бы по чужим числам.
+
+    Своя короткая транзакция: писатель зовёт это под очередью писателей,
+    между запросами к Google.
+    """
+    with sessions() as session:
+        return list(session.scalars(select(models.Ingredient.legacy_id)))
 
 
 def ingredient_by_legacy_id(session: Session, legacy_id: str) -> models.Ingredient | None:

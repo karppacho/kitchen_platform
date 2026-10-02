@@ -119,6 +119,14 @@ def _form(**changes: str | None) -> ReferenceForm:
     return ReferenceForm.parse(raw)
 
 
+def _broken_form() -> ReferenceFormError:
+    """Форма с ошибками — как её разбирает слой приложения: короткого имени
+    нет, единица «уп» из строки шефа."""
+    with pytest.raises(ReferenceFormError) as caught:
+        _form(short_name="", unit="уп")
+    return caught.value
+
+
 def _cards(
     *extra: tuple[str, str], order: tuple[tuple[str, str], ...] = CARDS_ORDER
 ) -> FakeWorksheet:
@@ -153,7 +161,11 @@ class Rig:
         return self.kitchen._sheets["ING"]
 
     def fill(
-        self, name: str = "Соус Барбекю", form: ReferenceForm | None = None, *, key: str = KEY
+        self,
+        name: str = "Соус Барбекю",
+        form: ReferenceForm | ReferenceFormError | None = None,
+        *,
+        key: str = KEY,
     ) -> FillResult:
         return self.filler.fill(
             name, form if form is not None else _form(), actor_id=None, request_key=key
@@ -180,7 +192,9 @@ def _rig(
     ing: FakeWorksheet | None = None,
     cards: FakeWorksheet | None = None,
     lock_timeout: timedelta = timedelta(seconds=30),
+    known: tuple[str, ...] = (),
 ) -> Rig:
+    """``known`` — id, которые помнит база (и удалённые из листа)."""
     client = reference_client(ing=ing, cards=cards)
     journal = FakeJournal()
     filler = ReferenceRowFiller(
@@ -188,6 +202,7 @@ def _rig(
         journal,
         kitchen_id=IDS["kitchen"],
         cards_id=IDS["ingredient_cards"],
+        known_ids=lambda: list(known),
         lock_timeout=lock_timeout,
     )
     rig = Rig(filler, client, journal)
@@ -411,6 +426,22 @@ def test_fills_one_after_another_get_ids_in_a_row() -> None:
     assert (second.row, second.ref_id) == (7, "132")
 
 
+def test_id_skips_ids_the_database_remembers() -> None:
+    """Шеф удалил из листа строку с наибольшим id 131: в листе максимум 130, а
+    база помнит 131 — ингредиент скрыт, но не стёрт. Новый id — 132: под 131
+    импорт «воскресил» бы удалённый ингредиент с новым названием и ценами, и
+    ТТК со старым id молча считались бы по чужим числам. Предпросмотр
+    показывает тот же id."""
+    rig = _rig(known=("1", "99", "129", "130", "131", "не число"))
+
+    preview = rig.filler.preview("Соус Барбекю")
+    result = rig.fill()
+
+    assert preview.next_id == "132"
+    assert (result.row, result.ref_id) == (6, "132")
+    assert rig.line(6)[0] == "132"
+
+
 def test_request_key_is_stable_per_card() -> None:
     assert fill_request_key(7) == "ing-fill:7"
 
@@ -615,9 +646,9 @@ def test_bots_alive_refuses_before_first_request(monkeypatch: pytest.MonkeyPatch
     _nothing_asked(rig)
 
 
-def test_inexact_number_is_a_field_error_before_first_request() -> None:
+def test_inexact_number_is_a_field_error_before_the_write() -> None:
     """Число, которое по дороге через float стало бы другим, — ошибка поля
-    формы, а не тихо округлённая цена."""
+    формы, а не тихо округлённая цена. Отказ — до журнала и записи."""
     rig = _rig()
 
     with pytest.raises(ReferenceFormError) as caught:
@@ -625,7 +656,62 @@ def test_inexact_number_is_a_field_error_before_first_request() -> None:
 
     assert set(caught.value.errors) == {"price_per_pack"}
     assert "Цена за упаковку" in caught.value.errors["price_per_pack"]
-    _nothing_asked(rig)
+    _nothing_written(rig)
+
+
+# ---------------------------------------------------------------------------
+# Форма нужна, только когда строка ждёт переноса
+# ---------------------------------------------------------------------------
+def test_form_errors_refuse_before_the_write_when_the_row_waits() -> None:
+    """Строка ждёт переноса — форма нужна: её ошибки — отказ все сразу, до
+    журнала и записи."""
+    rig = _rig()
+
+    with pytest.raises(ReferenceFormError) as caught:
+        rig.fill(form=_broken_form())
+
+    assert set(caught.value.errors) == {"short_name", "unit"}
+    _nothing_written(rig)
+
+
+def test_form_is_not_needed_when_the_row_already_has_an_id() -> None:
+    """В строке уже стоит id — писать нечего, и форма не нужна: «уже в
+    справочнике» и с формой, которую не разобрать (пустое короткое имя,
+    единица «уп» из строки шефа). Ни записи, ни журнала."""
+    rig = _rig()
+
+    result = rig.fill("Кетчуп", _broken_form())
+
+    assert result == FillResult(row=4, ref_id="129", journal_id=None, already=True)
+    _nothing_written(rig)
+
+
+def test_form_is_not_needed_for_a_repeat_of_a_done_fill() -> None:
+    """Повтор состоявшегося переноса — ответ по журналу: форма не нужна."""
+    rig = _rig()
+    first = rig.fill()
+
+    again = rig.fill(form=_broken_form())
+
+    assert again == FillResult(row=6, ref_id="131", journal_id=first.journal_id, already=True)
+    assert rig.writes() == ["values_batch_update"]
+
+
+def test_form_is_not_needed_when_the_interrupted_attempt_landed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Прерванная попытка легла — повтор отвечает ею, без записи: форма не
+    нужна."""
+    rig = _rig()
+    _reread_fails_after_write(rig, monkeypatch, applied=True)
+    with pytest.raises(WriteNotConfirmedError):
+        rig.fill()
+    monkeypatch.undo()
+
+    result = rig.fill(form=_broken_form())
+
+    assert result == FillResult(row=6, ref_id="131", journal_id=1, already=True)
+    assert rig.writes() == ["values_batch_update"]
 
 
 def test_busy_writers_queue() -> None:
