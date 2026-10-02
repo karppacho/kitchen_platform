@@ -25,6 +25,12 @@
   переименовал бы тот ингредиент в нашу карточку, сверка после него прошла
   бы, и подтверждённая пара пережила бы даже исправление листа. Поэтому id
   другого ингредиента — отказ «сдвинуты», и перенос не начинается.
+* **Решение человека не затираем.** Пару, которую человек уже подтвердил
+  («Это он» или перенос у другого человека — список на экране устарел),
+  перенос не трогает: строку, ждущую переноса, писатель не заполняет (409
+  «обновите страницу»), а подтверждённую с другим ингредиентом пару после
+  записи не переписываем — она остаётся, в ответе оговорка. «Это он» у такой
+  карточки — тот же 409.
 * **Подтверждение — в очереди импорта.** Импорт пересчитывает пары
   неподтверждённых карточек: начатый до подтверждения и записавший после, он
   вернул бы карточке «спорную» пару поверх подтверждённой — и навсегда, раз
@@ -54,6 +60,8 @@ from kitchen.sync.importer import wait_for_import_lock
 from kitchen.sync.ownership import ForbiddenWriteError
 from kitchen.sync.reference_writer import (
     NOT_CONFIRMED,
+    PAIR_CONFIRMED,
+    REASON_CONFIRMED,
     RowRefusedError,
     SheetLayoutError,
     fill_request_key,
@@ -105,6 +113,13 @@ def _other_name_text(row: int, ref_id: str) -> str:
     return (
         f"Пара карточки и ингредиента не подтверждена: на сайте у id {ref_id} другое название "
         f"или его нет — проверьте строку {row} листа ING"
+    )
+
+
+def _kept_text(row: int) -> str:
+    return (
+        "Пара карточки уже подтверждена с другим ингредиентом — её не меняли. Проверьте "
+        f"строку {row} листа ING: ингредиент может оказаться в справочнике дважды"
     )
 
 
@@ -188,9 +203,10 @@ class RowFiller(Protocol):
         *,
         actor_id: uuid.UUID | None,
         request_key: str,
+        confirmed: bool,
     ) -> FillResult: ...
 
-    def preview(self, card_name: str) -> RowPreview: ...
+    def preview(self, card_name: str, *, confirmed: bool) -> RowPreview: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,11 +268,11 @@ def preview(session: Session, filler: RowFiller | None, card_id: int) -> RowPrev
     нет или заполнить её нельзя — это не отказ: причина в ответе
     (``reason``, ``message``). Отказы — сломанный лист (503) и Google (502).
     """
-    name = _card_name(session, card_id)
+    card = _card(session, card_id)
     if filler is None:
         raise ReferenceUnavailableError(NOT_CONFIGURED)
     try:
-        return filler.preview(name)
+        return filler.preview(card.name, confirmed=card.confirmed)
     except WriteRefusedError as error:
         raise _refusal(error) from error
 
@@ -271,7 +287,9 @@ def confirm_pair(
     кандидатом карточки (:func:`kitchen.db.links.card_candidates`).
 
     Идёт в очереди импорта, ожидая её не дольше ``wait``. Пара уже
-    подтверждена этим ингредиентом — ответ «уже», без изменений.
+    подтверждена этим ингредиентом — ответ «уже», без изменений; другим —
+    отказ «обновите страницу» (:data:`REASON_CONFIRMED`): решение уже принял
+    другой человек «Это он» или переносом, а список здесь устарел.
     """
     try:
         if not wait_for_import_lock(session, wait):
@@ -280,8 +298,10 @@ def confirm_pair(
         if card is None:
             raise ReferenceCardNotFoundError
         known = card.ingredient
-        if card.link_confirmed_at is not None and known is not None and known.id == ingredient_id:
-            return PairConfirmed(card.id, known.id, known.legacy_id, known.name, already=True)
+        if card.link_confirmed_at is not None:
+            if known is not None and known.id == ingredient_id:
+                return PairConfirmed(card.id, known.id, known.legacy_id, known.name, already=True)
+            raise ReferenceConflictError(PAIR_CONFIRMED, reason=REASON_CONFIRMED)
         chosen = links.confirm_candidate(session, card, ingredient_id, _now())
         if chosen is None:
             raise ReferenceConflictError(NOT_A_CANDIDATE, reason=NOT_A_CANDIDATE_REASON)
@@ -329,10 +349,16 @@ def to_reference(
     (пустое короткое имя, единица «уп») отвечал бы 422, а введённое человеком
     всё равно не записалось бы.
 
+    Пару карточки уже подтвердил человек — строку, ждущую переноса, писатель
+    не заполняет (409 «обновите страницу»); повтор своего состоявшегося
+    переноса отвечает по журналу. Подтверждённую пару после записи не
+    затираем: она остаётся как есть, а в ответе — оговорка.
+
     Отказы — наследники :class:`~kitchen.cards.drafts.CardsError` с текстом
     для человека; при любом отказе пара не подтверждается.
     """
-    name = _card_name(session, card_id)
+    card = _card(session, card_id)
+    name = card.name
     if filler is None:
         raise ReferenceUnavailableError(NOT_CONFIGURED)
     form: ReferenceForm | ReferenceFormError
@@ -340,7 +366,7 @@ def to_reference(
         form = ReferenceForm.parse(raw_form)
     except ReferenceFormError as error:
         form = error
-    result = _fill(filler, card_id, name, form, actor_id)
+    result = _fill(filler, card_id, name, form, actor_id, confirmed=card.confirmed)
     found_in_sheet = result.journal_id is None
     if found_in_sheet:
         _check_known_id(session, card_id, name, result)
@@ -364,10 +390,18 @@ def _fill(
     name: str,
     form: ReferenceForm | ReferenceFormError,
     actor_id: uuid.UUID | None,
+    *,
+    confirmed: bool,
 ) -> FillResult:
     """Одна запись писателем — отказы словами для человека."""
     try:
-        return filler.fill(name, form, actor_id=actor_id, request_key=fill_request_key(card_id))
+        return filler.fill(
+            name,
+            form,
+            actor_id=actor_id,
+            request_key=fill_request_key(card_id),
+            confirmed=confirmed,
+        )
     except ReferenceFormError as error:
         raise ReferenceFormInvalidError(error.errors) from error
     except WriteRefusedError as error:
@@ -435,7 +469,7 @@ def _check_known_id(session: Session, card_id: int, name: str, result: FillResul
         raise _shifted(result.row)
 
 
-_Outcome = Literal["linked", "missing", "other", "failed"]
+_Outcome = Literal["linked", "missing", "other", "kept", "failed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,14 +488,15 @@ def _confirm_written(
 ) -> _Pair:
     """Подтвердить пару с ингредиентом строки — и виден ли он на сайте.
 
-    У ``linked`` наш ингредиент на сайте, у ``missing`` и ``other`` — нет.
-    ``failed`` о сайте ничего не говорит: подтвердить не дали очередь импорта
-    или база, — это отдельное чтение (:func:`_ours_on_site`).
+    У ``linked`` и ``kept`` наш ингредиент на сайте, у ``missing`` и
+    ``other`` — нет. ``failed`` о сайте ничего не говорит: подтвердить не
+    дали очередь импорта или база, — это отдельное чтение
+    (:func:`_ours_on_site`).
     """
     outcome, ingredient_id = _link_written(session, card_id, ref_id, wait)
     if outcome == "failed":
         return _Pair(outcome, None, on_site=_ours_on_site(session, card_id, name, ref_id))
-    return _Pair(outcome, ingredient_id, on_site=outcome == "linked")
+    return _Pair(outcome, ingredient_id, on_site=outcome in ("linked", "kept"))
 
 
 def _link_written(
@@ -471,8 +506,10 @@ def _link_written(
 
     Исход и ингредиент пары: ``linked`` — подтверждена; ``missing`` —
     ингредиента с этим id на сайте нет (перенос не прошёл или его убрали из
-    листа); ``other`` — есть, но называется не как карточка; ``failed`` —
-    подтвердить не дали очередь импорта или база.
+    листа); ``other`` — есть, но называется не как карточка; ``kept`` — пару
+    уже подтвердил человек с другим ингредиентом, пока шёл перенос (или до
+    него — у «уже в справочнике»): её не трогаем, решение человека важнее;
+    ``failed`` — подтвердить не дали очередь импорта или база.
     """
     try:
         if not wait_for_import_lock(session, wait):
@@ -501,6 +538,15 @@ def _link_written(
                 ingredient.name,
             )
             return "other", None
+        if card.link_confirmed_at is not None and card.ingredient_id != ingredient.id:
+            log.warning(
+                "карточка %s «%s»: пара уже подтверждена с ингредиентом %s — на id %s её не меняем",
+                card_id,
+                card.name,
+                card.ingredient_id,
+                ref_id,
+            )
+            return "kept", None
         links.confirm_link(card, ingredient.id, _now())
         session.commit()
         return "linked", ingredient.id
@@ -561,6 +607,8 @@ def _answer(card_id: int, result: FillResult, pair: _Pair, *, imported: bool) ->
         notes.append(NOT_IMPORTED)
     if pair.outcome == "failed":
         notes.append(PAIR_NOT_CONFIRMED)
+    if pair.outcome == "kept":
+        notes.append(_kept_text(result.row))
     if stranger:
         log.error(
             "карточка %s: строка %s листа ING записана (id %s, журнал №%s), а пару не "
@@ -595,16 +643,30 @@ def _answer(card_id: int, result: FillResult, pair: _Pair, *, imported: bool) ->
 # ---------------------------------------------------------------------------
 # Мелочи
 # ---------------------------------------------------------------------------
-def _card_name(session: Session, card_id: int) -> str:
-    """Название карточки — и сразу закрыть транзакцию: дальше Google."""
+@dataclass(frozen=True, slots=True)
+class _CardState:
+    """Карточка, как её видит перенос, — до первого запроса к Google."""
+
+    name: str
+    confirmed: bool
+    """Пару подтвердил человек (``link_confirmed_at``)."""
+
+
+def _card(session: Session, card_id: int) -> _CardState:
+    """Название карточки и подтверждена ли её пара — и сразу закрыть
+    транзакцию: дальше Google."""
     try:
         card = links.live_card(session, card_id)
-        name = None if card is None else card.name
+        state = (
+            None
+            if card is None
+            else _CardState(card.name, confirmed=card.link_confirmed_at is not None)
+        )
     finally:
         session.rollback()
-    if name is None:
+    if state is None:
         raise ReferenceCardNotFoundError
-    return name
+    return state
 
 
 def _shifted(row: int) -> ReferenceConflictError:

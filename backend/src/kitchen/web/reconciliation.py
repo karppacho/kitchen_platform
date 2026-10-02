@@ -194,8 +194,8 @@ class ReferenceRowOut(BaseModel):
     """Строку можно заполнить."""
     reason: str | None
     """Почему нельзя: ``not_approved``, ``not_yet``, ``shifted``,
-    ``ambiguous``, ``formula``, ``percent``, ``losses_empty`` или
-    ``already`` — id уже стоит."""
+    ``ambiguous``, ``formula``, ``percent``, ``losses_empty``, ``confirmed``
+    — пару уже подтвердил человек, или ``already`` — id уже стоит."""
     message: str | None
     """То же словами для человека."""
     ref_id: str | None

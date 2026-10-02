@@ -957,6 +957,7 @@ def ing_sheet(
     *,
     old: Sequence[tuple[int, str]] = ING_OLD,
     templates: int = 2,
+    row_count: int | None = None,
 ) -> FakeWorksheet:
     """Лист ING, устроенный как настоящий.
 
@@ -968,6 +969,9 @@ def ing_sheet(
     * Ниже — заготовки без карточек.
     * P — формула ``SUM(Q+R+S)`` во всех строках; P, Q, R, S оформлены
       процентами. id в FORMULA- и UNFORMATTED-чтении — числа.
+
+    ``row_count`` — строк в сетке листа (по умолчанию 1000): равное числу
+    строк — последняя строка листа на краю сетки.
     """
     lines: list[list[Cell]] = [[c.expected_header for c in specs.INGREDIENTS.columns]]
     for ref_id, name in old:
@@ -1005,7 +1009,7 @@ def ing_sheet(
         lines.append(_ing_line(len(lines) + 1, _TEMPLATE))
     last = len(lines)
     formats = {f"{letter}2:{letter}{last}": pattern for letter, pattern in _PERCENT.items()}
-    return FakeWorksheet(lines, "ING", formats=formats)
+    return FakeWorksheet(lines, "ING", row_count=row_count, formats=formats)
 
 
 def _ing_line(number: int, *parts: Mapping[str, Cell]) -> list[Cell]:

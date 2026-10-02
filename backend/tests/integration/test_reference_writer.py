@@ -119,7 +119,9 @@ def test_two_fills_at_once_get_rows_and_ids_one_after_another(sessions) -> None:
 
     def fill(name: str, key: str) -> None:
         try:
-            results[name] = filler.fill(name, _form(), actor_id=None, request_key=key)
+            results[name] = filler.fill(
+                name, _form(), actor_id=None, request_key=key, confirmed=False
+            )
         except Exception as error:  # ошибку потока показываем в утверждении
             errors.append(error)
 
@@ -157,7 +159,7 @@ def test_fill_journal_on_postgres(sessions) -> None:
     client = _client()
     filler = _filler(client, sessions)
 
-    result = filler.fill("Соус Барбекю", _form(), actor_id=actor, request_key=KEY)
+    result = filler.fill("Соус Барбекю", _form(), actor_id=actor, request_key=KEY, confirmed=False)
 
     [record] = _journal(sessions)
     assert record.id == result.journal_id
@@ -170,7 +172,7 @@ def test_fill_journal_on_postgres(sessions) -> None:
     assert record.finished_at is not None
     asked = _requests(client)
 
-    again = filler.fill("Соус Барбекю", _form(), actor_id=actor, request_key=KEY)
+    again = filler.fill("Соус Барбекю", _form(), actor_id=actor, request_key=KEY, confirmed=False)
 
     assert again == FillResult(row=6, ref_id="131", journal_id=record.id, already=True)
     assert _requests(client) == asked

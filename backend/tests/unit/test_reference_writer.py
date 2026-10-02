@@ -166,9 +166,14 @@ class Rig:
         form: ReferenceForm | ReferenceFormError | None = None,
         *,
         key: str = KEY,
+        confirmed: bool = False,
     ) -> FillResult:
         return self.filler.fill(
-            name, form if form is not None else _form(), actor_id=None, request_key=key
+            name,
+            form if form is not None else _form(),
+            actor_id=None,
+            request_key=key,
+            confirmed=confirmed,
         )
 
     def line(self, number: int) -> list[str]:
@@ -434,7 +439,7 @@ def test_id_skips_ids_the_database_remembers() -> None:
     показывает тот же id."""
     rig = _rig(known=("1", "99", "129", "130", "131", "не число"))
 
-    preview = rig.filler.preview("Соус Барбекю")
+    preview = rig.filler.preview("Соус Барбекю", confirmed=False)
     result = rig.fill()
 
     assert preview.next_id == "132"
@@ -714,6 +719,128 @@ def test_form_is_not_needed_when_the_interrupted_attempt_landed(
     assert rig.writes() == ["values_batch_update"]
 
 
+# ---------------------------------------------------------------------------
+# Пара уже подтверждена человеком
+# ---------------------------------------------------------------------------
+PAIR_CONFIRMED = "Пара уже подтверждена — обновите страницу"
+
+
+def test_confirmed_pair_refuses_a_waiting_row() -> None:
+    """Устаревшая вкладка: другой человек уже нажал «Это он», а здесь — «Это
+    новый». Запись дала бы лишнюю строку в листе шефа и затёрла бы решение
+    человека. Отказ до журнала и записи."""
+    rig = _rig()
+
+    with pytest.raises(RowRefusedError) as caught:
+        rig.fill(confirmed=True)
+
+    assert str(caught.value) == PAIR_CONFIRMED
+    assert (caught.value.reason, caught.value.row) == ("confirmed", 6)
+    _nothing_written(rig)
+
+
+def test_confirmed_pair_does_not_block_a_repeat_of_own_fill() -> None:
+    """Свой перенос состоялся и подтвердил пару — повтор (ответ потерялся)
+    отвечает по журналу раньше этой проверки."""
+    rig = _rig()
+    first = rig.fill()
+
+    again = rig.fill(confirmed=True)
+
+    assert again == FillResult(row=6, ref_id="131", journal_id=first.journal_id, already=True)
+    assert rig.writes() == ["values_batch_update"]
+
+
+def test_confirmed_pair_with_an_id_in_the_row_is_already_there() -> None:
+    """id в строке уже стоит — писать нечего: «уже в справочнике»; что делать
+    с парой, решает слой приложения."""
+    rig = _rig()
+
+    result = rig.fill("Кетчуп", confirmed=True)
+
+    assert result == FillResult(row=4, ref_id="129", journal_id=None, already=True)
+    _nothing_written(rig)
+
+
+def test_preview_of_a_confirmed_pair_is_not_ready() -> None:
+    """Предпросмотр говорит то же, что сказала бы запись: строка есть, но
+    писать в неё нельзя — пара уже подтверждена."""
+    rig = _rig()
+
+    seen = rig.filler.preview("Соус Барбекю", confirmed=True)
+
+    assert (seen.row, seen.ready, seen.reason, seen.message) == (
+        6,
+        False,
+        "confirmed",
+        PAIR_CONFIRMED,
+    )
+    assert rig.writes() == []
+
+
+# ---------------------------------------------------------------------------
+# Строка карточки — на краю сетки листа
+# ---------------------------------------------------------------------------
+def _at_the_edge(templates: int = 0) -> FakeWorksheet:
+    """Лист ING, где «Сахар» (строка 8) — последняя строка зоны, а ниже —
+    ``templates`` заготовок и край сетки: строк в сетке ровно столько."""
+    return ing_sheet(templates=templates, row_count=8 + templates)
+
+
+def test_row_at_the_edge_of_the_grid_is_verified() -> None:
+    """Строка карточки — последняя строка сетки: строки ниже нет, и Google
+    отказал бы в чтении соседа снизу («exceeds grid limits»). Перечитываем
+    до края — сосед снизу пуст, как и при чтении; запись подтверждена."""
+    rig = _rig(ing=_at_the_edge())
+
+    result = rig.fill("Сахар", _form(short_name="Сахар"))
+
+    assert result == FillResult(row=8, ref_id="131", journal_id=1, already=False)
+    record = rig.journal.only()
+    assert record.status == VERIFIED
+    assert record.after is not None
+    neighbours = record.after["neighbours"]
+    assert isinstance(neighbours, dict)
+    assert neighbours["9"] == [""] * WIDTH
+
+
+def test_interrupted_attempt_at_the_edge_of_the_grid_is_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Прерванная попытка в последней строке сетки: повтор перечитывает её
+    строку до края — легла, ответ ею. Без этого журнал навсегда оставался бы
+    pending, а «нажмите ещё раз» — бесконечным."""
+    rig = _rig(ing=_at_the_edge())
+    _reread_fails_after_write(rig, monkeypatch, applied=True)
+    with pytest.raises(WriteNotConfirmedError):
+        rig.fill("Сахар", _form(short_name="Сахар"))
+    monkeypatch.undo()
+
+    result = rig.fill("Сахар", _form(short_name="Сахар"))
+
+    assert result == FillResult(row=8, ref_id="131", journal_id=1, already=True)
+    assert rig.journal.only().status == VERIFIED
+    assert rig.writes() == ["values_batch_update"]
+
+
+def test_row_below_deleted_at_the_edge_of_the_grid_is_a_shift() -> None:
+    """Под строкой карточки была заготовка — последняя в сетке, и шеф удалил
+    её в окне записи. Теперь строка карточки на краю сетки, соседа снизу нет,
+    а при чтении в нём были ручные значения: так выглядит и сдвиг строк.
+    Раскладка не подтверждена — ничего не трогаем, снимок листа в журнале."""
+    rig = _rig(ing=_at_the_edge(templates=1))
+    rig.kitchen.chef_deletes_rows("ING", 9, moment="before_write")
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.fill("Сахар", _form(short_name="Сахар"))
+
+    assert not caught.value.layout_confirmed
+    assert rig.writes() == ["values_batch_update"]
+    record = rig.journal.only()
+    assert (record.status, record.note) == (FAILED, LAYOUT_UNCONFIRMED)
+    assert record.error is not None and "соседних строк 9" in record.error
+
+
 def test_busy_writers_queue() -> None:
     rig = _rig(lock_timeout=timedelta(seconds=0.1))
     rig.journal.lock.acquire()
@@ -759,13 +886,14 @@ def test_google_failure_before_write_changes_nothing() -> None:
 
 
 def test_hold_limit_outlasts_the_worst_fill() -> None:
-    """Худшее заполнение — около тринадцати запросов к Google: открыть две
+    """Худшее заполнение — около шестнадцати запросов к Google: открыть две
     книги, перечитать прерванную попытку, прочитать лист дважды и книгу
-    карточек, записать, перечитать, вернуть свои ячейки, перечитать ещё раз.
-    Предел — четырнадцать таких и минута сверху."""
+    карточек, записать, перечитать, вернуть свои ячейки, перечитать ещё раз;
+    у строки на краю сетки каждое перечитывание — на запрос больше. Предел —
+    семнадцать таких и минута сверху."""
     settings = Settings(google_connect_timeout=10, google_read_timeout=60)
 
-    assert hold_limit(settings) == timedelta(minutes=17, seconds=20)
+    assert hold_limit(settings) == timedelta(minutes=20, seconds=50)
     assert hold_limit(Settings()) == HOLD_LIMIT
 
 

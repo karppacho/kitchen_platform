@@ -390,6 +390,45 @@ def test_this_is_it_with_not_a_candidate_is_409(
     assert _pair(_card(sessions, "Сахар")) == (None, "ambiguous", False)
 
 
+def test_confirmed_pair_is_409_for_this_is_new_and_this_is_it(
+    sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
+) -> None:
+    """Два человека, устаревший список: первый подтвердил «Сахар — 98»; второй
+    жмёт «Это новый» или «Это он» с другим тёзкой. 409 «обновите страницу» со
+    своей причиной — ни строки в листе, ни журнала, пара не тронута;
+    предпросмотр — не готов с той же причиной."""
+    card = _card(sessions, "Сахар")
+    chosen = _ingredient_id(sessions, "98")
+    assert confirm(chef, card.id, chosen).status_code == 200
+
+    new = transfer(chef, card.id)
+    seen = preview(chef, card.id)
+    other = confirm(chef, card.id, _ingredient_id(sessions, "99"))
+
+    assert new.status_code == 409, new.text
+    assert new.json() == {
+        "detail": "Пара уже подтверждена — обновите страницу",
+        "reason": "confirmed",
+        "row": 9,
+    }
+    assert seen.status_code == 200, seen.text
+    assert (seen.json()["ready"], seen.json()["reason"], seen.json()["message"]) == (
+        False,
+        "confirmed",
+        "Пара уже подтверждена — обновите страницу",
+    )
+    assert other.status_code == 409, other.text
+    assert other.json() == {
+        "detail": "Пара уже подтверждена — обновите страницу",
+        "reason": "confirmed",
+        "row": None,
+    }
+    assert _writes(world) == []
+    with sessions() as session:
+        assert session.scalars(select(models.SheetWrite)).all() == []
+    assert _pair(_card(sessions, "Сахар")) == (chosen, "linked", True)
+
+
 def test_id_beyond_the_database_is_422_not_a_server_error(chef: TestClient) -> None:
     """id больше, чем вмещает bigint базы, база встретила бы «bigint out of
     range» — ошибкой сервера. Отказ — до базы."""

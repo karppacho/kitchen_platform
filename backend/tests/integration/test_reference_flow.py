@@ -319,6 +319,24 @@ def test_this_is_it_waits_for_the_import_and_gives_up(sessions, disputed) -> Non
     assert _pair(_card(sessions, "Сахар")) == (None, "ambiguous", False)
 
 
+def test_this_is_it_on_a_pair_confirmed_with_another_is_refused(sessions, disputed) -> None:
+    """Обратный случай: пару уже подтвердили с другим ингредиентом — другой
+    человек нажал «Это он» или перенёс карточку, а здесь список устарел. 409
+    «обновите страницу», пара не тронута."""
+    card = _card(sessions, "Сахар")
+    first = _ingredient_id(sessions, "2")
+    with sessions() as session:
+        confirm_pair(session, card.id, first)
+
+    with sessions() as session, pytest.raises(ReferenceConflictError) as caught:
+        confirm_pair(session, card.id, _ingredient_id(sessions, "3"))
+
+    assert str(caught.value) == "Пара уже подтверждена — обновите страницу"
+    assert caught.value.extra() == {"reason": "confirmed", "row": None}
+    assert status_for(type(caught.value)) == 409
+    assert _pair(_card(sessions, "Сахар")) == (first, "linked", True)
+
+
 def test_unknown_card_is_not_found(sessions, client) -> None:
     """Карточки нет (или её убрали из листа) — 404 у всех трёх действий."""
     filler = _filler(client, sessions)
@@ -576,6 +594,64 @@ def test_id_of_another_ingredient_in_the_row_is_refused_as_shifted(sessions, cli
     assert _writes(shifted) == []
 
 
+def _confirm(sessions: sessionmaker[Session], name: str, legacy_id: str) -> int:
+    """Человек подтвердил пару карточки ``name`` с ингредиентом ``legacy_id``
+    — «Это он» у другого человека, мимо этого теста."""
+    ingredient_id = _ingredient_id(sessions, legacy_id)
+    with sessions.begin() as session:
+        session.execute(
+            update(models.IngredientCard)
+            .where(models.IngredientCard.name == name)
+            .values(ingredient_id=ingredient_id, link_status="linked", link_confirmed_at=func.now())
+        )
+    return ingredient_id
+
+
+def test_transfer_of_a_confirmed_pair_is_refused(sessions, client) -> None:
+    """Два человека на «Сверке»: один нажал «Это он» — пара «Сахар — 99»
+    подтверждена; у другого список устарел, и он нажал «Это новый». Запись
+    дала бы третий «Сахар» в листе шефа и затёрла бы решение человека. 409
+    до записи, без журнала; предпросмотр говорит то же."""
+    sugar = _confirm(sessions, "Сахар", "99")
+    card = _card(sessions, "Сахар")
+    filler = _filler(client, sessions)
+
+    with sessions() as session:
+        seen = preview(session, filler, card.id)
+    with sessions() as session, pytest.raises(ReferenceConflictError) as caught:
+        to_reference(session, filler, _NoImport(), card.id, FORM, actor_id=None)
+
+    assert str(caught.value) == "Пара уже подтверждена — обновите страницу"
+    assert caught.value.extra() == {"reason": "confirmed", "row": 8}
+    assert status_for(type(caught.value)) == 409
+    assert (seen.row, seen.ready, seen.reason) == (8, False, "confirmed")
+    assert _writes(client) == []
+    assert _journal(sessions) == []
+    assert _pair(_card(sessions, "Сахар")) == (sugar, "linked", True)
+
+
+def test_pair_confirmed_meanwhile_is_not_overwritten(sessions, client) -> None:
+    """Пока шла запись, пару подтвердили с другим ингредиентом. Запись
+    состоялась — ответ удачный, но решение человека не затирается: пара не
+    тронута, и сказано, что проверить."""
+    card = _card(sessions, "Соус Барбекю")
+    other: list[int] = []
+    books = _TransferThen(
+        _cycle(client, sessions), lambda: other.append(_confirm(sessions, "Соус Барбекю", "1"))
+    )
+
+    with sessions() as session:
+        done = to_reference(session, _filler(client, sessions), books, card.id, FORM, actor_id=None)
+
+    assert (done.row, done.ref_id, done.already) == (6, "131", False)
+    assert (done.imported, done.linked, done.ingredient_id) == (True, False, None)
+    assert done.notes == (
+        "Пара карточки уже подтверждена с другим ингредиентом — её не меняли. Проверьте "
+        "строку 6 листа ING: ингредиент может оказаться в справочнике дважды",
+    )
+    assert _pair(_card(sessions, "Соус Барбекю")) == (other[0], "linked", True)
+
+
 def test_id_that_is_not_a_whole_number_is_refused_as_shifted(sessions, client) -> None:
     """В A строки — не целое число: это не id справочника, пару не подтвердить."""
     _ing(client).put("A6", "131а")
@@ -821,10 +897,10 @@ class _Refusing:
     def __init__(self, error: Exception) -> None:
         self.error = error
 
-    def fill(self, card_name, form, *, actor_id, request_key):
+    def fill(self, card_name, form, *, actor_id, request_key, confirmed):
         raise self.error
 
-    def preview(self, card_name):
+    def preview(self, card_name, *, confirmed):
         raise self.error
 
 

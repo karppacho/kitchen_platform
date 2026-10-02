@@ -26,7 +26,8 @@
    той же проверкой, что у импорта; якорь ``QUERY`` — один и без ошибки.
 5. **Строка** — по названию и по месту среди «Да» сразу
    (:func:`~kitchen.domain.reference_row.locate_row`). id в ней уже стоит —
-   «уже в справочнике», писать нечего. Иначе: A пуст и в FORMATTED, и в
+   «уже в справочнике», писать нечего. Пару карточки уже подтвердил человек
+   — отказ: список на экране устарел. Иначе: A пуст и в FORMATTED, и в
    FORMULA; ни одна ручная ячейка, кроме L, не формула; L-формула
    пропускается; ячейки потерь оформлены процентами.
 6. **Форма и id** — только для строки, ждущей переноса. Форма нужна лишь
@@ -43,8 +44,9 @@
 10. **Перечитать и сверить** — и когда запись упала. Раскладка: якорь
     ``QUERY`` на месте, в C — название карточки, в A — наш id, ручные ячейки
     соседей сверху и снизу — как при чтении (вывод ``QUERY`` при вставке
-    строки внутри зоны не сдвигается, а ручные ячейки сдвигаются); значения
-    — точно, по FORMULA-чтению. Итог — в журнал: ``verified``;
+    строки внутри зоны не сдвигается, а ручные ячейки сдвигаются; строка на
+    краю сетки листа соседа снизу не имеет — он пуст); значения — точно, по
+    FORMULA-чтению. Итог — в журнал: ``verified``;
     ``rolled_back`` — строку правили одновременно с нами: наши ячейки
     возвращены к тому, что в них было до записи, чужие не тронуты;
     ``failed`` — не легла или раскладку не подтвердили: ничего не трогаем,
@@ -177,17 +179,18 @@ _TITLE = quoted(SPEC.title)
 _CARD_NAME = CARDS.column("name")
 _APPROVAL = CARDS.column("approval_status")
 
-_WORST_REQUESTS = 14
+_WORST_REQUESTS = 17
 """Запросов к Google в худшем заполнении — с запасом: открыть две книги,
 перечитать прерванную попытку (два чтения), прочитать лист дважды и книгу
 карточек, записать, перечитать (два), вернуть свои ячейки, перечитать ещё
-раз (два) — около тринадцати."""
+раз (два) — тринадцать; у строки на краю сетки листа каждое из трёх
+перечитываний — на запрос больше (:func:`_look`): шестнадцать."""
 
 
 def hold_limit(settings: Settings) -> timedelta:
     """Сколько одно заполнение может держать очередь писателей:
     :data:`_WORST_REQUESTS` запросов по «подключение + ответ» секунд из
-    настроек и минута сверху. При (10, 60) — 17 мин 20 с."""
+    настроек и минута сверху. При (10, 60) — 20 мин 50 с."""
     return hold_limit_for(_WORST_REQUESTS, settings)
 
 
@@ -215,6 +218,7 @@ LOCK_LOST = (
 )
 NOT_CONFIRMED = "Не удалось подтвердить запись — нажмите ещё раз: второй записи не будет"
 NOT_APPLIED = "Google не принял запись — в справочнике ничего не изменилось, нажмите ещё раз"
+PAIR_CONFIRMED = "Пара уже подтверждена — обновите страницу"
 _NOTHING_CHANGED = "{reason} — в справочнике ничего не изменилось, нажмите ещё раз"
 
 REASON_FORMULA = "formula"
@@ -223,6 +227,11 @@ REASON_PERCENT = "percent"
 """Причина отказа: ячейки потерь оформлены не процентами."""
 REASON_LOSSES_EMPTY = "losses_empty"
 """Причина отказа: ячейки потерь пусты — оформление не проверить."""
+REASON_CONFIRMED = "confirmed"
+"""Причина отказа: пару карточки уже подтвердил человек — «Это он» или
+перенос у другого человека, а список на этом экране устарел. Запись дала бы
+лишнюю строку в листе шефа, а подтверждение после неё затёрло бы решение
+человека."""
 ALREADY = "already"
 """Причина в предпросмотре: id в строке уже стоит — ингредиент в справочнике."""
 
@@ -281,8 +290,9 @@ class RowRefusedError(WriteRefusedError):
     не изменилось (409: лист сейчас не такой, чтобы в него писать).
 
     ``reason`` — почему: значение :class:`~kitchen.domain.reference_row.NotFound`
-    («not_approved», «not_yet», «shifted», «ambiguous»), :data:`REASON_FORMULA`
-    или :data:`REASON_PERCENT`; ``row`` — строка, если её нашли.
+    («not_approved», «not_yet», «shifted», «ambiguous»), :data:`REASON_FORMULA`,
+    :data:`REASON_PERCENT`, :data:`REASON_LOSSES_EMPTY` или
+    :data:`REASON_CONFIRMED`; ``row`` — строка, если её нашли.
     """
 
     def __init__(self, message: str, *, reason: str, row: int | None = None) -> None:
@@ -350,7 +360,8 @@ class RowPreview:
     нет формул, потери оформлены процентами."""
     reason: str | None
     """Почему нельзя: то же, что ``reason`` отказа записи
-    (:class:`RowRefusedError`), или :data:`ALREADY` — id уже стоит."""
+    (:class:`RowRefusedError`, в том числе :data:`REASON_CONFIRMED`), или
+    :data:`ALREADY` — id уже стоит."""
     message: str | None
     """То же словами для человека — текстом отказа записи."""
     ref_id: str | None
@@ -691,10 +702,22 @@ def _look(book: Spreadsheet, attempt: _Attempt) -> _Reread:
     Значения сверяются по FORMULA-чтению: у ячейки без формулы это то же
     значение без оформления, что и UNFORMATTED (числа числами), а формулу,
     вписанную в нашу ячейку в окне записи, оно показывает формулой — чужой.
+
+    Строка N — последняя в сетке листа: строки N+1 нет, и Google отказывает в
+    чтении всего диапазона («exceeds grid limits»). Тогда читаем до N, а
+    сосед снизу — пустой. Были в нём при чтении ручные значения — значит,
+    строку под нами удалили: это сдвиг, как и любой другой.
     """
     row = attempt.row
-    ranges = [f"{_TITLE}!{_ANCHOR.letter}{attempt.anchor}", f"{_TITLE}!A{row - 1}:{_LAST}{row + 1}"]
-    shown_anchor, shown_rows = read_ranges(book, ranges, FORMATTED)
+    anchor = f"{_TITLE}!{_ANCHOR.letter}{attempt.anchor}"
+    ranges = [anchor, f"{_TITLE}!A{row - 1}:{_LAST}{row + 1}"]
+    try:
+        shown_anchor, shown_rows = read_ranges(book, ranges, FORMATTED)
+    except Exception as error:
+        if not _past_the_grid(error):
+            raise
+        ranges = [anchor, f"{_TITLE}!A{row - 1}:{_LAST}{row}"]
+        shown_anchor, shown_rows = read_ranges(book, ranges, FORMATTED)
     raw_anchor, raw_rows = read_ranges(book, ranges, FORMULA)
     anchor_shown, anchor_formula = str(_first(shown_anchor)), _first(raw_anchor)
     line = _text_row(shown_rows, 2)[:_WIDTH]
@@ -722,6 +745,13 @@ def _look(book: Spreadsheet, attempt: _Attempt) -> _Reread:
         layout_confirmed=place and same_cell(attempt.sent[_ID.field], values[_ID.index]),
         untouched=place and line == attempt.line(),
     )
+
+
+def _past_the_grid(error: Exception) -> bool:
+    """Google отказал в чтении: диапазон выходит за край сетки листа (400
+    «exceeds grid limits»), а не «не ответил»."""
+    text = describe_error(error).lower()
+    return "[400]" in text and "exceeds grid limits" in text
 
 
 def _manual_changed(before: Sequence[object], now: Sequence[object]) -> bool:
@@ -768,6 +798,7 @@ class ReferenceRowFiller:
         *,
         actor_id: uuid.UUID | None,
         request_key: str,
+        confirmed: bool,
     ) -> FillResult:
         """Заполнить строку ING карточки ``card_name`` значениями ``form``.
 
@@ -775,7 +806,10 @@ class ReferenceRowFiller:
         сравнивается как ключ карточки при импорте. ``form`` — разобранная
         форма или её ошибки: форма нужна, только если строка ждёт переноса, —
         тогда её ошибки и поднимаются. ``request_key`` —
-        :func:`fill_request_key` от id карточки. Ошибки —
+        :func:`fill_request_key` от id карточки. ``confirmed`` — пару
+        карточки уже подтвердил человек: тогда строку, ждущую переноса, не
+        заполняем (:data:`REASON_CONFIRMED`); повтор своего состоявшегося
+        переноса отвечает по журналу раньше. Ошибки —
         :class:`~kitchen.domain.reference_row.ReferenceFormError` (поле формы)
         и наследники :class:`WriteRefusedError` с текстом для человека.
         """
@@ -789,21 +823,26 @@ class ReferenceRowFiller:
                 SHEET_WRITE_LOCK_KEY, self._lock_timeout, self._hold
             ) as lock:
                 result = self._fill(
-                    lock, card_name, form, actor_id=actor_id, request_key=request_key
+                    lock,
+                    card_name,
+                    form,
+                    actor_id=actor_id,
+                    request_key=request_key,
+                    confirmed=confirmed,
                 )
         except WritersBusyError as error:
             raise SheetBusyError(BUSY) from error
         return _announced(result)
 
-    def preview(self, card_name: str) -> RowPreview:
+    def preview(self, card_name: str, *, confirmed: bool) -> RowPreview:
         """Строка ING карточки ``card_name`` для формы переноса.
 
         Свежее чтение тех же листов, что перед записью, — ING двумя чтениями и
         книга карточек, — без записи, без журнала и без очереди писателей.
         Строку ищут и проверяют, как перед записью: нашлась ли (или почему нет
-        — словами отказа записи), можно ли её заполнить, какие ручные ячейки —
-        формулы. Ошибки — как у записи до неё: :class:`SheetLayoutError`,
-        :class:`SheetUnavailableError`.
+        — словами отказа записи), можно ли её заполнить (``confirmed`` — как у
+        :meth:`fill`), какие ручные ячейки — формулы. Ошибки — как у записи до
+        неё: :class:`SheetLayoutError`, :class:`SheetUnavailableError`.
         """
         if not normalise_name(card_name):
             raise ValueError("Пустое название карточки — строку справочника не найти")
@@ -835,6 +874,8 @@ class ReferenceRowFiller:
         ref_id: str | None = None
         if isinstance(found, AlreadyFilled):
             reason, message, ref_id = ALREADY, _already_text(found.ref_id), found.ref_id
+        elif confirmed:
+            reason, message = REASON_CONFIRMED, PAIR_CONFIRMED
         else:
             try:
                 _check_row(sheet, found.row)
@@ -861,6 +902,7 @@ class ReferenceRowFiller:
         *,
         actor_id: uuid.UUID | None,
         request_key: str,
+        confirmed: bool,
     ) -> FillResult:
         attempts = self._journal.unconfirmed_attempts(request_key)
         shifted = UnconfirmedWrite(attempts[0].id, attempts[0].row) if attempts else None
@@ -892,6 +934,11 @@ class ReferenceRowFiller:
             return FillResult(found.row, found.ref_id, None, True, shifted)
 
         row = found.row
+        if confirmed:
+            # Пару уже подтвердил человек, а здесь список устарел: запись дала
+            # бы лишнюю строку, подтверждение после неё — затёрло бы решение.
+            log.info("«%s»: «%s» не заполнена — пара уже подтверждена", SPEC.title, card_name)
+            raise RowRefusedError(PAIR_CONFIRMED, reason=REASON_CONFIRMED, row=row)
         formulas = _check_row(sheet, row)
         # Форма нужна только здесь — строка ждёт переноса: её ошибки — отказ
         # до журнала. id — под очередью: второй перенос ждёт её за нами.
