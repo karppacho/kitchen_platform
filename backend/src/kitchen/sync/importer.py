@@ -18,14 +18,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
 
 from kitchen.db import models
-from kitchen.domain.matching import Entry, NameIndex, normalise_name
+from kitchen.db.links import LinkReference
+from kitchen.domain.matching import NameIndex, normalise_name
 from kitchen.sync import specs
 from kitchen.sync.reader import SheetData
 
@@ -53,6 +55,30 @@ def take_import_lock(session: Session) -> None:
     соединении. Снимается сама на commit или rollback.
     """
     session.execute(text("select pg_advisory_xact_lock(:key)"), {"key": IMPORT_LOCK_KEY})
+
+
+_LOCK_BUSY = {"55P03", "57014"}
+"""SQLSTATE, с которыми обрывается ожидание: `lock_timeout` и `statement_timeout`."""
+
+
+def wait_for_import_lock(session: Session, wait: timedelta) -> bool:
+    """Занять очередь импорта, ожидая не дольше ``wait``.
+
+    Для тех, кто правит то же, что импорт, и ждёт ответа на экране: пару
+    карточки импорт пересчитывает, пока она не подтверждена, — подтверждение
+    посреди импорта он бы затёр. ``False`` — другой перенос держит очередь
+    дольше: транзакция испорчена, её откатывают. Предел — `SET LOCAL`, на
+    эту транзакцию (через пулер сессионный остался бы на чужом соединении).
+    """
+    milliseconds = max(1, int(wait / timedelta(milliseconds=1)))
+    session.execute(text(f"set local lock_timeout = '{milliseconds}ms'"))
+    try:
+        take_import_lock(session)
+    except OperationalError as error:
+        if getattr(error.orig, "sqlstate", None) in _LOCK_BUSY:
+            return False
+        raise
+    return True
 
 
 @dataclass
@@ -501,14 +527,9 @@ class Importer:
         Подтверждённые связи не трогаем — решение за человеком. Скрытые
         карточки тоже: вернётся строка — подберём.
         """
-        # Удалённое из справочника не предлагаем в пару карточке: шеф уже
-        # сказал, что этой позиции больше нет.
-        index = NameIndex(
-            Entry(key=str(item.id), name=item.name, status=item.status)
-            for item in session.scalars(
-                select(models.Ingredient).where(models.Ingredient.removed_at.is_(None))
-            ).all()
-        )
+        # Справочник — тот же, по которому «Сверка» показывает кандидатов и
+        # «Это он» их проверяет; удалённое из листа в нём не предлагается.
+        index = LinkReference(session).index
         cards = session.scalars(
             select(models.IngredientCard).where(
                 models.IngredientCard.removed_at.is_(None),

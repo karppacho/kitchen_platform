@@ -49,6 +49,10 @@
 Возврат, а не очистка: в строке-заготовке до нас стояли умолчания шефа (цены
 0, «кг», потери 0% в процентном оформлении). Очистка стёрла бы их, а пустые
 ячейки потерь заблокировали бы следующий перенос проверкой оформления.
+
+Предпросмотр для формы переноса (:meth:`ReferenceRowFiller.preview`) — шаги
+4–6 без записи: то же свежее чтение, тот же поиск строки и те же проверки её
+ячеек, — плюс что в строке сейчас.
 """
 
 from __future__ import annotations
@@ -85,7 +89,8 @@ from kitchen.domain.reference_row import (
     next_reference_id,
 )
 from kitchen.sync import specs
-from kitchen.sync.reader import check_header, describe_error, row_hash
+from kitchen.sync.ownership import Kind
+from kitchen.sync.reader import check_header, convert_cell, describe_error, row_hash
 from kitchen.sync.sheet_write import (
     FORMATTED,
     FORMULA,
@@ -154,6 +159,12 @@ _NAME = SPEC.column("name")
 _PRICE = SPEC.column("price_per_kg")
 """L: в части строк — формула от M, тогда пропускается."""
 _LOSSES: tuple[Column, ...] = tuple(SPEC.column(f) for f in LOSS_FIELDS)
+_NOW: tuple[Column, ...] = tuple(c for c in _WRITTEN if c is not _ID)
+"""Ручные ячейки, которые показывает предпросмотр: E, L–O, Q–T."""
+_QUERY_OUTPUT: tuple[Column, ...] = tuple(
+    c for c in SPEC.columns if c.field not in FIELDS and c.field != "losses_total"
+)
+"""Вывод ``QUERY``: B–D, F–K. P — формула шефа, не вывод."""
 _WIDTH = len(SPEC.columns)
 """A–T: столько колонок сверяется и хешируется, как у импорта."""
 _LAST = SPEC.columns[-1].letter
@@ -207,6 +218,8 @@ REASON_PERCENT = "percent"
 """Причина отказа: ячейки потерь оформлены не процентами."""
 REASON_LOSSES_EMPTY = "losses_empty"
 """Причина отказа: ячейки потерь пусты — оформление не проверить."""
+ALREADY = "already"
+"""Причина в предпросмотре: id в строке уже стоит — ингредиент в справочнике."""
 
 
 def _formula_text(row: int, letters: Sequence[str]) -> str:
@@ -304,8 +317,50 @@ class FillResult:
     def message(self) -> str:
         """Ответ человеку — словами спеки."""
         if self.already:
-            return f"Ингредиент уже в справочнике — id {self.ref_id}"
+            return _already_text(self.ref_id)
         return f"Записано в справочник: строка {self.row}, id {self.ref_id}"
+
+
+def _already_text(ref_id: str) -> str:
+    return f"Ингредиент уже в справочнике — id {ref_id}"
+
+
+PreviewValue = str | Decimal | None
+"""Ячейка в предпросмотре: текст, число или пусто."""
+
+
+@dataclass(frozen=True, slots=True)
+class RowPreview:
+    """Строка ING карточки для формы переноса — свежим чтением, без записи."""
+
+    next_id: str
+    """id, который получила бы строка сейчас: наибольший числовой id листа плюс
+    один. Справочно — при записи его выдают заново, под очередью писателей:
+    между предпросмотром и записью его может занять другой перенос."""
+    row: int | None
+    """Строка листа, с единицы, — если её нашли по названию и месту."""
+    ready: bool
+    """Строку можно заполнить: найдена, A пуст, в ручных ячейках (кроме L)
+    нет формул, потери оформлены процентами."""
+    reason: str | None
+    """Почему нельзя: то же, что ``reason`` отказа записи
+    (:class:`RowRefusedError`), или :data:`ALREADY` — id уже стоит."""
+    message: str | None
+    """То же словами для человека — текстом отказа записи."""
+    ref_id: str | None
+    """id из A, как его видит человек, — если ингредиент уже в справочнике."""
+    formulas: tuple[str, ...]
+    """Ручные ячейки строки с формулой, буквами, и P — всегда. L здесь —
+    цена за единицу «считается в таблице»."""
+    pulled: Mapping[str, PreviewValue]
+    """Что вывела ``QUERY`` (B–D, F–K) — как видит шеф, разобранное по виду
+    колонки, как у импорта: category, name, full_name, manufacturer,
+    composition, protein, fat, carbs, kcal."""
+    current: Mapping[str, PreviewValue]
+    """Что сейчас в ручных ячейках E, L–O, Q–T — по полям ING (как у
+    :meth:`ReferenceForm.row_values`). Числа — из FORMULA-чтения, без
+    оформления: потери — долями и точно (0,125 в ячейке «0%» шеф видит как
+    «13%»). Ячейка с формулой — что формула показывает."""
 
 
 # ---------------------------------------------------------------------------
@@ -455,8 +510,10 @@ def _read(kitchen: Spreadsheet, cards: Spreadsheet) -> _Sheets:
     return _Sheets(formatted, formula, anchor, approved)
 
 
-def _row_values(sheet: _Sheets, row: int, planned: Mapping[str, SentValue]) -> dict[str, SentValue]:
-    """Что пишем в найденную строку — после проверок её ячеек.
+def _check_row(sheet: _Sheets, row: int) -> tuple[str, ...]:
+    """Можно ли заполнить найденную строку; ответ — буквы её формул
+    (:func:`~kitchen.domain.reference_row.formula_cells`). Нельзя —
+    :class:`RowRefusedError`.
 
     * Формула в ручной ячейке, кроме L, — отказ (в A тоже: формула, которая
       показывает пусто, — не место для id); L-формула пропускается.
@@ -465,8 +522,6 @@ def _row_values(sheet: _Sheets, row: int, planned: Mapping[str, SentValue]) -> d
     * Ячейки потерь показывают «%»: доля в ячейке без процентного
       оформления — «0,05» вместо «5%». Пустая ячейка не показывает ничего,
       и оформление по ней не проверить — отказ со своим текстом.
-    * id — наибольший числовой id листа (FORMULA-чтение: числа числами)
-      плюс один, JSON-целым.
     """
     raw = _row(sheet.formula, row)
     shown = _text_row(sheet.formatted, row)
@@ -481,7 +536,35 @@ def _row_values(sheet: _Sheets, row: int, planned: Mapping[str, SentValue]) -> d
         raise RowRefusedError(_losses_empty_text(row), reason=REASON_LOSSES_EMPTY, row=row)
     if any("%" not in shown[c.index] for c in _LOSSES):
         raise RowRefusedError(_percent_text(row), reason=REASON_PERCENT, row=row)
-    ref_id = next_reference_id(_cell(line, _ID.index) for line in sheet.formula[SPEC.header_rows :])
+    return formulas
+
+
+def _shown_value(column: Column, shown: str) -> PreviewValue:
+    """Ячейка, как её видит шеф, — разобранная по виду колонки, как у импорта."""
+    value = convert_cell(shown, column.kind)
+    return Decimal(value) if isinstance(value, int) else value
+
+
+def _current_value(column: Column, raw: object, shown: str) -> PreviewValue:
+    """Ручная ячейка сейчас. Число — из FORMULA-чтения, без оформления (доля
+    потерь — долей, без округления процентным форматом); формула и текст — как
+    видит шеф."""
+    if column.kind is not Kind.TEXT and isinstance(raw, int | float) and not isinstance(raw, bool):
+        return Decimal(repr(raw))
+    return _shown_value(column, shown)
+
+
+def _next_id(sheet: _Sheets) -> str:
+    """Наибольший числовой id листа плюс один — по FORMULA-чтению: числа
+    числами, оформление ячейки id не исказит."""
+    return next_reference_id(_cell(line, _ID.index) for line in sheet.formula[SPEC.header_rows :])
+
+
+def _row_values(sheet: _Sheets, row: int, planned: Mapping[str, SentValue]) -> dict[str, SentValue]:
+    """Что пишем в найденную строку — после проверок её ячеек
+    (:func:`_check_row`). id — :func:`_next_id`, JSON-целым."""
+    formulas = _check_row(sheet, row)
+    ref_id = _next_id(sheet)
     values: dict[str, SentValue] = {_ID.field: sheet_number(Decimal(ref_id))}
     for field in FIELDS[1:]:
         if field == _PRICE.field and _PRICE.letter in formulas:
@@ -690,6 +773,63 @@ class ReferenceRowFiller:
         except WritersBusyError as error:
             raise SheetBusyError(BUSY) from error
         return _announced(result)
+
+    def preview(self, card_name: str) -> RowPreview:
+        """Строка ING карточки ``card_name`` для формы переноса.
+
+        Свежее чтение тех же листов, что перед записью, — ING двумя чтениями и
+        книга карточек, — без записи, без журнала и без очереди писателей.
+        Строку ищут и проверяют, как перед записью: нашлась ли (или почему нет
+        — словами отказа записи), можно ли её заполнить, какие ручные ячейки —
+        формулы. Ошибки — как у записи до неё: :class:`SheetLayoutError`,
+        :class:`SheetUnavailableError`.
+        """
+        if not normalise_name(card_name):
+            raise ValueError("Пустое название карточки — строку справочника не найти")
+        kitchen = _google(
+            SPEC.title, "открыть книгу кухни", lambda: self._client.open(self._kitchen_id)
+        )
+        cards = _google(
+            CARDS.title, "открыть книгу карточек", lambda: self._client.open(self._cards_id)
+        )
+        sheet = _read(kitchen, cards)
+        next_id = _next_id(sheet)
+        found = locate_row(sheet.formatted, sheet.formula, sheet.anchor, sheet.approved, card_name)
+        if isinstance(found, NotFound):
+            return RowPreview(
+                next_id=next_id,
+                row=None,
+                ready=False,
+                reason=found.value,
+                message=found.message,
+                ref_id=None,
+                formulas=(),
+                pulled={},
+                current={},
+            )
+        raw = _row(sheet.formula, found.row)
+        shown = _text_row(sheet.formatted, found.row)
+        reason: str | None = None
+        message: str | None = None
+        ref_id: str | None = None
+        if isinstance(found, AlreadyFilled):
+            reason, message, ref_id = ALREADY, _already_text(found.ref_id), found.ref_id
+        else:
+            try:
+                _check_row(sheet, found.row)
+            except RowRefusedError as refusal:
+                reason, message = refusal.reason, str(refusal)
+        return RowPreview(
+            next_id=next_id,
+            row=found.row,
+            ready=reason is None,
+            reason=reason,
+            message=message,
+            ref_id=ref_id,
+            formulas=formula_cells(raw),
+            pulled={c.field: _shown_value(c, shown[c.index]) for c in _QUERY_OUTPUT},
+            current={c.field: _current_value(c, raw[c.index], shown[c.index]) for c in _NOW},
+        )
 
     # --- по шагам -----------------------------------------------------------
     def _fill(
