@@ -43,7 +43,11 @@ const KLYUCH_SVERKI = ['reconciliation'] as const
 const KLYUCH_SPRAVOCHNIKA = ['ingredients'] as const
 
 /** После отказа, говорящего, что список «Сверки» устарел: карточки нет,
- *  кандидаты сменились, карточку сняли с согласования. */
+ *  кандидаты сменились, карточку сняли с согласования, пару уже подтвердил
+ *  другой человек. И после 401: продление не помогло, а правки идут мимо
+ *  кэша запросов — сброс сессии слушает только его. Перечитанный список
+ *  получит тот же 401, и оболочка вернёт на вход, как с любого экрана
+ *  (так же у карточек — `api/kartochki.ts`). */
 function perechitatSverku(queries: QueryClient): void {
   void queries.invalidateQueries({ queryKey: KLYUCH_SVERKI })
 }
@@ -51,6 +55,22 @@ function perechitatSverku(queries: QueryClient): void {
 function kod(oshibka: unknown): number | null {
   return oshibka instanceof ApiError ? oshibka.status : null
 }
+
+function prichina(oshibka: unknown): string | null {
+  return oshibka instanceof ApiError ? oshibka.reason : null
+}
+
+/** «Это он»: 401 — сессия истекла; 404 — карточки нет; 409 — кандидаты
+ *  сменились или пару уже подтвердил другой человек. */
+const OTSTALI_PODTVERZHDENIE: readonly number[] = [401, 404, 409]
+
+/** Перенос: 401 — сессия истекла; 404 — карточки нет. */
+const OTSTALI_PERENOS: readonly number[] = [401, 404]
+
+/** Отказы переноса (409), после которых список устарел: согласование сняли
+ *  после переноса книги карточек — в списке она ещё с кнопкой; пару уже
+ *  подтвердил другой человек — в списке она ещё спорная. */
+const USTAREL_SPISOK: readonly string[] = ['not_approved', 'confirmed']
 
 /** Пара подтверждена или карточка в справочнике: она ушла со «Сверки», а в
  *  справочнике у ингредиента появилась карточка (или он сам). */
@@ -113,10 +133,9 @@ export function usePodtverzhdenie(onGotovo: (para: ConfirmedPair) => void) {
       perechitatPosleUspekha(queries)
       onGotovo(para)
     },
-    // 404 — карточки нет; 409 — этого ингредиента нет среди кандидатов:
-    // кандидаты сменились, список надо перечитать.
     onError: (oshibka) => {
-      if (kod(oshibka) === 404 || kod(oshibka) === 409) perechitatSverku(queries)
+      const status = kod(oshibka)
+      if (status !== null && OTSTALI_PODTVERZHDENIE.includes(status)) perechitatSverku(queries)
     },
     onSettled: () => {
       idyot.current = false
@@ -175,11 +194,11 @@ export function usePerenos(cardId: number, onZapisano: (otvet: ReferenceTransfer
       perechitatPosleUspekha(queries)
       onZapisano(otvet)
     },
-    // 404 — карточки нет; «не „Да“» — согласование сняли после переноса
-    // книги карточек: в списке она ещё с кнопкой.
     onError: (oshibka) => {
-      const neSoglasovana = oshibka instanceof ApiError && oshibka.reason === 'not_approved'
-      if (kod(oshibka) === 404 || neSoglasovana) perechitatSverku(queries)
+      const status = kod(oshibka)
+      const otstali = status !== null && OTSTALI_PERENOS.includes(status)
+      const ustarel = USTAREL_SPISOK.includes(prichina(oshibka) ?? '')
+      if (otstali || ustarel) perechitatSverku(queries)
     },
     onSettled: () => {
       idyot.current = false

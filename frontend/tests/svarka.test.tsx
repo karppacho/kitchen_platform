@@ -487,33 +487,43 @@ test('«Закрыть» — форма уходит, фокус возвращ�
   expect(within(sous).getByRole('button', { name: 'Добавить в справочник' })).toHaveFocus()
 })
 
-test('строка ещё не появилась (предпросмотр) — форма есть, «Проверить ещё раз» читает снова', async () => {
-  otvetyPredprosmotra = [
-    () =>
-      HttpResponse.json(
-        stroka({
-          row: null,
-          ready: false,
-          reason: 'not_yet',
-          message: NE_POYAVILAS,
-          formulas: [],
-          pulled: null,
-          current: null,
-        }),
-      ),
-  ]
+/** Предпросмотр: строки ещё нет — таблица не подтянула карточку. */
+function neNaidena(): ReferenceRowPreview {
+  return stroka({
+    row: null,
+    ready: false,
+    reason: 'not_yet',
+    message: NE_POYAVILAS,
+    formulas: [],
+    pulled: null,
+    current: null,
+  })
+}
+
+const SNACHALA_PROVERIM = 'Сначала проверим строку — покажем, что в ней сейчас'
+
+test('строка ещё не появилась (предпросмотр) — ни полей, ни «Записать»: сначала проверить строку', async () => {
+  // Писать в строку, которую человек не видел, нельзя: таблица могла её уже
+  // подтянуть, и пустые поля оставили бы в ней умолчания заготовки, а L
+  // показан, хотя в строке он, может быть, формула.
+  otvetyPredprosmotra = [() => HttpResponse.json(neNaidena())]
   narisovat()
   const forma = await otkrytFormu()
   expect(within(forma).getByText(NE_POYAVILAS)).toBeInTheDocument()
-  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  expect(within(forma).getByText(SNACHALA_PROVERIM)).toBeInTheDocument()
+  expect(within(forma).queryByLabelText('Короткое имя для iiko')).not.toBeInTheDocument()
+  expect(within(forma).queryByRole('button', { name: 'Записать в справочник' })).toBe(null)
 
   await userEvent.click(within(forma).getByRole('button', { name: 'Проверить ещё раз' }))
 
+  // Строка нашлась — форма с тем, что в ней сейчас; L — формула: поля нет.
   expect(await within(forma).findByText('Соусы')).toBeInTheDocument()
   expect(within(forma).queryByText(NE_POYAVILAS)).not.toBeInTheDocument()
+  expect(within(forma).queryByText(SNACHALA_PROVERIM)).not.toBeInTheDocument()
   expect(predprosmotry).toEqual([7, 7])
-  // Набранное человеком не стирается значениями строки.
-  expect(pole(forma, 'Короткое имя для iiko')).toHaveValue('Сырный')
+  expect(within(forma).getByRole('radio', { name: 'кг' })).toBeChecked()
+  expect(within(forma).queryByLabelText(/Цена за 1 кг/)).not.toBeInTheDocument()
+  expect(zapisat(forma)).toBeEnabled()
 })
 
 test('предпросмотр отказал (503) — текст сервера, формы нет', async () => {
@@ -647,10 +657,124 @@ test('409 «ещё не появилась» — текст, форма с вв�
   expect(screen.getByRole('dialog')).toBe(forma)
   expect(pole(forma, 'Короткое имя для iiko')).toHaveValue('Сырный')
   expect(pole(forma, POTERI[0])).toHaveValue('5')
-  // Строка может появиться в любую минуту: записать можно сразу, а можно
-  // сначала проверить.
+  // Строку человек уже видел — предпросмотр был готов, в полях её значения и
+  // его правки: записать можно сразу, а можно сначала проверить.
   expect(zapisat(forma)).toBeEnabled()
   expect(within(forma).getByRole('button', { name: 'Проверить ещё раз' })).toBeEnabled()
+})
+
+test('правки переживают «ещё не появилась»: строка нашлась — форма с набранным', async () => {
+  otvetyPerenosa = [
+    () =>
+      HttpResponse.json({ detail: NE_POYAVILAS, reason: 'not_yet', row: null }, { status: 409 }),
+  ]
+  otvetyPredprosmotra = [() => HttpResponse.json(stroka()), () => HttpResponse.json(neNaidena())]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.click(zapisat(forma))
+  expect(await within(forma).findByRole('alert')).toHaveTextContent(NE_POYAVILAS)
+
+  // Проверили — строки нет: полей и «Записать» нет, набранное не забыто.
+  await userEvent.click(within(forma).getByRole('button', { name: 'Проверить ещё раз' }))
+  expect(await within(forma).findByText(SNACHALA_PROVERIM)).toBeInTheDocument()
+  expect(within(forma).queryByLabelText('Короткое имя для iiko')).not.toBeInTheDocument()
+  expect(within(forma).queryByRole('button', { name: 'Записать в справочник' })).toBe(null)
+
+  await userEvent.click(within(forma).getByRole('button', { name: 'Проверить ещё раз' }))
+  expect(await within(forma).findByLabelText('Короткое имя для iiko')).toHaveValue('Сырный')
+  expect(zapisat(forma)).toBeEnabled()
+  expect(predprosmotry).toEqual([7, 7, 7])
+})
+
+// ---------------------------------------------------------------------------
+// Пара уже подтверждена: другой человек успел раньше
+// ---------------------------------------------------------------------------
+
+const PARA_PODTVERZHDENA = 'Пара уже подтверждена — обновите страницу'
+
+test('предпросмотр: пара уже подтверждена — без полей и «Записать», текст сервера', async () => {
+  otvetyPredprosmotra = [
+    () =>
+      HttpResponse.json(stroka({ ready: false, reason: 'confirmed', message: PARA_PODTVERZHDENA })),
+  ]
+  narisovat()
+  const forma = await otkrytFormu()
+  expect(within(forma).getByText(PARA_PODTVERZHDENA)).toBeInTheDocument()
+  expect(within(forma).queryByLabelText('Короткое имя для iiko')).not.toBeInTheDocument()
+  expect(within(forma).queryByRole('button', { name: 'Записать в справочник' })).toBe(null)
+})
+
+test('запись: пара уже подтверждена (409) — текст сервера, список перечитан, «Записать» ждёт', async () => {
+  otvetyPerenosa = [
+    () =>
+      HttpResponse.json(
+        { detail: PARA_PODTVERZHDENA, reason: 'confirmed', row: 8 },
+        { status: 409 },
+      ),
+  ]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.click(zapisat(forma))
+
+  expect(await within(forma).findByRole('alert')).toHaveTextContent(PARA_PODTVERZHDENA)
+  await waitFor(() => expect(chteniyaSvodki).toBe(2))
+  expect(zapisat(forma)).toBeDisabled()
+})
+
+test('«Это он»: пара уже подтверждена другим (409) — текст сервера, список перечитан', async () => {
+  otvetyPodtverzhdeniya = [
+    () =>
+      HttpResponse.json(
+        { detail: PARA_PODTVERZHDENA, reason: 'confirmed', row: null },
+        { status: 409 },
+      ),
+  ]
+  narisovat()
+  const sakhar = await screen.findByTestId('kartochka-6')
+  await userEvent.click(within(sakhar).getAllByRole('radio')[0]!)
+  await userEvent.click(within(sakhar).getByRole('button', { name: 'Это он' }))
+
+  expect(await within(sakhar).findByRole('alert')).toHaveTextContent(PARA_PODTVERZHDENA)
+  await waitFor(() => expect(chteniyaSvodki).toBe(2))
+})
+
+// ---------------------------------------------------------------------------
+// Сессия истекла: правки идут мимо кэша, вход возвращает перечитанный список
+// ---------------------------------------------------------------------------
+
+const VOIDITE = 'Войдите заново'
+
+function sessiyaIstekla() {
+  server.use(
+    http.post('/api/auth/refresh', () => HttpResponse.json({ detail: VOIDITE }, { status: 401 })),
+  )
+}
+
+test('«Это он» с истёкшей сессией (401) — список «Сверки» перечитан', async () => {
+  sessiyaIstekla()
+  otvetyPodtverzhdeniya = [() => HttpResponse.json({ detail: VOIDITE }, { status: 401 })]
+  narisovat()
+  const sakhar = await screen.findByTestId('kartochka-6')
+  await userEvent.click(within(sakhar).getAllByRole('radio')[0]!)
+  await userEvent.click(within(sakhar).getByRole('button', { name: 'Это он' }))
+
+  expect(await within(sakhar).findByRole('alert')).toHaveTextContent(VOIDITE)
+  await waitFor(() => expect(chteniyaSvodki).toBe(2))
+})
+
+test('запись с истёкшей сессией (401) — список «Сверки» перечитан, набранное цело', async () => {
+  sessiyaIstekla()
+  otvetyPerenosa = [() => HttpResponse.json({ detail: VOIDITE }, { status: 401 })]
+  narisovat()
+  const forma = await otkrytFormu()
+  await userEvent.type(pole(forma, 'Короткое имя для iiko'), 'Сырный')
+  await userEvent.click(zapisat(forma))
+
+  expect(await within(forma).findByRole('alert')).toHaveTextContent(VOIDITE)
+  await waitFor(() => expect(chteniyaSvodki).toBe(2))
+  expect(pole(forma, 'Короткое имя для iiko')).toHaveValue('Сырный')
 })
 
 test('запись отказала «строки сдвинуты» (409) — «Записать» ждёт «Проверить ещё раз»', async () => {

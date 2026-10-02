@@ -123,6 +123,8 @@ export type ConfirmedPair = {
  * - `shifted`, `ambiguous` — строки съехали или тёзок несколько: нужен
  *   человек в листе;
  * - `formula`, `percent`, `losses_empty` — ячейки строки не те;
+ * - `confirmed` — пару уже подтвердил человек («Это он» или перенос у
+ *   другого): список на экране устарел, писать нечего;
  * - `already` — id в строке уже стоит.
  */
 export type ReferenceRowReason =
@@ -133,6 +135,7 @@ export type ReferenceRowReason =
   | 'formula'
   | 'percent'
   | 'losses_empty'
+  | 'confirmed'
   | 'already'
 
 /** Что формула QUERY уже вывела в строку ING — только показать. */

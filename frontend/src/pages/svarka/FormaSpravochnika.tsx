@@ -58,19 +58,33 @@ const PORYADOK: readonly Pole[] = [
 /** Короткое имя длиннее сервер не примет — набрать больше не даём. */
 const PREDEL_IMENI = 100
 
-/** Строки сдвинуты, тёзок несколько, ячейки не те — нужен человек в листе:
- *  запись повторила бы тот же отказ, сначала — свежая проверка строки. */
+/** Строки сдвинуты, тёзок несколько, ячейки не те — нужен человек в листе;
+ *  пару уже подтвердил другой человек — список устарел: запись повторила бы
+ *  тот же отказ, сначала — свежая проверка строки. */
 const NUZHEN_CHELOVEK: readonly string[] = [
   'shifted',
   'ambiguous',
   'formula',
   'percent',
   'losses_empty',
+  'confirmed',
 ] satisfies readonly ReferenceRowReason[]
 
 /** Причины, при которых строку стоит перечитать: таблица подтянет её сама
  *  или шеф поправит лист. Те же у предпросмотра и у отказа записи. */
 const PROVERIT_ESHCHYO: readonly string[] = ['not_yet', ...NUZHEN_CHELOVEK]
+
+/**
+ * Предпросмотр, при котором формы нет — ни полей, ни «Записать»:
+ * - строки ещё нет: что в ней будет, человек не видел — таблица могла её уже
+ *   подтянуть, и запись легла бы вслепую (пустые поля оставили бы умолчания
+ *   заготовки, а цена за единицу ушла бы и туда, где она формула);
+ * - пару уже подтвердил другой человек — писать нечего.
+ */
+const BEZ_FORMY: readonly string[] = [
+  'not_yet',
+  'confirmed',
+] satisfies readonly ReferenceRowReason[]
 
 /** Все попытки оборвались или не дождались ответа. Запись могла и лечь —
  *  повтор это узнает и второй не сделает. */
@@ -182,7 +196,9 @@ function tekstKhoda(popytka: number, uzhe: boolean): string {
  * Подтянутое формулой (категория, название, изготовитель, КБЖУ) — только
  * показать. id выдаёт сервер при записи — человек его видит, но не вводит.
  * Поля начинаются с текущих значений строки; набранное человеком они не
- * перебивают, даже когда строку перечитали.
+ * перебивают, даже когда строку перечитали. Пока строки нет (таблица ещё
+ * не подтянула карточку) или пару уже подтвердил другой человек — формы нет:
+ * писать в строку, которую человек не видел, нельзя.
  *
  * Отказ сервера — его текстом; ошибка поля — у поля. Форма с набранным
  * остаётся при любом отказе: закрывает её только успех или сам человек.
@@ -222,13 +238,17 @@ export function FormaSpravochnika({
     dannye?.reason === 'not_approved' ||
     (otkaz instanceof ApiError && otkaz.reason === 'not_approved')
   const uzhe = dannye?.reason === 'already'
+  const bezFormy = dannye?.reason != null && BEZ_FORMY.includes(dannye.reason)
+  // Набранное человеком не забывается и без формы: строка нашлась — поля
+  // вернутся с его правками.
+  const estForma = dannye !== undefined && !neSoglasovana && !bezFormy
 
   // «Уже в справочнике» — без формы: пару подтверждают значениями строки. Но
   // если сервер их не принял (пусто короткое имя, не та единица), поля
   // нужны — человек вводит их сам, и они остаются до конца.
   const [polyaDlyaUzhe, zadatPolyaDlyaUzhe] = useState(false)
   if (uzhe && oshibkiPolej !== null && !polyaDlyaUzhe) zadatPolyaDlyaUzhe(true)
-  const pokazatPolya = dannye !== undefined && !neSoglasovana && (!uzhe || polyaDlyaUzhe)
+  const pokazatPolya = estForma && (!uzhe || polyaDlyaUzhe)
 
   const vidimye: readonly Pole[] = PORYADOK.filter(
     (pole) =>
@@ -267,14 +287,15 @@ export function FormaSpravochnika({
   const zanyato = perenos.idyot || chitaem
   // Почему отказала запись — те же причины, что у предпросмотра.
   const prichinaOtkaza = otkaz instanceof ApiError ? otkaz.reason : null
-  // Строка ждёт переноса — или её ещё нет: таблица могла подтянуть её с тех
-  // пор, а проверит сервер свежим чтением. Сдвиг, тёзки, не те ячейки —
-  // нужен человек в листе, отправлять нечего, пока строку не перечитали
-  // (перечитывание забывает и отказ записи).
-  const pokazatZapisat = dannye !== undefined && !neSoglasovana
+  // Записать — только в строку, которую человек видел: она ждёт переноса
+  // (или уже в справочнике — тогда «Связать»). Отказ «ещё не появилась»
+  // после готового предпросмотра «Записать» не гасит: строку видели, в полях
+  // её значения. Сдвиг, тёзки, не те ячейки, подтверждённая пара — отправлять
+  // нечего, пока строку не перечитали (перечитывание забывает и отказ записи).
+  const pokazatZapisat = estForma
   const mozhnoZapisat =
     pokazatZapisat &&
-    (dannye.ready || dannye.reason === 'not_yet' || uzhe) &&
+    (dannye.ready || uzhe) &&
     !(prichinaOtkaza !== null && NUZHEN_CHELOVEK.includes(prichinaOtkaza))
   const proverit =
     !neSoglasovana &&
@@ -335,7 +356,11 @@ export function FormaSpravochnika({
             <p className={uzhe ? 'svarka-poyasnenie' : 'svarka-zamechanie'}>{dannye.message}</p>
           )}
 
-          {dannye && !neSoglasovana && <Podtyanuto dannye={dannye} uzhe={uzhe} />}
+          {dannye?.reason === 'not_yet' && (
+            <p className="svarka-poyasnenie">Сначала проверим строку — покажем, что в ней сейчас</p>
+          )}
+
+          {estForma && <Podtyanuto dannye={dannye} uzhe={uzhe} />}
 
           {pokazatPolya && uzhe && (
             <p className="svarka-zamechanie">
