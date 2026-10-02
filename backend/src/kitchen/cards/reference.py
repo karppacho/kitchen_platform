@@ -223,8 +223,11 @@ class Transferred:
     """Ингредиент был в справочнике и до этого нажатия: id в строке уже стоял
     или это повтор состоявшегося переноса."""
     imported: bool
-    """Ингредиент с этим id есть на сайте (в базе). ``False`` — перенесёт
-    следующий цикл синхронизации."""
+    """Наш ингредиент виден на сайте под этим id: ингредиент с этим id есть в
+    базе, не удалён из листа и называется как карточка. Так при подтверждённой
+    паре — и когда пару подтвердить не дали, но наш ингредиент на сайте.
+    ``False`` — перенос не удался или под этим id на сайте не наш ингредиент;
+    тогда в ``notes`` всегда :data:`NOT_IMPORTED`."""
     linked: bool
     """Пара «карточка — ингредиент» подтверждена."""
     ingredient_id: int | None
@@ -343,8 +346,8 @@ def to_reference(
             result.ref_id,
             problem,
         )
-    outcome, ingredient_id = _confirm_written(session, card_id, result.ref_id, wait)
-    return _answer(card_id, result, outcome, ingredient_id, imported=problem is None)
+    pair = _confirm_written(session, card_id, name, result.ref_id, wait)
+    return _answer(card_id, result, pair, imported=problem is None)
 
 
 def _fill(
@@ -427,7 +430,33 @@ def _check_known_id(session: Session, card_id: int, name: str, result: FillResul
 _Outcome = Literal["linked", "missing", "other", "failed"]
 
 
+@dataclass(frozen=True, slots=True)
+class _Pair:
+    """Чем кончилось подтверждение пары после записи."""
+
+    outcome: _Outcome
+    ingredient_id: int | None
+    """Ингредиент пары — только у ``linked``."""
+    on_site: bool
+    """Наш ингредиент виден на сайте под id строки — ``imported`` ответа."""
+
+
 def _confirm_written(
+    session: Session, card_id: int, name: str, ref_id: str, wait: timedelta
+) -> _Pair:
+    """Подтвердить пару с ингредиентом строки — и виден ли он на сайте.
+
+    У ``linked`` наш ингредиент на сайте, у ``missing`` и ``other`` — нет.
+    ``failed`` о сайте ничего не говорит: подтвердить не дали очередь импорта
+    или база, — это отдельное чтение (:func:`_ours_on_site`).
+    """
+    outcome, ingredient_id = _link_written(session, card_id, ref_id, wait)
+    if outcome == "failed":
+        return _Pair(outcome, None, on_site=_ours_on_site(session, card_id, name, ref_id))
+    return _Pair(outcome, ingredient_id, on_site=outcome == "linked")
+
+
+def _link_written(
     session: Session, card_id: int, ref_id: str, wait: timedelta
 ) -> tuple[_Outcome, int | None]:
     """Подтвердить пару с ингредиентом строки — в очереди импорта.
@@ -479,32 +508,52 @@ def _confirm_written(
         session.rollback()
 
 
-def _answer(
-    card_id: int,
-    result: FillResult,
-    outcome: _Outcome,
-    ingredient_id: int | None,
-    *,
-    imported: bool,
-) -> Transferred:
+def _ours_on_site(session: Session, card_id: int, name: str, ref_id: str) -> bool:
+    """Пару подтвердить не дали — виден ли на сайте под id строки наш
+    ингредиент: есть, не удалён из листа и называется как карточка. Только
+    чтение, без очереди импорта: подтверждать здесь нечего. База не ответила
+    — «не виден»: утверждать, что он на сайте, нечем."""
+    try:
+        ingredient = links.ingredient_by_legacy_id(session, ref_id)
+        return (
+            ingredient is not None
+            and ingredient.removed_at is None
+            and _same_name(ingredient.name, name)
+        )
+    except SQLAlchemyError as error:
+        log.error(
+            "карточка %s: не проверить, виден ли на сайте id %s, — база не ответила: %s",
+            card_id,
+            ref_id,
+            _first_line(error),
+        )
+        return False
+    finally:
+        session.rollback()
+
+
+def _answer(card_id: int, result: FillResult, pair: _Pair, *, imported: bool) -> Transferred:
     """Ответ человеку — или отказ, если id в строке стоял до нас и не того
     ингредиента.
 
-    id стоял до нас, а после удачного переноса его на сайте нет или у него
-    другое название — строки сдвинуты (409). id записали мы — запись
-    состоялась, ответ удачный, а пара не подтверждена: оговорка и ERROR в лог.
+    Перенос прошёл (``imported``), а под id строки на сайте не наш ингредиент
+    (его нет или у него другое название): id стоял до нас — строки сдвинуты
+    (409); id записали мы — запись состоялась, ответ удачный, а пара не
+    подтверждена: оговорка и ERROR в лог. Наш ингредиент на сайте не виден —
+    всегда оговорка :data:`NOT_IMPORTED`.
     """
     found_in_sheet = result.journal_id is None
+    stranger = pair.outcome == "other" or (pair.outcome == "missing" and imported)
+    if stranger and found_in_sheet:
+        raise _shifted(result.row)
     notes: list[str] = []
     if result.shifted is not None:
         notes.append(_shifted_note(result.shifted))
-    if outcome == "failed":
-        notes.append(PAIR_NOT_CONFIRMED)
-    elif outcome == "missing" and not imported:
+    if not pair.on_site:
         notes.append(NOT_IMPORTED)
-    elif outcome != "linked":
-        if found_in_sheet:
-            raise _shifted(result.row)
+    if pair.outcome == "failed":
+        notes.append(PAIR_NOT_CONFIRMED)
+    if stranger:
         log.error(
             "карточка %s: строка %s листа ING записана (id %s, журнал №%s), а пару не "
             "подтвердить: %s",
@@ -512,24 +561,23 @@ def _answer(
             result.row,
             result.ref_id,
             result.journal_id,
-            "ингредиента нет на сайте" if outcome == "missing" else "на сайте другое название",
+            "ингредиента нет на сайте" if pair.outcome == "missing" else "на сайте другое название",
         )
         notes.append(_other_name_text(result.row, result.ref_id))
-    on_site = imported if outcome == "failed" else outcome in ("linked", "other")
     log.info(
         "карточка %s: в справочнике — строка %s, id %s; пара %s",
         card_id,
         result.row,
         result.ref_id,
-        "подтверждена" if outcome == "linked" else "не подтверждена",
+        "подтверждена" if pair.outcome == "linked" else "не подтверждена",
     )
     return Transferred(
         row=result.row,
         ref_id=result.ref_id,
         already=result.already,
-        imported=on_site,
-        linked=outcome == "linked",
-        ingredient_id=ingredient_id,
+        imported=pair.on_site,
+        linked=pair.outcome == "linked",
+        ingredient_id=pair.ingredient_id,
         message=result.message,
         shifted=result.shifted,
         notes=tuple(notes),

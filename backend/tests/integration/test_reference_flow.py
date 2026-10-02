@@ -27,7 +27,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 
 from kitchen.cards.reference import (
@@ -35,6 +35,7 @@ from kitchen.cards.reference import (
     NOT_A_CANDIDATE,
     NOT_CONFIGURED,
     NOT_IMPORTED,
+    PAIR_NOT_CONFIRMED,
     REFERENCE_BUSY,
     WRITING_CLOSED,
     ReferenceCardNotFoundError,
@@ -86,7 +87,7 @@ from tests.conftest import (
 from tests.fake_sheets import IDS, cards_sheet, kitchen_sheets, row, sheets_client
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from sqlalchemy.orm import Session, sessionmaker
 
@@ -612,6 +613,199 @@ def test_id_typed_by_the_chef_waits_for_the_import(sessions, client) -> None:
         True,
     )
     assert _writes(client) == []
+
+
+# ---------------------------------------------------------------------------
+# imported — «наш ингредиент виден на сайте под этим id»
+# ---------------------------------------------------------------------------
+_OTHER_ON_SITE = (
+    "Пара карточки и ингредиента не подтверждена: на сайте у id 131 другое название или его "
+    "нет — проверьте строку 6 листа ING"
+)
+
+
+class _TransferThen:
+    """Перенос книги кухни в базу — настоящий, а сразу за ним что-то
+    происходит: лист поменяли, воркер занял очередь импорта."""
+
+    def __init__(self, cycle: SyncCycle, then: Callable[[], None]) -> None:
+        self.cycle = cycle
+        self.then = then
+
+    def run(self, *, force=False, books=None):
+        result = self.cycle.run(force=force, books=books)
+        self.then()
+        return result
+
+
+class _FailedTransfer:
+    """Перенос, который упал, не дойдя до базы."""
+
+    def run(self, *, force=False, books=None):
+        raise RuntimeError("Google-таблица не ответила")
+
+
+@pytest.fixture
+def worker(sessions: sessionmaker[Session]) -> Iterator[Callable[[], None]]:
+    """Воркер, который по знаку теста занимает очередь импорта и держит её
+    до конца теста."""
+    held: list[Session] = []
+
+    def take() -> None:
+        session = sessions()
+        session.begin()
+        take_import_lock(session)
+        held.append(session)
+
+    yield take
+    for session in held:
+        session.rollback()
+        session.close()
+
+
+def _change_ingredient(sessions: sessionmaker[Session], legacy_id: str, **values: object) -> None:
+    with sessions.begin() as session:
+        session.execute(
+            update(models.Ingredient)
+            .where(models.Ingredient.legacy_id == legacy_id)
+            .values(**values)
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"name": "Горчица"}, {"removed_at": func.now()}],
+    ids=["other-name", "removed"],
+)
+def test_written_row_but_not_our_ingredient_on_site_is_imported_false(
+    sessions, client, change: dict[str, object]
+) -> None:
+    """Строку записали мы, перенос прошёл, а на сайте под id 131 не наш
+    ингредиент: лист меняли между записью и переносом — у id другое название
+    или его убрали. Наш ингредиент на сайте не виден — ``imported=false``, и
+    оговорка «пока не перенесён» при этом есть всегда."""
+    card = _card(sessions, "Соус Барбекю")
+    books = _TransferThen(
+        _cycle(client, sessions), lambda: _change_ingredient(sessions, "131", **change)
+    )
+
+    with sessions() as session:
+        done = to_reference(session, _filler(client, sessions), books, card.id, FORM, actor_id=None)
+
+    assert (done.row, done.ref_id, done.already) == (6, "131", False)
+    assert (done.imported, done.linked, done.ingredient_id) == (False, False, None)
+    assert done.notes == (NOT_IMPORTED, _OTHER_ON_SITE)
+    assert _card(sessions, "Соус Барбекю").link_confirmed_at is None
+
+
+def test_pair_not_confirmed_but_our_ingredient_on_site_is_imported_true(
+    sessions, client, worker
+) -> None:
+    """Перенос прошёл, а очередь импорта сразу занял воркер — пару подтвердить
+    не дали. Наш ингредиент на сайте виден: ``imported=true``, оговорка —
+    только о паре."""
+    card = _card(sessions, "Соус Барбекю")
+    books = _TransferThen(_cycle(client, sessions), worker)
+
+    with sessions() as session:
+        done = to_reference(
+            session,
+            _filler(client, sessions),
+            books,
+            card.id,
+            FORM,
+            actor_id=None,
+            wait=SHORT_WAIT,
+        )
+
+    assert (done.row, done.ref_id, done.already) == (6, "131", False)
+    assert (done.imported, done.linked, done.ingredient_id) == (True, False, None)
+    assert done.notes == (PAIR_NOT_CONFIRMED,)
+    assert _ingredient(sessions, "131") is not None
+    assert _card(sessions, "Соус Барбекю").link_confirmed_at is None
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"name": "Горчица"}, {"removed_at": func.now()}],
+    ids=["other-name", "removed"],
+)
+def test_pair_not_confirmed_and_not_our_ingredient_on_site_is_imported_false(
+    sessions, client, worker, change: dict[str, object]
+) -> None:
+    """Пару подтвердить не дали, а под id 131 на сайте не наш ингредиент —
+    другое название или убран из листа. «Есть ингредиент с этим id» мало:
+    ``imported=false`` и оговорка «пока не перенесён»."""
+    card = _card(sessions, "Соус Барбекю")
+
+    def meanwhile() -> None:
+        _change_ingredient(sessions, "131", **change)
+        worker()
+
+    books = _TransferThen(_cycle(client, sessions), meanwhile)
+
+    with sessions() as session:
+        done = to_reference(
+            session,
+            _filler(client, sessions),
+            books,
+            card.id,
+            FORM,
+            actor_id=None,
+            wait=SHORT_WAIT,
+        )
+
+    assert (done.imported, done.linked, done.ingredient_id) == (False, False, None)
+    assert done.notes == (NOT_IMPORTED, PAIR_NOT_CONFIRMED)
+
+
+def test_pair_not_confirmed_and_transfer_failed_is_imported_false(sessions, client, worker) -> None:
+    """Перенос упал, и пару подтвердить не дали: ингредиента на сайте нет —
+    ``imported=false`` и оговорка «пока не перенесён» вместе с «нажмите ещё
+    раз»."""
+    card = _card(sessions, "Соус Барбекю")
+    worker()
+
+    with sessions() as session:
+        done = to_reference(
+            session,
+            _filler(client, sessions),
+            _FailedTransfer(),
+            card.id,
+            FORM,
+            actor_id=None,
+            wait=SHORT_WAIT,
+        )
+
+    assert (done.row, done.ref_id, done.already) == (6, "131", False)
+    assert (done.imported, done.linked, done.ingredient_id) == (False, False, None)
+    assert done.notes == (NOT_IMPORTED, PAIR_NOT_CONFIRMED)
+    assert _ingredient(sessions, "131") is None
+
+
+def test_ingredient_long_on_site_is_imported_even_if_this_transfer_failed(
+    sessions, client, worker
+) -> None:
+    """«Уже в справочнике»: «Кетчуп» с id 129 давно на сайте. Перенос сейчас
+    упал, и пару подтвердить не дали, — но наш ингредиент под этим id виден:
+    ``imported=true``, «пока не перенесён» было бы неправдой."""
+    card = _card(sessions, "Кетчуп")
+    worker()
+
+    with sessions() as session:
+        done = to_reference(
+            session,
+            _filler(client, sessions),
+            _FailedTransfer(),
+            card.id,
+            FORM,
+            actor_id=None,
+            wait=SHORT_WAIT,
+        )
+
+    assert (done.row, done.ref_id, done.already) == (4, "129", True)
+    assert (done.imported, done.linked) == (True, False)
+    assert done.notes == (PAIR_NOT_CONFIRMED,)
 
 
 # ---------------------------------------------------------------------------
