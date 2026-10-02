@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
@@ -20,24 +21,39 @@ const SVERKA = {
       name: 'Булочка для датского хот дога',
       link_status: 'ambiguous',
       supplier: 'Хз',
+      approved: true,
       candidates: [
         { ingredient_id: 34, legacy_id: '34', name: 'Булочка для датского хот дога', score: null },
         { ingredient_id: 121, legacy_id: '121', name: 'Булочка для датского хот дога', score: null },
       ],
+      actions: ['confirm', 'to_reference'],
     },
     {
       card_id: 25,
       name: 'Корж для римской пиццы',
       link_status: 'candidate',
       supplier: 'Папа наполи',
-      candidates: [],
+      approved: true,
+      candidates: [{ ingredient_id: 34, legacy_id: '34', name: 'Корж для пиццы', score: 0.85 }],
+      actions: ['confirm', 'to_reference'],
     },
     {
       card_id: 24,
       name: 'Оснвова для пиццы круглая , неаполитанская.',
       link_status: 'orphan',
       supplier: 'Папа наполи',
+      approved: true,
       candidates: [],
+      actions: ['to_reference'],
+    },
+    {
+      card_id: 26,
+      name: 'Тесто слоёное',
+      link_status: 'orphan',
+      supplier: 'Метро',
+      approved: false,
+      candidates: [],
+      actions: [],
     },
   ],
 }
@@ -139,26 +155,35 @@ test('грязные данные показываются как есть', asy
   expect(screen.getByText('Хз')).toBeInTheDocument()
 })
 
-test('действия обозначены, но объявлены недоступными', async () => {
+test('недоступное действие объявлено: «Это он» ждёт выбора, несогласованной — пояснение', async () => {
+  // «Это он» без выбранного варианта подтвердил бы «не глядя» — кнопка ждёт
+  // выбора. Карточке не «Да» в справочник нельзя — вместо кнопки сказано
+  // почему, а не пустое место.
   narisovat()
-  await screen.findByText('101')
-  const knopka = screen.getAllByRole('button', { name: /связать/i })[0]!
+  const gruppa = await screen.findByTestId('kartochka-7')
+  const knopka = within(gruppa).getByRole('button', { name: 'Это он' })
   expect(knopka).toBeDisabled()
-  expect(screen.getAllByText(/появится в следующей фазе/i).length).toBeGreaterThan(0)
+  await userEvent.click(within(gruppa).getAllByRole('radio')[0]!)
+  expect(knopka).toBeEnabled()
+
+  const nesoglasovannaya = screen.getByTestId('kartochka-26')
+  expect(within(nesoglasovannaya).queryByRole('button')).toBe(null)
+  expect(within(nesoglasovannaya).getByText(/в справочник попадают только «Да»/)).toBeInTheDocument()
 })
 
-test('у каждой группы свои действия, как в разделе 8 спеки', async () => {
-  // «Похожее» подтверждают или отвергают, «пары нет» — заводят или
-  // откладывают. Одинаковые кнопки во всех группах стёрли бы разницу,
-  // ради которой группы и стоят врозь.
+test('у каждой группы свои действия, как в решении 7 спеки', async () => {
+  // Спорную пару подтверждают («Это он») или признают новой («Это новый»),
+  // карточку без пары добавляют в справочник. Одинаковые кнопки во всех
+  // группах стёрли бы разницу, ради которой группы и стоят врозь.
   narisovat()
   const pohozhee = await screen.findByTestId('kartochka-25')
-  expect(within(pohozhee).getByRole('button', { name: 'Связать' })).toBeDisabled()
-  expect(within(pohozhee).getByRole('button', { name: 'Отвергнуть' })).toBeDisabled()
+  expect(within(pohozhee).getByRole('button', { name: 'Это он' })).toBeInTheDocument()
+  expect(within(pohozhee).getByRole('button', { name: 'Это новый' })).toBeEnabled()
+  expect(within(pohozhee).queryByRole('button', { name: 'Добавить в справочник' })).toBe(null)
 
   const sirota = screen.getByTestId('kartochka-24')
-  expect(within(sirota).getByRole('button', { name: 'Завести в справочник' })).toBeDisabled()
-  expect(within(sirota).getByRole('button', { name: 'Отложить' })).toBeDisabled()
+  expect(within(sirota).getByRole('button', { name: 'Добавить в справочник' })).toBeEnabled()
+  expect(within(sirota).queryByRole('button', { name: 'Это он' })).toBe(null)
 })
 
 test('справочник не загрузился — экран говорит об этом, а не молчит', async () => {
