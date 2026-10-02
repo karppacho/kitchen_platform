@@ -30,7 +30,7 @@ test('подсказка у поля потерь — правило и текс
 })
 
 test('сумма потерь 100 % и больше — подсказка у итога, ниже — нет', () => {
-  const VNE = 'Сумма потерь 100 % и больше — себестоимость станет нулевой, проверьте'
+  const VNE = 'Сумма потерь 100 % и больше — проверьте цифры'
   expect(podskazkaSummy('99.99')).toBeNull()
   expect(podskazkaSummy('0')).toBeNull()
   expect(podskazkaSummy('100')).toBe(VNE)

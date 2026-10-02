@@ -450,7 +450,7 @@ test('форма: потери по умолчанию 0, итог считае�
   expect(zapisat(forma)).toBeEnabled()
 })
 
-const SUMMA_VNE = 'Сумма потерь 100 % и больше — себестоимость станет нулевой, проверьте'
+const SUMMA_VNE = 'Сумма потерь 100 % и больше — проверьте цифры'
 
 test('форма: сумма потерь 100 % и больше — подсказка у итога, решает человек', async () => {
   narisovat()
@@ -468,11 +468,11 @@ test('форма: сумма потерь 100 % и больше — подска
   expect(zapisat(forma)).toBeEnabled()
 })
 
-test('форма: под ценами сказано, что пустое поле ячейку таблицы не меняет', async () => {
+test('форма: под ценами сказано, что пустая цена ячейку таблицы не меняет', async () => {
   otvetyPredprosmotra = [() => HttpResponse.json(stroka({ formulas: ['P'] }))]
   narisovat()
   const forma = await otkrytFormu()
-  expect(within(forma).getByText('Пустое поле не меняет ячейку таблицы')).toBeInTheDocument()
+  expect(within(forma).getByText('Пустая цена не меняет ячейку таблицы')).toBeInTheDocument()
 })
 
 test('предпросмотр не ответил за 60 с — «не ответил вовремя», а не «нет связи»', async () => {
@@ -742,7 +742,8 @@ test('правки переживают «ещё не появилась»: ст
 
 const PARA_PODTVERZHDENA = 'Пара уже подтверждена — обновите страницу'
 
-test('предпросмотр: пара уже подтверждена — без полей и «Записать», текст сервера', async () => {
+test('предпросмотр: пара уже подтверждена — без полей, «Записать» и «Проверить ещё раз»', async () => {
+  // Проверка строки ничего не изменит: пару уже подтвердил человек.
   otvetyPredprosmotra = [
     () =>
       HttpResponse.json(stroka({ ready: false, reason: 'confirmed', message: PARA_PODTVERZHDENA })),
@@ -752,9 +753,10 @@ test('предпросмотр: пара уже подтверждена — б�
   expect(within(forma).getByText(PARA_PODTVERZHDENA)).toBeInTheDocument()
   expect(within(forma).queryByLabelText('Короткое имя для iiko')).not.toBeInTheDocument()
   expect(within(forma).queryByRole('button', { name: 'Записать в справочник' })).toBe(null)
+  expect(within(forma).queryByRole('button', { name: 'Проверить ещё раз' })).toBe(null)
 })
 
-test('запись: пара уже подтверждена (409) — текст сервера, список перечитан, «Записать» ждёт', async () => {
+test('запись: пара уже подтверждена (409) — текст, список перечитан, поля остаются, кнопок нет', async () => {
   otvetyPerenosa = [
     () =>
       HttpResponse.json(
@@ -769,7 +771,9 @@ test('запись: пара уже подтверждена (409) — текс�
 
   expect(await within(forma).findByRole('alert')).toHaveTextContent(PARA_PODTVERZHDENA)
   await waitFor(() => expect(chteniyaSvodki).toBe(2))
+  expect(pole(forma, 'Короткое имя для iiko')).toHaveValue('Сырный')
   expect(zapisat(forma)).toBeDisabled()
+  expect(within(forma).queryByRole('button', { name: 'Проверить ещё раз' })).toBe(null)
 })
 
 test('«Это он»: пара уже подтверждена другим (409) — текст сервера, список перечитан', async () => {
