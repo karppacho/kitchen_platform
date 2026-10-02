@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from kitchen.cards import drafts, recognize, submit
+from kitchen.cards import drafts, recognize, reference, submit
 from kitchen.config import Settings
 from kitchen.db.models import CardDraft
 from kitchen.domain.cards import TEXT_LIMITS
@@ -466,21 +466,26 @@ def photo(
 ERROR_STATUS: dict[type[drafts.CardsError], int] = {
     drafts.DraftNotFoundError: status.HTTP_404_NOT_FOUND,
     drafts.PhotoMissingError: status.HTTP_404_NOT_FOUND,
+    reference.ReferenceCardNotFoundError: status.HTTP_404_NOT_FOUND,
     drafts.DraftExistsError: status.HTTP_409_CONFLICT,
     drafts.PhotoNeedsNamesError: status.HTTP_409_CONFLICT,
     drafts.DraftConflictError: status.HTTP_409_CONFLICT,
     submit.DuplicateCardError: status.HTTP_409_CONFLICT,
+    reference.ReferenceConflictError: status.HTTP_409_CONFLICT,
     drafts.PhotoTooLargeError: status.HTTP_413_CONTENT_TOO_LARGE,
     drafts.NotJpegError: status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
     drafts.DraftFieldError: status.HTTP_422_UNPROCESSABLE_CONTENT,
     submit.MissingFieldsError: status.HTTP_422_UNPROCESSABLE_CONTENT,
+    reference.ReferenceFormInvalidError: status.HTTP_422_UNPROCESSABLE_CONTENT,
     recognize.RecognitionLimitError: status.HTTP_429_TOO_MANY_REQUESTS,
     drafts.StorageError: status.HTTP_502_BAD_GATEWAY,
     recognize.RecognitionFailedError: status.HTTP_502_BAD_GATEWAY,
     submit.SubmitFailedError: status.HTTP_502_BAD_GATEWAY,
+    reference.ReferenceFailedError: status.HTTP_502_BAD_GATEWAY,
     drafts.StorageNotConfiguredError: status.HTTP_503_SERVICE_UNAVAILABLE,
     recognize.RecognitionNotConfiguredError: status.HTTP_503_SERVICE_UNAVAILABLE,
     submit.SubmitUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    reference.ReferenceUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
 }
 """Отказ слоя приложения → код ответа. Новый отказ без кода — тест краснеет."""
 

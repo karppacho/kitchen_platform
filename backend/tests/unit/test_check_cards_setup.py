@@ -23,6 +23,7 @@ import requests
 from kitchen.config import Settings
 from kitchen.llm.polza import PolzaClient, polza_from_settings
 from kitchen.sync.drive import INSPECT_SCOPE, SCOPES, DriveClient
+from kitchen.sync.ownership import WRITE_OPEN
 from tests.fake_drive import CHEF, FOLDER_ID, ROBOT, SHEET_MIME, FakeDrive, FakeFile
 from tests.fake_polza import (
     BASE_URL,
@@ -58,10 +59,11 @@ def _key(path: Path, email: str, encoding: str = "utf-8") -> Path:
 
 
 def _drive() -> FakeDrive:
-    """Drive с закрытой папкой и двумя книгами: карточки можно править, кухню — нет."""
+    """Drive с закрытой папкой и двумя книгами, обе можно править: платформа
+    пишет в «Лист1» карточек и в ручные колонки ING кухни (ADR-0003)."""
     fake = FakeDrive()
     fake.add(FakeFile("cards-book", "Карточки", SHEET_MIME, can_edit=True))
-    fake.add(FakeFile("kitchen-book", "Кухня", SHEET_MIME, can_edit=False))
+    fake.add(FakeFile("kitchen-book", "Кухня", SHEET_MIME, can_edit=True))
     return fake
 
 
@@ -488,18 +490,33 @@ def test_cards_book_must_be_editable(setup: Setup, capsys: pytest.CaptureFixture
     assert "Редактор" in out
 
 
-def test_kitchen_book_editable_is_only_a_warning(
-    setup: Setup, capsys: pytest.CaptureFixture[str]
+def test_kitchen_book_must_be_editable(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:
+    """Вторая ступень ADR-0003: платформа пишет в ручные колонки ING, и без
+    права редактирования на книге кухни «Добавить в справочник» не сработает."""
+    setup.drive.files["kitchen-book"].can_edit = False
+
+    code, out = setup.run(capsys)
+
+    assert code == 1
+    assert "книга кухни: нет права редактирования" in out
+    assert "Редактор" in out
+
+
+def test_closed_book_editable_is_only_a_warning(
+    setup: Setup, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Книга кухни закрыта для записи — право редактирования ей не нужно.
-    Лишнее право — предупреждение, не ошибка."""
-    setup.drive.files["kitchen-book"].can_edit = True
+    """Книга, закрытая для записи, право редактирования не требует. Лишнее
+    право — предупреждение, не ошибка. Скрипт берёт открытые книги из
+    ворот записи, поэтому закрытая кухня здесь — подменённые ворота."""
+    monkeypatch.setattr(
+        check_cards_setup, "WRITE_OPEN", {"ingredient_cards": WRITE_OPEN["ingredient_cards"]}
+    )
 
     code, out = setup.run(capsys)
 
     assert code == 0
     assert "ВНИМАНИЕ" in out
-    assert "книга кухни" in out
+    assert "книга кухни: есть право редактирования, а писать сюда платформе нельзя" in out
 
 
 def test_books_not_configured(setup: Setup, capsys: pytest.CaptureFixture[str]) -> None:

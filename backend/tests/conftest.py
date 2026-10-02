@@ -18,14 +18,18 @@ import itertools
 import json
 import re
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
 import pytest
 import requests
 from gspread.exceptions import APIError
 
+from kitchen.domain.cards import APPROVED, REJECTED
+from kitchen.sync import specs
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Mapping, Sequence
 
     from kitchen.sync.client import Cells
 
@@ -43,20 +47,45 @@ class WorksheetNotFound(Exception):  # noqa: N818
 
 @dataclass(frozen=True, slots=True)
 class Formula:
-    """Формула в ячейке. Появляется только от записи ``USER_ENTERED``.
+    """Формула в ячейке: от записи ``USER_ENTERED`` или в листе, который
+    собрал тест (формулы шефа в ING).
 
-    Фальшивка формул не вычисляет и при чтении отдаёт :data:`UNEVALUATED`:
-    записанная формула видна при сверке, а не проходит молча.
+    Фальшивка формул не вычисляет. Значение формулы — ``value``, если его
+    задал тест: так выглядит готовый лист шефа, где «=SUM(Q7+R7+S7)» уже
+    показывает «0%». Без него при чтении — :data:`UNEVALUATED`: записанная
+    формула видна при сверке, а не проходит молча. В FORMULA-чтении видна
+    сама формула, ``text``.
     """
 
     text: str
+    value: str | int | float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Spill:
+    """Ячейка, которую заполнила формула-массив из другой ячейки, — вывод
+    ``QUERY`` в листе ING.
+
+    Своего содержимого у неё нет: значение видно в FORMATTED и UNFORMATTED, а
+    в FORMULA-чтении ячейка пуста. Запись поверх неё в Google ломает формулу
+    у всего вывода (#REF!); фальшивка этого не моделирует и такую запись
+    отклоняет AssertionError. Очистка её не трогает: своего значения, которое
+    можно стереть, у неё нет.
+    """
+
+    value: str | int | float
 
 
 UNEVALUATED = "#ERROR!"
-"""Что фальшивка читает из ячейки с формулой."""
+"""Что фальшивка читает из ячейки с формулой без заданного значения."""
 
-Cell = str | int | float | Formula
+Cell = str | int | float | Formula | Spill
 """Содержимое ячейки фальшивого листа. Пустая ячейка — пустая строка."""
+
+FORMATS = ("0%", "0.00%", ";;;")
+"""Числовые форматы, которые фальшивка показывает в FORMATTED-чтении:
+процент целым и с двумя знаками — так оформлены потери в ING, — и «;;;»,
+который прячет значение целиком. Прочие числа — как есть, с запятой."""
 
 _SHEET_IDS = itertools.count(1001)
 """Числовые id листов (sheetId) — разные у всех фальшивых листов."""
@@ -79,15 +108,21 @@ class FakeWorksheet:
     ``row_count`` — снимок, как в gspread: у этого объекта — на момент
     создания, у листа из ``worksheet()``/``worksheets()`` — на момент
     открытия (см. :class:`OpenedWorksheet`).
+
+    ``formats`` — числовой формат ячеек (:data:`FORMATS`) по адресам A1 —
+    ячейке «Q7» или прямоугольнику «Q2:S10». Формат принадлежит ячейке, а не
+    значению: запись и очистка его не меняют, вставка строк сдвигает его
+    вместе со строками — как у Google.
     """
 
     def __init__(
         self,
-        values: Cells,
+        values: Sequence[Sequence[Cell]],
         title: str = "",
         *,
         row_count: int | None = None,
         col_count: int | None = None,
+        formats: Mapping[str, str] | None = None,
     ) -> None:
         self._cells: list[list[Cell]] = [list(row) for row in values]
         self.title = title
@@ -99,27 +134,67 @@ class FakeWorksheet:
         assert self._grid_rows >= len(values), "строки листа не влезают в его сетку"
         assert self._grid_cols >= width, "колонки листа не влезают в его сетку"
         self.row_count = self._grid_rows
+        self._formats: dict[tuple[int, int], str] = {}
+        for where, pattern in (formats or {}).items():
+            self.set_format(where, pattern)
 
     def get_all_values(self) -> Cells:
         self.reads += 1
-        return [_trim([_formatted(cell) for cell in row]) for row in self._cells]
+        return [
+            _trim([_formatted(cell, self._formats.get((r, c))) for c, cell in enumerate(row)])
+            for r, row in enumerate(self._cells)
+        ]
+
+    # --- для тестов: мимо Sheets API, запросов не добавляет ------------------
+    def cell(self, where: str) -> Cell:
+        """Содержимое ячейки «L7» как есть: формула — :class:`Formula`, вывод
+        QUERY — :class:`Spill`."""
+        parsed = _parse_cells(where)
+        assert parsed is not None and parsed[1], f"ячейка — это «L7», а не «{where}»"
+        box = parsed[0]
+        return self._at(box.top, box.left)
+
+    def put(self, where: str, cell: Cell) -> None:
+        """Положить в ячейку «L7» что угодно — формулу, вывод QUERY, число:
+        так тест собирает лист, каким его оставил шеф."""
+        parsed = _parse_cells(where)
+        assert parsed is not None and parsed[1], f"ячейка — это «L7», а не «{where}»"
+        box = parsed[0]
+        self._put(box.top, box.left, cell)
+
+    def set_format(self, where: str, pattern: str | None) -> None:
+        """Оформить ячейку или прямоугольник; ``None`` — снять формат."""
+        assert pattern is None or pattern in FORMATS, f"фальшивка не знает формат «{pattern}»"
+        parsed = _parse_cells(where)
+        assert parsed is not None, f"адрес — «Q7» или «Q2:S10», а не «{where}»"
+        box = parsed[0]
+        for r in range(box.top, box.bottom + 1):
+            for c in range(box.left, box.right + 1):
+                if pattern is None:
+                    self._formats.pop((r, c), None)
+                else:
+                    self._formats[(r, c)] = pattern
 
     def _open(self) -> OpenedWorksheet:
         """Лист открыли заново: новый объект со свежим снимком свойств."""
         return OpenedWorksheet(self)
 
-    def _read(self, box: _Box | None, render: Callable[[Cell], object]) -> list[list[object]]:
+    def _at(self, row: int, column: int) -> Cell:
+        line = self._cells[row] if row < len(self._cells) else []
+        return line[column] if column < len(line) else ""
+
+    def _read(
+        self, box: _Box | None, render: Callable[[Cell, str | None], object]
+    ) -> list[list[object]]:
         """Значения прямоугольника (или всего листа) так, как их отдаёт Google:
         без хвостовых пустых ячеек в строке и без пустых строк в конце."""
         rows: list[list[object]] = []
         top = 0 if box is None else box.top
         bottom = len(self._cells) if box is None else min(box.bottom + 1, len(self._cells))
-        for line in self._cells[top:bottom]:
-            if box is None:
-                cells = line
-            else:
-                cells = [line[c] if c < len(line) else "" for c in range(box.left, box.right + 1)]
-            rows.append(_trim([render(cell) for cell in cells]))
+        for r in range(top, bottom):
+            line = self._cells[r]
+            columns = range(len(line)) if box is None else range(box.left, box.right + 1)
+            rows.append(_trim([render(self._at(r, c), self._formats.get((r, c))) for c in columns]))
         while rows and not rows[-1]:
             rows.pop()
         return rows
@@ -135,15 +210,77 @@ class FakeWorksheet:
     def _clear(self, box: _Box | None) -> None:
         for r, line in enumerate(self._cells):
             for c in range(len(line)):
-                if box is None or (box.top <= r <= box.bottom and box.left <= c <= box.right):
+                inside = box is None or (box.top <= r <= box.bottom and box.left <= c <= box.right)
+                if inside and not isinstance(line[c], Spill):
                     line[c] = ""
 
     def _insert_rows(self, index: int, count: int) -> None:
         """Вставить ``count`` пустых строк перед строкой с индексом ``index``
-        (с нуля): всё ниже съезжает, сетка растёт — как у Google."""
-        if index < len(self._cells):
-            self._cells[index:index] = [[] for _ in range(count)]
+        (с нуля): всё ниже съезжает вместе с оформлением, сетка растёт — как
+        у Google. Кроме вывода формулы-массива (:meth:`_move_rows`)."""
+        self._move_rows(index, count)
         self._grid_rows += count
+
+    def _delete_rows(self, index: int, count: int) -> None:
+        """Удалить ``count`` строк, начиная с индекса ``index`` (с нуля): всё
+        ниже подтягивается вверх вместе с оформлением, сетка сжимается."""
+        self._move_rows(index, -count)
+        self._grid_rows -= count
+
+    def _array_anchor(self) -> int | None:
+        """Индекс строки якоря формулы-массива: формула прямо над верхней
+        ячейкой вывода в её колонке или сама эта строка (вывод в соседних
+        колонках начинается на строке якоря). Вывода нет — ``None``."""
+        tops: dict[int, int] = {}
+        for r, line in enumerate(self._cells):
+            for c, cell in enumerate(line):
+                if isinstance(cell, Spill):
+                    tops.setdefault(c, r)
+        if not tops:
+            return None
+        return min(r - 1 if isinstance(self._at(r - 1, c), Formula) else r for c, r in tops.items())
+
+    def _move_rows(self, index: int, shift: int) -> None:
+        """Сдвинуть строки от индекса ``index`` на ``shift`` (вниз — вставка,
+        вверх — удаление строк ``index … index−shift−1``).
+
+        Как в Google: вывод формулы-массива (:class:`Spill`) привязан к её
+        якорю. Вставка или удаление ниже якоря сдвигает ручные ячейки и
+        формулы строк, а вывод остаётся на своих номерах строк. Вставка выше
+        якоря сдвигает и якорь, и весь вывод. Ручная ячейка, съехавшая на
+        место вывода, в Google сломала бы формулу (#REF!) — фальшивка этого
+        не моделирует: AssertionError.
+        """
+        anchor = self._array_anchor()
+        deleted = range(index, index - shift) if shift < 0 else range(0)
+        if anchor is None or index <= anchor:
+            # Вывода нет или правка выше якоря — съезжает всё.
+            if shift < 0:
+                del self._cells[index : index - shift]
+            elif index < len(self._cells):
+                self._cells[index:index] = [[] for _ in range(shift)]
+        else:
+            placed: dict[tuple[int, int], Cell] = {}
+            moving: list[tuple[int, int, Cell]] = []
+            for r, line in enumerate(self._cells):
+                for c, cell in enumerate(line):
+                    if isinstance(cell, Spill):
+                        placed[(r, c)] = cell
+                    elif r not in deleted:
+                        moving.append((r + shift if r >= index else r, c, cell))
+            for r, c, cell in moving:
+                if (r, c) in placed:
+                    assert cell == "", f"ручная ячейка съехала на вывод QUERY: {cell!r}"
+                elif cell != "":
+                    placed[(r, c)] = cell
+            self._cells = [[] for _ in range(max(len(self._cells) + shift, 0))]
+            for (r, c), cell in sorted(placed.items()):
+                self._put(r, c, cell)
+        self._formats = {
+            (r + shift if r >= index else r, c): pattern
+            for (r, c), pattern in self._formats.items()
+            if r not in deleted
+        }
 
 
 class OpenedWorksheet:
@@ -214,10 +351,19 @@ class FakeSpreadsheet:
 
     * диапазон без кавычек вокруг имени листа — отказ всегда: Google простое
       имя понял бы, но «Расчётка меню» с пробелом — уже нет;
-    * формулы не вычисляются — читаются как «#ERROR!»;
-    * лист русский, но формата колонок фальшивка не знает: FORMATTED_VALUE
-      пишет число как есть, с запятой («12,5»), а в жизни колонка с форматом
-      покажет «12,50», округлит или разобьёт разряды («1 030»);
+    * формулы не вычисляются — читаются как «#ERROR!» или как значение,
+      которое задал тест (:class:`Formula`);
+    * при вставке и удалении строк формулы переезжают вместе со строками, но
+      их относительные ссылки не переписываются: «=M5/5», съехав в строку 6,
+      так и ссылается на 5-ю (Google переписал бы на «=M6/5»). Сдвиг строк
+      писатель справочника ловит и без этого — по ручным ячейкам соседей;
+    * запись поверх вывода формулы-массива (:class:`Spill`) — AssertionError:
+      в Google она сломала бы формулу у всего вывода, а фальшивка этого не
+      моделирует;
+    * лист русский, но из форматов фальшивка знает только :data:`FORMATS`:
+      без формата FORMATTED_VALUE пишет число как есть, с запятой («12,5»), а
+      в жизни колонка с форматом покажет «12,50», округлит или разобьёт
+      разряды («1 030»);
     * USER_ENTERED понимает целые и числа с запятой; то, что Google
       угадал бы как дату, процент, дробь с точкой или число с пробелами
       («12.5», «5%», «01.02.2026», «1 030»), — AssertionError, а не текст;
@@ -300,6 +446,19 @@ class FakeSpreadsheet:
         sheet = self._sheets[title]
         assert above <= sheet._grid_rows, f"строки {above} нет в сетке листа «{title}»"
         self._order(moment, lambda: sheet._insert_rows(above - 1, count))
+
+    def chef_deletes_rows(self, title: str, row: int, count: int = 1, *, moment: str) -> None:
+        """Шеф удалил ``count`` строк, начиная со строки ``row`` листа
+        ``title``, — в окне ``moment``. Всё ниже подтягивается вверх, сетка
+        сжимается; вывод формулы-массива ниже её якоря остаётся на своих
+        номерах строк — как в Google."""
+        assert moment in _MOMENTS, f"шеф не действует в окне «{moment}»: есть {_MOMENTS}"
+        assert title in self._sheets, f"листа «{title}» нет"
+        assert row >= 1, f"строки считаются с единицы, а не «{row}»"
+        assert count >= 1, f"удалить можно хотя бы одну строку, а не «{count}»"
+        sheet = self._sheets[title]
+        assert row + count - 1 <= sheet._grid_rows, f"строк {row}… нет в сетке листа «{title}»"
+        self._order(moment, lambda: sheet._delete_rows(row - 1, count))
 
     def _order(self, moment: str, action: Callable[[], None]) -> None:
         if moment == "now":
@@ -416,6 +575,11 @@ class FakeSpreadsheet:
                 for c, value in enumerate(row)
                 if value is not None
             ]
+            for target, r, c, _ in cells:
+                assert not isinstance(target._at(r, c), Spill), (
+                    f"запись поверх вывода QUERY в «{text}»: в Google формула сломалась бы "
+                    "у всего вывода (#REF!)"
+                )
             planned.extend(cells)
             responses.append({"updatedRange": text, "updatedCells": len(cells)})
 
@@ -674,24 +838,47 @@ def _from_input(value: object, option: str) -> Cell:
     return value
 
 
-def _formatted(cell: Cell) -> str:
-    """FORMATTED_VALUE — как видит шеф: число с запятой, лист русский."""
-    if isinstance(cell, str):
-        return cell
+def _formatted(cell: Cell, pattern: str | None = None) -> str:
+    """FORMATTED_VALUE — как видит шеф: число с запятой, лист русский;
+    проценты и «;;;» — по формату ячейки (:data:`FORMATS`)."""
     value = _unformatted(cell)
-    return value if isinstance(value, str) else str(value).replace(".", ",")
+    if pattern == ";;;":
+        return ""
+    if isinstance(value, str):
+        return value
+    if pattern in ("0%", "0.00%"):
+        places = 0 if pattern == "0%" else 2
+        share = (Decimal(repr(value)) * 100).quantize(
+            Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP
+        )
+        return f"{share}%".replace(".", ",")
+    return str(value).replace(".", ",")
 
 
-def _unformatted(cell: Cell) -> str | int | float:
+def _unformatted(cell: Cell, pattern: str | None = None) -> str | int | float:
     """UNFORMATTED_VALUE — число числом; целое Google отдаёт без «.0»."""
     if isinstance(cell, Formula):
-        return UNEVALUATED
-    if isinstance(cell, float) and cell.is_integer():
-        return int(cell)
-    return cell
+        value: str | int | float = UNEVALUATED if cell.value is None else cell.value
+    elif isinstance(cell, Spill):
+        value = cell.value
+    else:
+        value = cell
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
 
 
-def _renderer(params: Mapping[str, str]) -> Callable[[Cell], object]:
+def _formula(cell: Cell, pattern: str | None = None) -> str | int | float:
+    """FORMULA — формула текстом, значения без оформления (числа числами), а
+    ячейка, которую заполнила чужая формула-массив, пуста."""
+    if isinstance(cell, Formula):
+        return cell.text
+    if isinstance(cell, Spill):
+        return ""
+    return _unformatted(cell)
+
+
+def _renderer(params: Mapping[str, str]) -> Callable[[Cell, str | None], object]:
     unknown = set(params) - {"valueRenderOption", "majorDimension"}
     assert not unknown, f"фальшивка не моделирует параметры чтения {sorted(unknown)}"
     assert params.get("majorDimension", "ROWS") == "ROWS", "фальшивка читает только строками"
@@ -700,6 +887,8 @@ def _renderer(params: Mapping[str, str]) -> Callable[[Cell], object]:
         return _formatted
     if option == "UNFORMATTED_VALUE":
         return _unformatted
+    if option == "FORMULA":
+        return _formula
     raise AssertionError(f"фальшивка не моделирует valueRenderOption={option}")
 
 
@@ -709,6 +898,163 @@ def _trim(row: list[object]) -> list[object]:
     while end and row[end - 1] == "":
         end -= 1
     return row[:end]
+
+
+# ---------------------------------------------------------------------------
+# Книга кухни с листом ING и книга карточек — как настоящие (этап 6)
+# ---------------------------------------------------------------------------
+QUERY_B = "=QUERY('Импорт карточек'!A3:V;\"select A, B, C where V = 'Да'\";0)"
+"""Первая формула зоны: категория, название и полное название каждой
+карточки «Да» — в B–D."""
+
+QUERY_F = "=QUERY('Импорт карточек'!A3:V;\"select E, G, H, I, J, K where V = 'Да'\";0)"
+"""Вторая: изготовитель, состав и КБЖУ — в F–K."""
+
+
+@dataclass(frozen=True, slots=True)
+class IngLine:
+    """Карточка «Да» и её строка в зоне QUERY листа ING."""
+
+    name: str
+    ref_id: int | None = None
+    """id в A. ``None`` — строка ждёт переноса: заготовка шефа с умолчаниями."""
+    l_formula: bool = False
+    """L — формула от M, как в части строк настоящего листа."""
+    category: str = "Соусы"
+
+
+ING_OLD: tuple[tuple[int, str], ...] = ((1, "Лук"), (99, "Сахар"))
+"""Старые строки над якорем — id и название, всё вписано руками. «Сахар» —
+тёзка карточки из зоны QUERY: по названию он совпал бы, но это не вывод
+формулы."""
+
+ING_ZONE: tuple[IngLine, ...] = (
+    IngLine("Кетчуп", ref_id=129),
+    IngLine("Моцарелла", ref_id=130, l_formula=True, category="Сыры"),
+    IngLine("Соус Барбекю"),
+    IngLine("Соус Сырный", l_formula=True),
+    IngLine("Сахар", category="Бакалея"),
+)
+"""Зона QUERY с 4-й строки: две перенесённые карточки и три, ждущие переноса."""
+
+CARDS_ORDER: tuple[tuple[str, str], ...] = (
+    ("Кетчуп", APPROVED),
+    ("Майонез", REJECTED),
+    ("Моцарелла", APPROVED),
+    ("Соус Барбекю", APPROVED),
+    ("Соус Сырный", APPROVED),
+    ("Сахар", APPROVED),
+    ("Горчица", ""),
+)
+"""Книга карточек: название и «Согласован» по строкам с 3-й. Карточки «Да» по
+порядку — ровно зона QUERY листа ING."""
+
+_TEMPLATE: dict[str, Cell] = {"L": 0, "M": 0, "N": "кг", "Q": 0, "R": 0, "S": 0, "T": "активный"}
+"""Умолчания строки-заготовки: A и E пусты, P — формула."""
+
+_PERCENT = {"P": "0%", "Q": "0.00%", "R": "0%", "S": "0%"}
+"""Потери в ING оформлены процентами: в ячейке доля, шеф видит «5,00%»."""
+
+
+def ing_sheet(
+    zone: Sequence[IngLine] = ING_ZONE,
+    *,
+    old: Sequence[tuple[int, str]] = ING_OLD,
+    templates: int = 2,
+    row_count: int | None = None,
+) -> FakeWorksheet:
+    """Лист ING, устроенный как настоящий.
+
+    * Шапка; старые строки, вписанные руками целиком.
+    * Зона QUERY: в B строки якоря — :data:`QUERY_B`, в F — :data:`QUERY_F`;
+      B–D и F–K каждой карточки — их вывод: виден в FORMATTED, пуст в
+      FORMULA. У перенесённой карточки ручные A, E, L, M, N, Q–T заполнены;
+      у ждущей — заготовка (:data:`_TEMPLATE`). L — формула от M у отмеченных.
+    * Ниже — заготовки без карточек.
+    * P — формула ``SUM(Q+R+S)`` во всех строках; P, Q, R, S оформлены
+      процентами. id в FORMULA- и UNFORMATTED-чтении — числа.
+
+    ``row_count`` — строк в сетке листа (по умолчанию 1000): равное числу
+    строк — последняя строка листа на краю сетки.
+    """
+    lines: list[list[Cell]] = [[c.expected_header for c in specs.INGREDIENTS.columns]]
+    for ref_id, name in old:
+        lines.append(
+            _ing_line(
+                len(lines) + 1,
+                {"A": ref_id, "B": "Овощи", "C": name, "D": name, "E": name, "F": "Ферма"},
+                {"H": 1, "I": 0.5, "J": 8, "K": 40, "L": 120, "M": 1200, "N": "кг"},
+                {"Q": 0.05, "R": 0.1, "S": 0, "T": "активный"},
+            )
+        )
+    for offset, line in enumerate(zone):
+        number = len(lines) + 1
+        anchor = offset == 0
+        query: dict[str, Cell] = {
+            "B": Formula(QUERY_B, line.category) if anchor else Spill(line.category),
+            "C": Spill(line.name),
+            "D": Spill(f"{line.name}, полное наименование"),
+            "F": Formula(QUERY_F, "Завод") if anchor else Spill("Завод"),
+            "G": Spill("по ТУ"),
+            "H": Spill(1.5),
+            "I": Spill(12.5),
+            "J": Spill(3),
+            "K": Spill(150),
+        }
+        manual: dict[str, Cell] = dict(_TEMPLATE)
+        if line.ref_id is not None:
+            manual.update({"A": line.ref_id, "E": line.name, "L": 250, "M": 1250, "Q": 0.05})
+        if line.l_formula:
+            price = manual["M"]
+            assert isinstance(price, int)
+            manual["L"] = Formula(f"=M{number}/5", price / 5)
+        lines.append(_ing_line(number, query, manual))
+    for _ in range(templates):
+        lines.append(_ing_line(len(lines) + 1, _TEMPLATE))
+    last = len(lines)
+    formats = {f"{letter}2:{letter}{last}": pattern for letter, pattern in _PERCENT.items()}
+    return FakeWorksheet(lines, "ING", row_count=row_count, formats=formats)
+
+
+def _ing_line(number: int, *parts: Mapping[str, Cell]) -> list[Cell]:
+    """Строка ING: ячейки по буквам и формула P шефа над Q, R, S."""
+    line: list[Cell] = [""] * len(specs.INGREDIENTS.columns)
+    for part in parts:
+        for letter, cell in part.items():
+            line[_column_index(letter)] = cell
+    losses = [line[_column_index(letter)] for letter in "QRS"]
+    total = sum(loss for loss in losses if isinstance(loss, int | float))
+    line[_column_index("P")] = Formula(f"=SUM(Q{number}+R{number}+S{number})", total)
+    return line
+
+
+def cards_book_sheet(cards: Sequence[tuple[str, str]] = CARDS_ORDER) -> FakeWorksheet:
+    """«Лист1» книги карточек: шапка в две строки, затем карточки —
+    название (B) и «Согласован» (V)."""
+    spec = specs.INGREDIENT_CARDS
+    lines: list[list[Cell]] = [[c.expected_header for c in spec.columns], []]
+    for name, approval in cards:
+        line: list[Cell] = [""] * len(spec.columns)
+        line[spec.column("category").index] = "Соусы"
+        line[spec.column("name").index] = name
+        line[spec.column("approval_status").index] = approval
+        lines.append(line)
+    return FakeWorksheet(lines, "Лист1")
+
+
+def reference_client(
+    *, ing: FakeWorksheet | None = None, cards: FakeWorksheet | None = None
+) -> FakeSheetsClient:
+    """Книга кухни с листом ING и книга карточек; ключи таблиц — как в
+    ``tests.fake_sheets.IDS``."""
+    return FakeSheetsClient(
+        {
+            "kitchen-id": FakeSpreadsheet({"ING": ing if ing is not None else ing_sheet()}),
+            "cards-id": FakeSpreadsheet(
+                {"Лист1": cards if cards is not None else cards_book_sheet()}
+            ),
+        }
+    )
 
 
 @pytest.fixture
