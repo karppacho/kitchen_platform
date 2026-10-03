@@ -102,6 +102,80 @@ def test_archived_entries_stay_reachable_by_key() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Архивные тёзки — для пары карточки, не для новых блюд
+# ---------------------------------------------------------------------------
+def test_archived_namesake_is_seen_apart_from_the_dish_choice() -> None:
+    """Живые данные 02.10: у карточки «Корж для римской пиццы» точный тёзка —
+    в архиве, а похожая активная «Основа для римской пиццы» — другой продукт.
+
+    Архивный тёзка виден в своём поле — по нему импорт свяжет карточку. А
+    подбор для блюд — как раньше: архивное в новое блюдо не предлагается ни
+    ответом, ни похожим.
+    """
+    index = _index(
+        ("80", "Корж для римской пиццы", "архив"),
+        ("81", "Основа для римской пиццы", "активное"),
+    )
+    match = index.match("корж для римской пиццы")
+
+    assert [e.key for e in match.archived_exact] == ["80"]
+    assert match.exact == ()
+    assert match.resolved is None, "архивное в новые блюда не предлагается"
+    assert not match.ambiguous
+    assert [c.entry.key for c in match.similar] == ["81"], "похожие — только активные"
+    assert not match.orphan
+
+
+def test_archived_namesake_alone_leaves_the_dish_choice_empty() -> None:
+    """Четыре карточки 02.10 «без пары»: точный тёзка в архиве, похожих
+    активных нет. Для новых блюд пары по-прежнему нет."""
+    index = _index(("40", "Огурцы маринованные, не резанные", "архив"), ("1", "Томаты", "активное"))
+    match = index.match("Огурцы маринованные, не резанные")
+
+    assert [e.key for e in match.archived_exact] == ["40"]
+    assert match.similar == ()
+    assert match.orphan
+    assert match.resolved is None
+
+
+def test_close_archived_name_is_not_offered() -> None:
+    """Архивное — только точный тёзка: похожее архивное не предлагается
+    никуда, ни в пару карточке, ни в блюдо."""
+    index = _index(("40", "Огурцы маринованные, не резанные", "архив"))
+    match = index.match("Огурцы маринованные не резаные")
+
+    assert match.archived_exact == ()
+    assert match.similar == ()
+    assert match.orphan
+
+
+def test_active_namesake_leaves_archived_field_empty() -> None:
+    """Активный тёзка важнее архивного: поле архивных пусто, ответ — активный."""
+    index = _index(
+        ("40", "Огурцы маринованные", "архив"), ("41", "Огурцы маринованные", "активное")
+    )
+    match = index.match("Огурцы маринованные")
+
+    assert match.archived_exact == ()
+    assert match.resolved is not None
+    assert match.resolved.key == "41"
+
+
+def test_two_archived_namesakes_are_both_seen_but_not_a_duplicate() -> None:
+    """Два архивных тёзки — оба в поле: выбирать человеку. Дефектом данных
+    («активные тёзки») это не считается, и для блюд неоднозначности нет —
+    архивное туда не предлагается."""
+    index = _index(("50", "Соус горчичный", "архив"), ("51", "Соус горчичный", "архив"))
+    match = index.match("Соус горчичный")
+
+    assert [e.key for e in match.archived_exact] == ["50", "51"]
+    assert match.exact == ()
+    assert not match.ambiguous
+    assert match.resolved is None
+    assert index.duplicates() == {}
+
+
+# ---------------------------------------------------------------------------
 # Похожие
 # ---------------------------------------------------------------------------
 def test_close_name_becomes_candidate_not_answer() -> None:

@@ -49,7 +49,7 @@ from kitchen.web import auth, reconciliation
 from kitchen.web.app import create_app
 from kitchen.web.csrf import REJECTED as CSRF_REJECTED
 from tests.conftest import CARDS_ORDER, FakeSheetsClient, Formula, ing_sheet
-from tests.fake_sheets import IDS, cards_sheet, row, sheets_client
+from tests.fake_sheets import IDS, cards_sheet, kitchen_sheets, row, sheets_client
 from tests.integration.test_database import _url
 from tests.integration.test_reference_flow import (
     FORM,
@@ -278,6 +278,91 @@ def test_disputed_card_with_no_one_to_choose_offers_only_the_form(
 
     assert line is not None
     assert (line["candidates"], line["approved"], line["actions"]) == ([], True, ["to_reference"])
+
+
+def _with_archive(
+    sessions: sessionmaker[Session], cards: Sequence[str], *lines: tuple[str, str, str]
+) -> TestClient:
+    """Книга кухни как обычно и ещё строки ING ``(id, название, статус)``;
+    карточки ``cards`` согласованы. Книги перенесены в базу."""
+    ing = [
+        *kitchen_sheets()["ING"],
+        *(
+            row(specs.INGREDIENTS, id=key, name=name, price_per_kg="100", status=status)
+            for key, name, status in lines
+        ),
+    ]
+    sheets = sheets_client(
+        kitchen={"ING": ing},
+        cards=[
+            *cards_sheet()[:2],
+            *(row(specs.INGREDIENT_CARDS, name=name, approval_status=APPROVED) for name in cards),
+        ],
+    )
+    _import(sheets, sessions)
+    return make_client(sheets)
+
+
+def test_card_with_archived_namesake_is_not_on_the_list(sessions: sessionmaker[Session]) -> None:
+    """Решение Александра 02.10: точный тёзка в архиве — пара сама, и
+    карточке нечего делать на «Сверке» — ни «Добавить в справочник», ни «Это
+    он» с чужим похожим активным. В счётчиках она связана."""
+    client = _with_archive(
+        sessions,
+        ["Корж для римской пиццы", "Пастрами из индейки"],
+        ("70", "Корж для римской пиццы", "архив"),
+        ("71", "Основа для римской пиццы", "активное"),
+    )
+
+    body = client.get(LIST).json()
+
+    assert [line["name"] for line in body["rows"]] == ["Пастрами из индейки"]
+    assert (body["total"], body["linked"], body["needs_human"]) == (2, 1, 1)
+    assert _pair(_card(sessions, "Корж для римской пиццы")) == (
+        _ingredient_id(sessions, "70"),
+        "linked",
+        False,
+    )
+
+
+def test_two_archived_namesakes_are_offered_for_this_is_it(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Точных тёзок два, оба в архиве, активных нет — «неоднозначно»: «Это
+    он» предлагает обоих архивных и подтверждает выбранного. Похожий
+    активный («Соус горчичный 2», похожесть 0,93) их не перебивает: тёзка,
+    пусть архивный, — та самая позиция, похожее — только догадка."""
+    client = _with_archive(
+        sessions,
+        ["Соус горчичный"],
+        ("75", "Соус горчичный", "архив"),
+        ("76", "Соус горчичный", "архив"),
+        ("77", "Соус горчичный 2", "активный"),
+    )
+    card = _card(sessions, "Соус горчичный")
+    assert _pair(card) == (None, "ambiguous", False)
+
+    line = _row_of(client, "Соус горчичный")
+
+    assert line is not None
+    assert (line["link_status"], line["actions"]) == ("ambiguous", ["confirm", "to_reference"])
+    assert line["candidates"] == [
+        {
+            "ingredient_id": _ingredient_id(sessions, legacy_id),
+            "legacy_id": legacy_id,
+            "name": "Соус горчичный",
+            "score": None,
+        }
+        for legacy_id in ("75", "76")
+    ]
+
+    chosen = _ingredient_id(sessions, "76")
+    reply = confirm(client, card.id, chosen)
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["message"] == "Пара подтверждена: ингредиент «Соус горчичный», id 76"
+    assert _pair(_card(sessions, "Соус горчичный")) == (chosen, "linked", True)
+    assert _row_of(client, "Соус горчичный") is None
 
 
 # ---------------------------------------------------------------------------

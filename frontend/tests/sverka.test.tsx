@@ -119,6 +119,18 @@ test('три группы стоят врозь: они требуют разн�
   expect(screen.getByRole('heading', { name: /пары нет/i })).toBeInTheDocument()
 })
 
+test('у похожих сказано, что значат подсветка и зачёркивание', async () => {
+  // Живая проверка 02.10: «визуально вообще не понятно». Пояснение — тем же
+  // языком, каким выглядят пометки.
+  narisovat()
+  await screen.findByText('101')
+  expect(
+    screen.getByText(
+      /Подсвечено — этого нет в карточке; подсвечено и зачёркнуто — этого нет в справочнике\./,
+    ),
+  ).toBeInTheDocument()
+})
+
 test('предвыбранного варианта нет ни одного', async () => {
   // Один из кандидатов — «огурцы маринованные НЕ резаные» против
   // «Огурцы маринованные резанные», похожесть 95 %, смысл противоположный.
@@ -177,13 +189,15 @@ test('у каждой группы свои действия, как в реше
   // группах стёрли бы разницу, ради которой группы и стоят врозь.
   narisovat()
   const pohozhee = await screen.findByTestId('kartochka-25')
-  expect(within(pohozhee).getByRole('button', { name: 'Это он' })).toBeInTheDocument()
+  expect(
+    within(pohozhee).getByRole('button', { name: 'Это он: «Корж для пиццы»' }),
+  ).toBeInTheDocument()
   expect(within(pohozhee).getByRole('button', { name: 'Это новый' })).toBeEnabled()
   expect(within(pohozhee).queryByRole('button', { name: 'Добавить в справочник' })).toBe(null)
 
   const sirota = screen.getByTestId('kartochka-24')
   expect(within(sirota).getByRole('button', { name: 'Добавить в справочник' })).toBeEnabled()
-  expect(within(sirota).queryByRole('button', { name: 'Это он' })).toBe(null)
+  expect(within(sirota).queryByRole('button', { name: /^Это он/ })).toBe(null)
 })
 
 test('справочник не загрузился — экран говорит об этом, а не молчит', async () => {

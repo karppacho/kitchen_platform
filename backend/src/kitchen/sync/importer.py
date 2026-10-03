@@ -559,12 +559,25 @@ class Importer:
                 result.links.append(f"Карточки: {what} в справочнике — {number}")
 
     def _suggest_link(self, card: models.IngredientCard, index: NameIndex) -> None:
-        """Предложить пару. Именно предложить — решение за человеком."""
+        """Предложить пару. Именно предложить — решение за человеком.
+
+        Тёзка решает, только если он один: сначала среди активных, а если их
+        нет — среди архивных (решение Александра 02.10). Карточка архивного
+        ингредиента — его карточка: без этого она уходила бы на «Сверку»
+        «без пары» или с чужим похожим активным. В новые блюда архивное
+        по-прежнему не предлагается — это подбор для пары, не для блюд.
+        """
         match = index.match(card.name)
         if match.resolved is not None:
             card.ingredient_id = int(match.resolved.key)
             card.link_status = "linked"
         elif match.ambiguous:
+            card.ingredient_id = None
+            card.link_status = "ambiguous"
+        elif len(match.archived_exact) == 1:
+            card.ingredient_id = int(match.archived_exact[0].key)
+            card.link_status = "linked"
+        elif match.archived_exact:
             card.ingredient_id = None
             card.link_status = "ambiguous"
         elif match.similar:
