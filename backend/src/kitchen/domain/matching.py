@@ -19,6 +19,12 @@
   первого попавшегося;
 * дубли считаются только среди активных — пара «архивная + активная»
   неоднозначности не даёт.
+
+Архивные в подбор для блюд не идут, но точный архивный тёзка виден
+отдельно (:attr:`Match.archived_exact`): по нему импорт связывает карточку,
+у которой активного тёзки нет (решение Александра 02.10). Иначе карточка
+архивного ингредиента выглядела бы «без пары» или «похожей» на чужой
+активный, и «Сверка» звала бы заводить в справочник то, что там уже есть.
 """
 
 from __future__ import annotations
@@ -91,7 +97,15 @@ class Match:
 
     query: str
     exact: tuple[Entry, ...]
+    """Активные тёзки."""
     similar: tuple[Candidate, ...]
+    """Похожие активные — только когда активных тёзок нет."""
+    archived_exact: tuple[Entry, ...] = ()
+    """Архивные тёзки — только когда активных тёзок нет: активный важнее.
+
+    Не для подбора в блюда — ни :attr:`resolved`, ни :attr:`ambiguous`, ни
+    :attr:`orphan` их не видят. Для пары карточки: карточка архивного
+    ингредиента связывается с ним, а не уходит «без пары» на «Сверку»."""
 
     @property
     def resolved(self) -> Entry | None:
@@ -109,7 +123,8 @@ class Match:
 
     @property
     def orphan(self) -> bool:
-        """Ни точного совпадения, ни похожих — пары в справочнике нет."""
+        """Ни активного тёзки, ни похожих — для нового блюда пары нет.
+        Архивный тёзка при этом возможен (:attr:`archived_exact`)."""
         return not self.exact and not self.similar
 
 
@@ -117,18 +132,19 @@ class NameIndex:
     """Справочник, по которому идёт подбор.
 
     Архивные позиции в подбор не попадают, но остаются доступны по ключу:
-    расчёт существующих блюд от статуса не зависит.
+    расчёт существующих блюд от статуса не зависит. По имени архивные видны
+    только как точные тёзки — в :attr:`Match.archived_exact`.
     """
 
     def __init__(self, entries: Iterable[Entry]) -> None:
         self._all: dict[str, Entry] = {}
         self._active_by_name: dict[str, list[Entry]] = {}
+        self._archived_by_name: dict[str, list[Entry]] = {}
 
         for entry in entries:
             self._all[entry.key] = entry
-            if entry.archived:
-                continue
-            self._active_by_name.setdefault(normalise_name(entry.name), []).append(entry)
+            by_name = self._archived_by_name if entry.archived else self._active_by_name
+            by_name.setdefault(normalise_name(entry.name), []).append(entry)
 
     def __len__(self) -> int:
         return len(self._all)
@@ -152,8 +168,14 @@ class NameIndex:
     def match(self, name: str) -> Match:
         query = normalise_name(name)
         exact = tuple(self._active_by_name.get(query, ()))
-        similar = () if exact else self._similar(query)
-        return Match(query=query, exact=exact, similar=similar)
+        if exact:
+            return Match(query=query, exact=exact, similar=())
+        return Match(
+            query=query,
+            exact=(),
+            similar=self._similar(query),
+            archived_exact=tuple(self._archived_by_name.get(query, ())),
+        )
 
     def _similar(self, query: str) -> tuple[Candidate, ...]:
         scored: list[Candidate] = []

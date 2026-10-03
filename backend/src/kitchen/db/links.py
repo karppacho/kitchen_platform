@@ -48,8 +48,9 @@ class LinkReference:
     """Справочник для подбора пар: ингредиенты, что есть в листе ING.
 
     Удалённое из листа (``removed_at``) в подбор не идёт: шеф уже сказал, что
-    этой позиции больше нет. Архивное индекс сам не предлагает
-    (:data:`~kitchen.domain.matching.ARCHIVED`).
+    этой позиции больше нет. Архивное (:data:`~kitchen.domain.matching.ARCHIVED`)
+    индекс предлагает только точным тёзкой и только когда активного тёзки нет
+    (:attr:`~kitchen.domain.matching.Match.archived_exact`).
     """
 
     def __init__(self, session: Session) -> None:
@@ -71,7 +72,8 @@ class LinkReference:
     def candidates(self, card: models.IngredientCard) -> tuple[LinkCandidate, ...]:
         """Кандидаты пары для карточки — из чего выбирать «Это он».
 
-        * ``ambiguous`` — активные тёзки: точных совпадений несколько;
+        * ``ambiguous`` — тёзки: активные, а если их нет — архивные (так
+          их видит импорт, :meth:`kitchen.sync.importer.Importer._suggest_link`);
         * ``candidate`` — похожие названия (не больше
           :data:`~kitchen.domain.matching.MAX_CANDIDATES`), самые похожие
           первыми;
@@ -84,7 +86,7 @@ class LinkReference:
         match = self.index.match(card.name)
         found: list[tuple[Entry, float | None]]
         if card.link_status == AMBIGUOUS:
-            found = [(entry, None) for entry in match.exact]
+            found = [(entry, None) for entry in match.exact or match.archived_exact]
         elif card.link_status == CANDIDATE:
             found = [(similar.entry, similar.score) for similar in match.similar]
         else:
