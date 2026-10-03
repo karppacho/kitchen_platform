@@ -48,6 +48,7 @@ class Record:
     before: Mapping[str, object]
     values: Mapping[str, object]
     status: str
+    action: str = "append"
     after: Mapping[str, object] | None = None
     content_hash: str | None = None
     error: str | None = None
@@ -186,6 +187,7 @@ class FakeJournal:
             before=write.before,
             values=write.values,
             status=status,
+            action=write.action,
         )
         self.records.append(record)
         return record

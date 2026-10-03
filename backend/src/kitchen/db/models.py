@@ -439,6 +439,9 @@ class SheetWrite(Base):
     STATUSES = ("pending", "verified", "rolled_back", "failed")
     OPEN_STATUSES = ("pending", "verified")
     """Открытые: запись идёт или состоялась. По ключу запроса такая — одна."""
+    ACTIONS = ("append", "fill")
+    """``append`` — новая строка карточки в «Лист1» книги карточек; ``fill`` —
+    ручные ячейки строки ING, которую создала формула QUERY (ADR-0003)."""
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     book: Mapped[str] = mapped_column(String(32))
@@ -455,7 +458,15 @@ class SheetWrite(Base):
     )
     before: Mapped[dict[str, object]] = mapped_column(JSONB)
     """Снимок до записи (FORMATTED): строки N−1 и N целиком, с Q и R. Если
-    раскладку не подтвердили — ещё и весь прочитанный лист."""
+    раскладку не подтвердили — ещё и весь прочитанный лист.
+
+    У ``fill`` — строка N как её видит шеф (``rows``); строки N−1, N и N+1
+    формулами (``formula``: по ручным ячейкам соседей виден сдвиг строк внутри
+    зоны QUERY); номер строки якоря QUERY (``anchor``) и название карточки
+    (``name``): по ним сверяется раскладка и возвращаются свои ячейки. Пока
+    раскладку не подтвердили — ещё и весь лист значениями (``sheet``) и
+    формулами (``sheet_formula``): по ним возвращают затёртое, в том числе
+    формулы."""
     values: Mapped[dict[str, object]] = mapped_column(JSONB)
     """Что ушло в лист: поле → значение, числа — числами JSON.
 
@@ -482,7 +493,7 @@ class SheetWrite(Base):
             "status in ('pending', 'verified', 'rolled_back', 'failed')",
             name="ck_sheet_writes_status",
         ),
-        CheckConstraint("action in ('append')", name="ck_sheet_writes_action"),
+        CheckConstraint("action in ('append', 'fill')", name="ck_sheet_writes_action"),
         # Одна открытая запись на ключ запроса: вторая строка от повтора
         # отправки невозможна и при ошибке в коде. Неудачные ключ освобождают —
         # повтор после отказа начинает новую попытку.

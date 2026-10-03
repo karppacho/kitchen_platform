@@ -18,9 +18,35 @@ from kitchen.sync.ownership import Column, ForbiddenWriteError, Kind, Owner, She
 
 PEOPLE = "принадлежит людям"
 BOOK_CLOSED = re.escape("путь записи книги не открыт (ADR-0003)")
+SHEET_CLOSED = re.escape("путь записи листа не открыт (ADR-0003)")
+FORMULA = "заполняет формула таблицы"
 BOTS = "Telegram-бот"
-KITCHEN_OPEN = frozenset({"ingredient_cards", "kitchen"})
-"""Книга кухни с открытым путём записи — такого пока нет, это проверка на будущее."""
+
+ING_MANUAL = [*"AELMNOQRST"]
+"""Ручные колонки ING — их дописывают шеф и коммерция (ADR-0003, вторая ступень)."""
+ING_FORMULA = [*"BCDFGHIJK", "P"]
+"""Вывод QUERY (B–D, F–K) и формула общих потерь (P)."""
+
+KITCHEN_SHEETS_CLOSED = [
+    specs.PACKAGING,
+    specs.DISHES,
+    specs.TTK,
+    specs.COOKING_METHODS,
+    specs.PRICING_NEW,
+    specs.PRICING_MENU,
+]
+"""Листы книги кухни, кроме ING: у них нет своего писателя."""
+
+
+def _open_whole(*sheets: SheetSpec) -> dict[str, dict[str, ownership.OpenColumns]]:
+    """Нынешние ворота плюс эти листы целиком — такого пока нет, это
+    проверка на будущее: чего не откроет даже открытый лист."""
+    gates: dict[str, dict[str, ownership.OpenColumns]] = {
+        book: dict(sheets_open) for book, sheets_open in ownership.WRITE_OPEN.items()
+    }
+    for spec in sheets:
+        gates.setdefault(spec.spreadsheet, {})[spec.title] = ownership.WHOLE_SHEET
+    return gates
 
 
 # ---------------------------------------------------------------------------
@@ -90,31 +116,85 @@ def test_card_row_matches_writable_columns_exactly() -> None:
     specs.INGREDIENT_CARDS.check_writable(*row)
 
 
-def test_kitchen_book_is_closed_even_without_bots() -> None:
-    """ING — общий справочник, и боты сняты, но у книги кухни нет своего пути
-    записи: ни сверки ячейки перед записью, ни журнала правок. Её держит
-    второй замок, и отказ называет именно его, а не ботов."""
-    assert specs.INGREDIENTS.writable() == ()
+def test_ing_writable_columns_are_the_manual_ones() -> None:
+    """Вторая ступень ADR-0003: в книге кухни открыт один лист — ING, и в нём
+    только ручные колонки, которые дописывают шеф и коммерция.
+
+    L открыта, хотя в части строк это формула от M: какая строка с
+    формулой, видно только по свежему чтению, и пропускает её писатель
+    строки, а не ворота.
+    """
+    letters = [c.letter for c in specs.INGREDIENTS.writable()]
+    assert letters == ING_MANUAL
+    specs.INGREDIENTS.check_writable(
+        "id",
+        "short_name",
+        "price_per_kg",
+        "price_per_pack",
+        "unit",
+        "weight_per_piece_g",
+        "losses_unpacking",
+        "losses_cutting",
+        "losses_thermal",
+        "status",
+    )
+
+
+@pytest.mark.parametrize("letter", ING_FORMULA)
+def test_ing_formula_columns_are_refused(letter: str) -> None:
+    """B–D и F–K выводит формула QUERY, P — формула шефа. Запись в зону
+    QUERY ломает вывод формулы во всех строках зоны, поэтому отказ
+    называет формулу, а не владельца или ботов."""
+    [column] = [c for c in specs.INGREDIENTS.columns if c.letter == letter]
+
+    with pytest.raises(ForbiddenWriteError, match=FORMULA):
+        specs.INGREDIENTS.check_writable(column.field)
+    with pytest.raises(ForbiddenWriteError, match=FORMULA):
+        specs.INGREDIENTS.check_writable("short_name", column.field)
+
+
+@pytest.mark.parametrize("spec", KITCHEN_SHEETS_CLOSED, ids=lambda spec: spec.title)
+def test_other_kitchen_sheets_stay_closed(spec: SheetSpec) -> None:
+    """Ворота — по листу, а не по книге: ING открыт, а Упаковка, Блюда, ТТК,
+    способы приготовления и обе расчётки — нет, даже их вычисляемые
+    колонки. Отказ называет закрытый лист, а не ботов."""
+    assert spec.writable() == ()
+    for column in spec.columns:
+        if column.owner is Owner.HUMAN:
+            continue
+        with pytest.raises(ForbiddenWriteError, match=SHEET_CLOSED):
+            spec.check_writable(column.field)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [specs.COMPETITOR_ITEMS, specs.COMPETITOR_CHANGES, specs.TASTING_RATINGS],
+    ids=["конкуренты", "история изменений", "дегустации"],
+)
+def test_books_without_writer_stay_closed(spec: SheetSpec) -> None:
+    """Книги конкурентов и дегустаций — общие, боты сняты, но своего пути
+    записи у них нет. Их держит второй замок, и отказ называет именно его."""
+    assert spec.writable() == ()
     with pytest.raises(ForbiddenWriteError, match=BOOK_CLOSED):
-        specs.INGREDIENTS.check_writable("price_per_kg")
+        spec.check_writable(spec.columns[0].field)
 
 
-def test_only_the_cards_sheet_is_open() -> None:
-    """Храповик: из всех описанных листов запись открыта одному — «Лист1»
-    книги карточек.
+def test_only_cards_and_ing_sheets_are_open() -> None:
+    """Храповик: из всех описанных листов запись открыта двум — «Лист1»
+    книги карточек и ING книги кухни.
 
     Открыть ещё что-то — осознанная правка вместе с писателем, а не
     побочный эффект. Проверяются все листы, а не «все книги, кроме
-    карточек»: новое описание листа в книге карточек (там есть и листы,
-    которые ведут люди) тоже обязано прийти закрытым или покраснить тест.
-    Описания собираются из модуля целиком, а не из списков: лист, который
-    забыли вписать в ALL_SPECS, проверку не обойдёт.
+    открытых»: новое описание листа в книге карточек или кухни (там есть и
+    листы, которые ведут люди) тоже обязано прийти закрытым или покраснить
+    тест. Описания собираются из модуля целиком, а не из списков: лист,
+    который забыли вписать в ALL_SPECS, проверку не обойдёт.
     """
     every_spec = [value for value in vars(specs).values() if isinstance(value, SheetSpec)]
     assert specs.TASTING_RATINGS in every_spec, "описания собраны не все"
 
     open_sheets = [spec for spec in every_spec if spec.writable()]
-    assert open_sheets == [specs.INGREDIENT_CARDS]
+    assert open_sheets == [specs.INGREDIENTS, specs.INGREDIENT_CARDS]
 
 
 def test_human_column_is_never_writable() -> None:
@@ -123,23 +203,25 @@ def test_human_column_is_never_writable() -> None:
         specs.PRICING_NEW.check_writable("price_sale")
 
 
-def test_app_columns_wait_for_their_book(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Вычисляемые колонки расчётки — наши, но лежат в книге кухни, а она
-    закрыта. Откроют книгу — откроются и они, а цена коммерсов — нет."""
-    with pytest.raises(ForbiddenWriteError, match=BOOK_CLOSED):
+def test_app_columns_wait_for_their_sheet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Вычисляемые колонки расчётки — наши, но книга кухни открыта только
+    листу ING. Откроют лист расчётки — откроются и они, а цена коммерсов —
+    нет."""
+    with pytest.raises(ForbiddenWriteError, match=SHEET_CLOSED):
         specs.PRICING_NEW.check_writable("uc_rub")
 
-    monkeypatch.setattr(ownership, "WRITE_OPEN", KITCHEN_OPEN)
+    monkeypatch.setattr(ownership, "WRITE_OPEN", _open_whole(specs.PRICING_NEW))
 
     specs.PRICING_NEW.check_writable("uc_rub", "margin_percent", "kcal")
     assert "price_sale" not in {c.field for c in specs.PRICING_NEW.writable()}
 
 
 def test_shared_columns_blocked_while_bots_alive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Справочник закрыт, пока в него пишут боты, — даже в открытой книге."""
-    monkeypatch.setattr(ownership, "WRITE_OPEN", KITCHEN_OPEN)
+    """Справочник закрыт, пока в него пишут боты, — даже открытый лист и
+    даже ручные колонки ING."""
     monkeypatch.setattr(ownership, "BOTS_ALIVE", True)
 
+    assert specs.INGREDIENTS.writable() == ()
     with pytest.raises(ForbiddenWriteError, match=BOTS):
         specs.INGREDIENTS.check_writable("price_per_kg")
 
@@ -154,21 +236,38 @@ def test_bots_alive_closes_cards_again(monkeypatch: pytest.MonkeyPatch) -> None:
         specs.INGREDIENT_CARDS.check_writable("supplier")
 
 
-def test_opening_kitchen_book_unblocks_ing_but_not_menu_price(
+def test_bots_alive_closes_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ожил бот — закрыто всё: ни одного описанного листа с открытой
+    колонкой. Вычисляемых колонок в открытых листах нет, поэтому рычаг
+    закрывает запись платформы целиком."""
+    monkeypatch.setattr(ownership, "BOTS_ALIVE", True)
+
+    every_spec = [value for value in vars(specs).values() if isinstance(value, SheetSpec)]
+    assert [spec.title for spec in every_spec if spec.writable()] == []
+
+
+def test_opening_kitchen_sheets_never_unblocks_human_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Открытие книги кухни открывает справочник — и НЕ открывает человеческие
-    колонки.
+    """Открытый лист открывает общие колонки — и НЕ открывает человеческие.
 
-    Это главный тест файла. Когда у книги кухни появится свой путь записи и
-    её впишут в WRITE_OPEN, это не должно заодно дать право затирать цены
-    коммерсов и цену меню, которую ставит шеф. Владение человека не зависит
-    ни от судьбы ботов, ни от открытых книг.
+    Это главный тест файла. Когда у Блюд или расчётки появится свой путь
+    записи и их впишут в WRITE_OPEN, это не должно заодно дать право
+    затирать цены коммерсов и цену меню, которую ставит шеф. Владение
+    человека не зависит ни от судьбы ботов, ни от открытых книг и листов.
     """
-    monkeypatch.setattr(ownership, "WRITE_OPEN", KITCHEN_OPEN)
-
-    # Справочник открылся.
+    # Сейчас: ING открыт, человеческое — нет.
     specs.INGREDIENTS.check_writable("price_per_kg", "status")
+    with pytest.raises(ForbiddenWriteError, match=PEOPLE):
+        specs.DISHES.check_writable("price_menu")
+
+    monkeypatch.setattr(
+        ownership, "WRITE_OPEN", _open_whole(specs.DISHES, specs.PRICING_NEW, specs.PRICING_MENU)
+    )
+
+    # Листы открылись.
+    specs.DISHES.check_writable("uc_actual", "status")
+    specs.PRICING_MENU.check_writable("uc_rub")
     specs.INGREDIENT_CARDS.check_writable("supplier")
 
     # А человеческое — нет.
