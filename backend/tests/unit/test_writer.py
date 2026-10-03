@@ -1438,9 +1438,12 @@ _PROTOCOL = {"values_batch_update", "values_batch_clear", "batch_update"}
 
 
 def test_only_the_writer_writes_to_sheets() -> None:
-    """Запись в таблицу — один путь: ``CardSheetWriter`` под блокировкой
-    писателей. Метод записи где-то ещё — второй писатель без сверки и
-    журнала, то, от чего правило 9 и уводит.
+    """Запись в таблицу — только писатели под общей очередью писателей, со
+    сверкой и журналом: ``CardSheetWriter`` (строка карточки) и, со второй
+    ступени ADR-0003, ``ReferenceRowFiller`` (ручные ячейки строки ING) — он
+    пишет одним ``values_batch_update`` и им же возвращает свои ячейки, а
+    устройство таблицы не меняет. Метод записи где-то ещё — писатель без
+    сверки и журнала, то, от чего правило 9 и уводит.
 
     Ловится и упоминание без вызова: ссылка на метод (``write =
     book.values_update``) — та же запись. Список — все методы gspread 6.2,
@@ -1459,6 +1462,11 @@ def test_only_the_writer_writes_to_sheets() -> None:
         if names:
             found[path.relative_to(SRC).as_posix()] = names
 
-    assert set(found) <= {"kitchen/sync/writer.py", "kitchen/sync/client.py"}, found
+    assert set(found) <= {
+        "kitchen/sync/writer.py",
+        "kitchen/sync/reference_writer.py",
+        "kitchen/sync/client.py",
+    }, found
     assert found["kitchen/sync/client.py"] == _PROTOCOL, "протокол объявляет только эти"
     assert found["kitchen/sync/writer.py"] >= _PROTOCOL
+    assert found["kitchen/sync/reference_writer.py"] == {"values_batch_update"}

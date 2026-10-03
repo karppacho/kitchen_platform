@@ -432,28 +432,36 @@ def _release(session: Session, draft_id: uuid.UUID) -> None:
         )
 
 
+def run_import(books: BookImport, book: str) -> str | None:
+    """Перенести книгу в базу сразу после записи — коротким путём
+    (:data:`IMPORT_LOCK_WAIT`, :data:`IMPORT_GOOGLE_TIMEOUT`). ``None`` —
+    перенесена (или её перенёс более свежий цикл); иначе — почему нет, для
+    лога. Не исключение: запись уже состоялась, а следующий цикл
+    синхронизации перенесёт книгу сам."""
+    try:
+        result = books.run(force=True, books=(book,))
+    except Exception as error:
+        return describe_error(error)
+    outcome = result.outcomes.get(book)
+    if outcome is None:
+        return "нет исхода"
+    if outcome.action not in _IMPORTED:
+        return outcome.problem or outcome.action
+    return None
+
+
 def _import(books: BookImport, draft_id: uuid.UUID) -> bool:
     """Перенести книгу карточек в базу. Не вышло — лог, и только: строка уже
     в листе, а следующий цикл синхронизации перенесёт её сам."""
-    try:
-        result = books.run(force=True, books=(BOOK,))
-    except Exception as error:
+    problem = run_import(books, BOOK)
+    if problem is not None:
         log.warning(
             "черновик %s: карточка в листе, но перенос книги карточек в базу не удался — "
             "её перенесёт следующий цикл: %s",
             draft_id,
-            describe_error(error),
+            problem,
         )
-        return False
-    outcome = result.outcomes.get(BOOK)
-    if outcome is None or outcome.action not in _IMPORTED:
-        log.warning(
-            "черновик %s: карточка в листе, но перенос книги карточек в базу не удался — %s",
-            draft_id,
-            "нет исхода" if outcome is None else (outcome.problem or outcome.action),
-        )
-        return False
-    return True
+    return problem is None
 
 
 def _in_database(session: Session, result: AppendResult, data: CardDraftData) -> bool:

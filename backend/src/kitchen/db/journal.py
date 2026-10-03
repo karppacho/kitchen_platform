@@ -1,7 +1,9 @@
 """Журнал записей в Google-таблицы и очередь писателей — в базе.
 
-Писатель строки (``kitchen.sync.writer``) решает, что писать в лист и как
-проверить записанное; здесь — то, что должно пережить его процесс:
+Писатели (``kitchen.sync.writer`` — строка карточки,
+``kitchen.sync.reference_writer`` — ручные ячейки строки ING) решают, что
+писать в лист и как проверить записанное; здесь — то, что должно пережить
+их процесс:
 
 * **очередь писателей** — advisory-блокировка на время одной записи. Два
   повара отправили карточки в одну секунду — второй ждёт, пока первый
@@ -62,6 +64,12 @@ class WritersBusyError(RuntimeError):
     """Очередь писателей занята дольше, чем мы готовы ждать."""
 
 
+APPEND = "append"
+"""Новая строка карточки в «Лист1» книги карточек (``kitchen.sync.writer``)."""
+FILL = "fill"
+"""Ручные ячейки строки ING, которую создала формула (``kitchen.sync.reference_writer``)."""
+
+
 @dataclass(frozen=True, slots=True)
 class NewWrite:
     """Что известно о записи до того, как она ушла в лист."""
@@ -73,6 +81,8 @@ class NewWrite:
     actor_id: uuid.UUID | None
     before: Mapping[str, object]
     values: Mapping[str, object]
+    action: str = APPEND
+    """Что делает запись: :data:`APPEND` или :data:`FILL` — CHECK в базе."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,7 +349,7 @@ class DbJournal:
             book=write.book,
             sheet=write.sheet,
             row=write.row,
-            action="append",
+            action=write.action,
             status=status,
             request_key=write.request_key,
             actor_id=write.actor_id,

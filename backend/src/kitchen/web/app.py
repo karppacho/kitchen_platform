@@ -19,16 +19,20 @@ from pydantic import BaseModel
 
 from kitchen import __version__
 from kitchen.cards.drafts import CardsError
+from kitchen.cards.reference import KITCHEN
 from kitchen.cards.submit import BOOK, IMPORT_GOOGLE_TIMEOUT, IMPORT_LOCK_WAIT
 from kitchen.config import Settings, load_settings
 from kitchen.db.journal import DbJournal
+from kitchen.db.links import known_reference_ids
 from kitchen.db.session import make_session_factory
 from kitchen.llm.label import label_reader_from_settings
 from kitchen.logs import configure_logging
+from kitchen.sync import reference_writer
 from kitchen.sync.client import GspreadClient
 from kitchen.sync.cycle import SyncCycle
 from kitchen.sync.drive import drive_from_settings
 from kitchen.sync.reader import SheetsReader
+from kitchen.sync.reference_writer import ReferenceRowFiller
 from kitchen.sync.writer import CardSheetWriter, hold_limit
 from kitchen.web.api import router
 from kitchen.web.auth_api import GOTRUE_TIMEOUT
@@ -36,6 +40,7 @@ from kitchen.web.auth_api import router as auth_router
 from kitchen.web.cards import cards_error
 from kitchen.web.cards import router as cards_router
 from kitchen.web.csrf import CSRF_HEADER, CsrfMiddleware
+from kitchen.web.reconciliation import router as reconciliation_router
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -94,7 +99,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(auth_router)
     app.include_router(cards_router)
-    # Отказы карточек — текстом для повара (и полем, которое подсветить).
+    app.include_router(reconciliation_router)
+    # Отказы карточек и «Сверки» — текстом для человека (и полем, которое
+    # подсветить).
     app.add_exception_handler(CardsError, cards_error)
 
     # Один клиент на приложение: httpx держит пул соединений, и создавать
@@ -116,6 +123,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.card_writer = lambda google: _card_writer(config, app.state.sessions, google)
     app.state.sync_cycle = lambda google: _card_import(config, app.state.sessions, google)
+    # «Сверка» — так же: писатель строки ING и перенос книги кухни одним
+    # входом в Google на запрос (kitchen.web.reconciliation).
+    app.state.reference_filler = lambda google: _reference_filler(
+        config, app.state.sessions, google
+    )
+    app.state.kitchen_import = lambda google: _kitchen_import(config, app.state.sessions, google)
 
     # Порядок важен: добавленный последним оборачивает остальных. Защита
     # стоит внутри CORS, чтобы отказ с разрешённого адреса ушёл с
@@ -181,6 +194,37 @@ def _card_import(
     reader = SheetsReader(
         google.with_timeout(IMPORT_GOOGLE_TIMEOUT),
         {BOOK: config.sheets_id_ingredient_cards},
+    )
+    return SyncCycle(reader, sessions, lock_timeout=IMPORT_LOCK_WAIT)
+
+
+def _reference_filler(
+    config: Settings, sessions: sessionmaker[Session], google: SheetsClient
+) -> ReferenceRowFiller | None:
+    """Писатель строки ING на один перенос; ``None`` — книга кухни или книга
+    карточек не настроена (слой ответит 503). Очередь держит не дольше своего
+    предела — по таймаутам Google из настроек."""
+    if not config.sheets_id_kitchen or not config.sheets_id_ingredient_cards:
+        return None
+    return ReferenceRowFiller(
+        google,
+        DbJournal(sessions),
+        kitchen_id=config.sheets_id_kitchen,
+        cards_id=config.sheets_id_ingredient_cards,
+        known_ids=lambda: known_reference_ids(sessions),
+        hold=reference_writer.hold_limit(config),
+    )
+
+
+def _kitchen_import(
+    config: Settings, sessions: sessionmaker[Session], google: GspreadClient
+) -> SyncCycle:
+    """Перенос книги кухни сразу после записи строки ING — как после отправки
+    карточки: тем же входом в Google, с короткими таймаутами чтения и коротким
+    ожиданием импортного замка (``kitchen.cards.reference``)."""
+    reader = SheetsReader(
+        google.with_timeout(IMPORT_GOOGLE_TIMEOUT),
+        {KITCHEN: config.sheets_id_kitchen},
     )
     return SyncCycle(reader, sessions, lock_timeout=IMPORT_LOCK_WAIT)
 

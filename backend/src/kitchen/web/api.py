@@ -1,9 +1,9 @@
-"""Ручки чтения: профиль, справочник, блюда, сверка, свежесть данных.
+"""Ручки чтения: профиль, справочник, блюда, свежесть данных.
 
-Здесь только просмотр. Единственная запись платформы в таблицу — новая
-строка карточки в «Лист1» книги карточек — живёт в ручках карточек
-(``kitchen.web.cards``, docs/adr/0003); справочник, блюда и сверка на
-запись закрыты.
+Здесь только просмотр. Запись платформы в таблицы живёт в своих ручках
+(docs/adr/0003): новая строка карточки в «Лист1» книги карточек — в ручках
+карточек (``kitchen.web.cards``), ручные ячейки строки ING — в ручках
+«Сверки» (``kitchen.web.reconciliation``, там же её список дел).
 
 Все ручки требуют входа. Открытым остаётся только `/healthz`, и то он
 слушается изнутри — наружу его закрывает nginx.
@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from kitchen.config import Settings
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 router = APIRouter(prefix="/api")
 
-# Справочник, блюда и сверка несут цены и маржу. Повару (`cook`) они не
+# Справочник и блюда несут цены и маржу. Повару (`cook`) они не
 # положены: он заводит карточки ингредиентов и больше ничего не видит.
 # Спрятать раздел в меню мало — ручку можно открыть и по адресу, поэтому
 # отказ живёт здесь. `/me` и `/sync` открыты всем вошедшим: строка
@@ -99,30 +99,6 @@ class DishDetail(DishRow):
     kbju_coverage: Decimal
     components: list[ComponentRow]
     warning_texts: list[str]
-
-
-class CandidateRow(BaseModel):
-    ingredient_id: int
-    legacy_id: str
-    name: str
-    score: float | None = None
-
-
-class ReconciliationRow(BaseModel):
-    """Карточка, требующая решения человека."""
-
-    card_id: int
-    name: str
-    link_status: str
-    supplier: str
-    candidates: list[CandidateRow]
-
-
-class ReconciliationSummary(BaseModel):
-    total: int
-    linked: int
-    needs_human: int
-    rows: list[ReconciliationRow]
 
 
 # ---------------------------------------------------------------------------
@@ -292,76 +268,6 @@ def dish_detail(
             for item in cost.components
         ],
         warning_texts=list(cost.warnings),
-    )
-
-
-@router.get("/reconciliation", response_model=ReconciliationSummary)
-def reconciliation(
-    session: SessionDep,
-    user: PricesViewerDep,
-) -> ReconciliationSummary:
-    """Карточки, по которым решение принимает человек.
-
-    Автоматически склеенное сюда не попадает. Здесь только спорное: тёзки,
-    похожие имена и то, чему пары нет вовсе. Подставить не тот ингредиент
-    хуже, чем не подставить никакого.
-    """
-    # Явным циклом, а не через dict(): у SQLAlchemy строка результата
-    # типизирована как Row, и dict() от неё mypy не принимает, а
-    # dict-comprehension не принимает ruff.
-    counts: dict[str, int] = {}
-    for link_status, number in session.execute(
-        select(models.IngredientCard.link_status, func.count())
-        .where(models.IngredientCard.removed_at.is_(None))
-        .group_by(models.IngredientCard.link_status)
-    ).all():
-        counts[link_status] = number
-
-    cards = session.scalars(
-        select(models.IngredientCard)
-        .where(
-            models.IngredientCard.link_status != "linked",
-            models.IngredientCard.removed_at.is_(None),
-        )
-        .order_by(models.IngredientCard.link_status, models.IngredientCard.name)
-    ).all()
-
-    rows: list[ReconciliationRow] = []
-    for card in cards:
-        # Для спорных показываем тёзок; для остальных кандидатов ищет
-        # экран сверки по запросу — гонять подбор по всему справочнику на
-        # каждый список незачем.
-        candidates: list[CandidateRow] = []
-        if card.link_status == "ambiguous":
-            namesakes = session.scalars(
-                select(models.Ingredient).where(
-                    func.lower(models.Ingredient.name) == card.name.lower(),
-                    or_(models.Ingredient.status != "архив", models.Ingredient.status.is_(None)),
-                    models.Ingredient.removed_at.is_(None),
-                )
-            ).all()
-            candidates = [
-                CandidateRow(ingredient_id=row.id, legacy_id=row.legacy_id, name=row.name)
-                for row in namesakes
-            ]
-
-        rows.append(
-            ReconciliationRow(
-                card_id=card.id,
-                name=card.name,
-                link_status=card.link_status,
-                supplier=card.supplier,
-                candidates=candidates,
-            )
-        )
-
-    total = sum(counts.values())
-    linked = counts.get("linked", 0)
-    return ReconciliationSummary(
-        total=total,
-        linked=linked,
-        needs_human=total - linked,
-        rows=rows,
     )
 
 

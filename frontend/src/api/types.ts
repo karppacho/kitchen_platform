@@ -68,18 +68,33 @@ export type Candidate = {
   ingredient_id: number
   legacy_id: string
   name: string
-  /** Степень похожести 0–1. Бэкенд пока отдаёт null. */
+  /** Похожесть названий 0–1 — оценка для порядка, а не величина, поэтому
+   *  числом. У похожих (`candidate`) есть, у тёзок (`ambiguous`) — null:
+   *  название совпало точно. */
   score: number | null
 }
 
 export type LinkStatus = 'ambiguous' | 'candidate' | 'orphan'
+
+/**
+ * Что можно сделать с карточкой на «Сверке» — решает сервер:
+ * - `confirm` — «Это он»: выбрать ингредиент из `candidates`;
+ * - `to_reference` — форма переноса в справочник: «Добавить в справочник»
+ *   у карточки без пары, «Это новый» у спорной. Только у согласованной.
+ */
+export type ReconciliationAction = 'confirm' | 'to_reference'
 
 export type ReconciliationRow = {
   card_id: number
   name: string
   link_status: LinkStatus
   supplier: string
+  /** «Да» в книге карточек — по последнему переносу в базу. */
+  approved: boolean
+  /** У `ambiguous` — тёзки, у `candidate` — похожие, у `orphan` — пусто. */
   candidates: Candidate[]
+  /** Пусто — только пояснение, без кнопки. */
+  actions: ReconciliationAction[]
 }
 
 export type Reconciliation = {
@@ -87,6 +102,129 @@ export type Reconciliation = {
   linked: number
   needs_human: number
   rows: ReconciliationRow[]
+}
+
+/** «Это он» подтверждён: ответ POST /api/reconciliation/{id}/confirm. */
+export type ConfirmedPair = {
+  card_id: number
+  ingredient_id: number
+  legacy_id: string
+  name: string
+  /** Пара уже была подтверждена этим ингредиентом — повторное нажатие. */
+  already: boolean
+  /** «Пара подтверждена: ингредиент «…», id N». */
+  message: string
+}
+
+/**
+ * Почему строку ING нельзя заполнить сейчас:
+ * - `not_approved` — карточка не «Да»;
+ * - `not_yet` — строки ещё нет: таблица подтягивает карточки с задержкой;
+ * - `shifted`, `ambiguous` — строки съехали или тёзок несколько: нужен
+ *   человек в листе;
+ * - `formula`, `percent`, `losses_empty` — ячейки строки не те;
+ * - `confirmed` — пару уже подтвердил человек («Это он» или перенос у
+ *   другого): список на экране устарел, писать нечего;
+ * - `already` — id в строке уже стоит.
+ */
+export type ReferenceRowReason =
+  | 'not_approved'
+  | 'not_yet'
+  | 'shifted'
+  | 'ambiguous'
+  | 'formula'
+  | 'percent'
+  | 'losses_empty'
+  | 'confirmed'
+  | 'already'
+
+/** Что формула QUERY уже вывела в строку ING — только показать. */
+export type ReferenceRowPulled = {
+  category: string
+  name: string
+  full_name: string
+  manufacturer: string
+  composition: string
+  protein: string | null
+  fat: string | null
+  carbs: string | null
+  kcal: string | null
+}
+
+/**
+ * Ручные ячейки строки ING сейчас — в тех же ключах и единицах, что форма:
+ * потери в процентах («12.5» — 12,5 %). Пустая текстовая — «», пустая
+ * числовая — null.
+ */
+export type ReferenceRowCurrent = {
+  short_name: string
+  unit: string
+  status: string
+  /** L. Если L — формула, то, что она показывает. */
+  price_per_kg: string | null
+  price_per_pack: string | null
+  weight_per_piece_g: string | null
+  losses_unpacking: string | null
+  losses_cutting: string | null
+  losses_thermal: string | null
+}
+
+/** Строка ING карточки для формы переноса — свежее чтение листа, без записи.
+ *  Ответ GET /api/reconciliation/{id}/reference-row. */
+export type ReferenceRowPreview = {
+  /** id, который получила бы строка сейчас, — справочно: при записи его
+   *  выдают заново. */
+  next_id: string
+  row: number | null
+  /** Форму можно отправлять. */
+  ready: boolean
+  reason: ReferenceRowReason | null
+  /** То же словами — показать как есть. */
+  message: string | null
+  /** id из колонки A — при `already`. */
+  ref_id: string | null
+  /** Ручные ячейки с формулой, буквами; P — всегда. L здесь — цену за
+   *  единицу считает таблица. */
+  formulas: string[]
+  pulled: ReferenceRowPulled | null
+  current: ReferenceRowCurrent | null
+}
+
+/**
+ * Форма переноса — поля строками, как ввёл человек; null — пусто. Потери —
+ * в процентах. Статуса и id нет: статус всегда «активный», id выдаёт сервер.
+ */
+export type ReferenceForm = {
+  short_name: string | null
+  unit: string | null
+  /** L. Не слать, если L в строке — формула. */
+  price_per_kg?: string | null
+  price_per_pack: string | null
+  /** Только для «шт». */
+  weight_per_piece_g: string | null
+  losses_unpacking: string | null
+  losses_cutting: string | null
+  losses_thermal: string | null
+}
+
+/** Карточка в справочнике: ответ POST /api/reconciliation/{id}/to-reference.
+ *  Повтор (ответ потерялся) отвечает той же строкой: второй записи нет. */
+export type ReferenceTransfer = {
+  row: number
+  ref_id: string
+  /** Ингредиент был в справочнике и до этого нажатия. */
+  already: boolean
+  /** Наш ингредиент виден на сайте; false — оговорка в `notes`. */
+  imported: boolean
+  /** Пара подтверждена — карточка ушла со «Сверки». */
+  linked: boolean
+  ingredient_id: number | null
+  /** «Записано в справочник: строка N, id X». */
+  message: string
+  /** Прежняя попытка, раскладку которой не подтвердили, — для шефа. */
+  shifted: { row: number; journal_id: number } | null
+  /** Оговорки готовыми фразами — показать как есть. */
+  notes: string[]
 }
 
 /** Книга — Google-таблица. Ответ GET /api/sync. */

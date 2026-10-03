@@ -20,7 +20,15 @@ import requests
 from gspread.exceptions import APIError
 
 from kitchen.sync import client as protocol
-from tests.conftest import FakeSpreadsheet, FakeWorksheet
+from tests.conftest import (
+    QUERY_B,
+    QUERY_F,
+    FakeSpreadsheet,
+    FakeWorksheet,
+    Formula,
+    Spill,
+    ing_sheet,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -290,6 +298,146 @@ def test_batch_clear_empties_only_the_given_cells() -> None:
     book.values_batch_clear(body={"ranges": ["'Лист1'!A2", "'Лист1'!C2"]})
 
     assert _read(book, "'Лист1'!A2:C2") == [["", "Кетчуп"]]
+
+
+# ---------------------------------------------------------------------------
+# Формулы, вывод QUERY и оформление — как в листе ING
+# ---------------------------------------------------------------------------
+def _ing_book(
+    values: list[list[object]], formats: dict[str, str] | None = None
+) -> tuple[FakeSpreadsheet, FakeWorksheet]:
+    sheet = FakeWorksheet(values, "ING", formats=formats)
+    return FakeSpreadsheet({"ING": sheet}), sheet
+
+
+def test_formula_reading_shows_formulas_and_raw_values() -> None:
+    """FORMULA-чтение: формула — текстом, значение — без оформления, числа
+    числами; ячейка, которую заполнила чужая формула-массив (вывод QUERY),
+    пуста. FORMATTED и UNFORMATTED показывают значения формул."""
+    book, _ = _ing_book(
+        [["id", "Категория", "Название"], [131, Formula("=QUERY(A1:C)", "Соусы"), Spill("Кетчуп")]]
+    )
+
+    assert _read(book, "'ING'!A2:C2", "FORMULA") == [[131, "=QUERY(A1:C)"]]
+    assert _read(book, "'ING'!A2:C2", "UNFORMATTED_VALUE") == [[131, "Соусы", "Кетчуп"]]
+    assert _read(book, "'ING'!A2:C2") == [["131", "Соусы", "Кетчуп"]]
+
+
+def test_number_format_belongs_to_the_cell() -> None:
+    """Формат — у ячейки, а не у значения: число, записанное RAW в ячейку с
+    процентным форматом, шеф видит процентом. Очистка формат не снимает,
+    вставка строки сдвигает его вместе со строкой. «;;;» прячет значение
+    только в FORMATTED."""
+    book, sheet = _ing_book([["Потери"], [0], [0], [7]], {"A2": "0%", "A3": "0.00%", "A4": ";;;"})
+    assert _read(book, "'ING'!A2:A4") == [["0%"], ["0,00%"]]
+
+    _write(book, ("'ING'!A2", [0.125]), ("'ING'!A3", [0.05]))
+
+    assert _read(book, "'ING'!A2:A4") == [["13%"], ["5,00%"]]
+    assert _read(book, "'ING'!A2:A4", "UNFORMATTED_VALUE") == [[0.125], [0.05], [7]]
+    book.chef_inserts_rows("ING", above=2, moment="now")
+    book.values_batch_clear(body={"ranges": ["'ING'!A3"]})
+    _write(book, ("'ING'!A3", [0.1]))
+    assert _read(book, "'ING'!A3:A4") == [["10%"], ["5,00%"]]
+    sheet.set_format("A3", None)
+    assert _read(book, "'ING'!A3") == [["0,1"]]
+
+
+def test_writing_over_query_output_is_refused() -> None:
+    """Запись поверх вывода QUERY в Google сломала бы формулу у всего вывода;
+    фальшивка её не моделирует и отклоняет запрос целиком. Очистка вывод не
+    трогает: своего значения у этих ячеек нет."""
+    book, sheet = _ing_book([["id", "Название"], ["", Spill("Кетчуп")]])
+
+    with pytest.raises(AssertionError, match="поверх вывода QUERY"):
+        _write(book, ("'ING'!A2:B2", [131, "Кетчуп"]))
+
+    assert sheet.cell("A2") == "", "запрос отклонён целиком"
+    book.values_batch_clear(body={"ranges": ["'ING'!B2"]})
+    assert sheet.cell("B2") == Spill("Кетчуп")
+
+
+def _zone() -> tuple[FakeSpreadsheet, FakeWorksheet]:
+    """Строка 1 — шапка, 2 — якорь QUERY (вывод в B), 2–4 — вывод, A — ручные id."""
+    return _ing_book(
+        [
+            ["id", "Название"],
+            [1, Formula("=QUERY(X)", "Кетчуп")],
+            [2, Spill("Майонез")],
+            [3, Spill("Горчица")],
+        ]
+    )
+
+
+def test_rows_inserted_inside_query_output_leave_it_in_place() -> None:
+    """Как в Google: вывод QUERY привязан к якорю. Строка, вставленная ниже
+    якоря, сдвигает ручные ячейки, а вывод остаётся на своих номерах строк —
+    напротив «Майонеза» оказывается чужой id."""
+    book, sheet = _zone()
+
+    book.chef_inserts_rows("ING", above=3, moment="now")
+
+    assert _read(book, "'ING'!A2:B5", "UNFORMATTED_VALUE") == [
+        [1, "Кетчуп"],
+        ["", "Майонез"],
+        [2, "Горчица"],
+        [3],
+    ]
+    assert sheet.cell("B3") == Spill("Майонез")
+
+
+def test_rows_inserted_above_the_anchor_move_the_output_too() -> None:
+    book, _ = _zone()
+
+    book.chef_inserts_rows("ING", above=2, moment="now")
+
+    assert _read(book, "'ING'!A3:B5", "UNFORMATTED_VALUE") == [
+        [1, "Кетчуп"],
+        [2, "Майонез"],
+        [3, "Горчица"],
+    ]
+
+
+def test_rows_deleted_inside_query_output_leave_it_in_place() -> None:
+    """Удалённая строка ниже якоря: ручные ячейки подтягиваются вверх, вывод
+    QUERY — на прежних номерах строк."""
+    book, sheet = _zone()
+
+    book.chef_deletes_rows("ING", 3, moment="now")
+
+    assert _read(book, "'ING'!A2:B4", "UNFORMATTED_VALUE") == [
+        [1, "Кетчуп"],
+        [3, "Майонез"],
+        ["", "Горчица"],
+    ]
+    assert sheet.cell("B4") == Spill("Горчица")
+
+
+def test_ing_sheet_is_built_like_the_real_one() -> None:
+    """Имитация листа ING: якорь QUERY в B и F строки 4, вывод QUERY виден в
+    FORMATTED и пуст в FORMULA, P — формула во всех строках, L — формула в
+    части строк, заготовки с умолчаниями в процентном оформлении, id —
+    числа."""
+    sheet = ing_sheet()
+    book = FakeSpreadsheet({"ING": sheet})
+
+    formula = _read(book, "'ING'!A4:T8", "FORMULA")
+    shown = _read(book, "'ING'!A4:T8")
+
+    assert (formula[0][1], formula[0][5]) == (QUERY_B, QUERY_F)
+    assert [line[0] for line in formula] == [129, 130, "", "", ""]
+    assert [line[2] for line in shown] == [
+        "Кетчуп",
+        "Моцарелла",
+        "Соус Барбекю",
+        "Соус Сырный",
+        "Сахар",
+    ]
+    assert all(line[2] == "" for line in formula), "название — вывод QUERY"
+    assert [line[11] for line in formula] == [250, "=M5/5", 0, "=M7/5", 0]
+    assert all(str(line[15]).startswith("=SUM(") for line in formula)
+    assert shown[2][11:20] == ["0", "0", "кг", "", "0%", "0,00%", "0%", "0%", "активный"]
+    assert _read(book, "'ING'!A3:C3", "FORMULA") == [[99, "Овощи", "Сахар"]], "вписан руками"
 
 
 # ---------------------------------------------------------------------------

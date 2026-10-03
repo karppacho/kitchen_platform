@@ -12,8 +12,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import Enum, StrEnum
+from types import MappingProxyType
+from typing import Final, Literal
 
 
 class Owner(StrEnum):
@@ -27,7 +30,7 @@ class Owner(StrEnum):
     """
 
     APP = "app"
-    """БД главнее, лист — отрисовка. Перезаписываем свободно — в книге, у
+    """БД главнее, лист — отрисовка. Перезаписываем свободно — в колонке, у
     которой открыт путь записи (:data:`WRITE_OPEN`).
 
     UC, маржа, КБЖУ, выход блюда, оба листа конкурентов.
@@ -42,10 +45,11 @@ class Owner(StrEnum):
     дегустаций. Лист правят и люди, поэтому источник истины — он (ADR-0001).
 
     Писать сюда можно, только когда сошлись два условия: боты не живы
-    (:data:`BOTS_ALIVE` снят) и у книги есть свой путь записи (книга в
-    :data:`WRITE_OPEN`). Первое убирает второго писателя, второе — запись без
-    сверки и журнала. Открытие книги не переносит владение в БД: первая
-    ступень — только добавление новой строки карточки. См. docs/adr/0003.
+    (:data:`BOTS_ALIVE` снят) и у колонки есть свой путь записи (она открыта
+    в :data:`WRITE_OPEN`). Первое убирает второго писателя, второе — запись
+    без сверки и журнала. Открытие не переносит владение в БД: первая
+    ступень — только добавление новой строки карточки, вторая — только
+    ручные ячейки строки ING, которую уже создала формула. См. docs/adr/0003.
     """
 
 
@@ -70,27 +74,61 @@ BOTS_ALIVE = False
 
 Флаг снят осознанно, вместе с открытием записи книги карточек (ADR-0003):
 боты стоят с 08.09.2026, сняты с автозапуска 09.09, решено, что они не
-вернутся. Снятый флаг сам по себе ничего не открывает — книгу открывает
+вернутся. Снятый флаг сам по себе ничего не открывает — колонки открывает
 :data:`WRITE_OPEN`. Вернуть True — аварийный рычаг на случай, если бот
-ожил: общие колонки, в том числе карточки, снова закрыты целиком.
+ожил: общие колонки, в том числе карточки и ING, снова закрыты целиком.
 
 Предусловие ADR-0003 проверено на сервере 01.10.2026: юниты ботов
 выключены (``disabled``) и не запущены (``inactive``), процессов ботов нет.
 """
 
-WRITE_OPEN: frozenset[str] = frozenset({"ingredient_cards"})
-"""Книги, у которых есть свой путь записи, — второй замок, независимый от ботов.
+
+class _Whole(Enum):
+    """Отдельный тип для метки «лист целиком»: её не спутать с набором букв."""
+
+    SHEET = "весь лист"
+
+
+WHOLE_SHEET: Final = _Whole.SHEET
+"""Лист открыт целиком: пишется всё, что разрешает владелец колонки."""
+
+type OpenColumns = frozenset[str] | Literal[_Whole.SHEET]
+"""Что открыто в листе: набор букв — только эти колонки; :data:`WHOLE_SHEET` —
+все, что разрешает владелец."""
+
+WRITE_OPEN: Mapping[str, Mapping[str, OpenColumns]] = MappingProxyType(
+    {
+        "ingredient_cards": MappingProxyType({"Лист1": WHOLE_SHEET}),
+        "kitchen": MappingProxyType(
+            {"ING": frozenset({"A", "E", "L", "M", "N", "O", "Q", "R", "S", "T"})}
+        ),
+    }
+)
+"""Ворота записи «книга → лист → колонки» — второй замок, независимый от ботов.
 
 Без него снятый флаг открыл бы весь общий справочник кухни — ING, Упаковку,
 Блюда, ТТК, — а пути записи у них нет: ни сверки ячейки перед записью, ни
-журнала правок, ни разбора конфликта с правкой шефа. Поэтому книга
-попадает сюда вместе со своим писателем, а не раньше. Первая ступень
-ADR-0003 — только книга карточек и только новая строка в «Лист1».
+журнала правок, ни разбора конфликта с правкой шефа. Поэтому лист попадает
+сюда вместе со своим писателем, а не раньше, и только теми колонками,
+которые этот писатель пишет. Ключи — те же, что :attr:`SheetSpec.spreadsheet`
+и :attr:`SheetSpec.title`. Чего здесь нет, то закрыто: другая книга, другой
+лист открытой книги (в обеих есть листы, которые ведут люди), другая
+колонка открытого листа.
 
-Ключ — тот же, что в :attr:`SheetSpec.spreadsheet`, и открывается книга
-целиком: в ней есть и другие листы, которые ведут люди. До «Лист1» запись
-сужает писатель строки — диапазоны он строит из ``INGREDIENT_CARDS.title``,
-единственного описания листа в этой книге.
+- Первая ступень ADR-0003 — «Лист1» книги карточек целиком: писатель
+  добавляет новую строку карточки, в ней все общие колонки, A–P и S–V.
+  Q и R остаются закрыты владельцем — их вписывают люди.
+- Вторая ступень — лист ING книги кухни и только ручные колонки, которые
+  дописывают шеф и коммерция: A id, E короткое имя, L и M цены, N единица,
+  O вес штуки, Q, R, S потери, T статус. B–D и F–K выводит формула QUERY по
+  книге карточек, P — формула шефа: запись туда сломала бы формулу, а в
+  зоне QUERY — её вывод у всего листа. L открыта, хотя в части строк это
+  формула от M: какая строка с формулой, видно только по свежему чтению, и
+  пропускает её писатель строки, а не ворота. Что писать можно только в
+  строку зоны QUERY с пустым A, держит тоже он.
+
+Прочие листы книги кухни — Упаковка, Блюда, ТТК, способы приготовления,
+обе расчётки — закрыты, даже вычисляемые колонки.
 """
 
 
@@ -179,7 +217,7 @@ class SheetSpec:
 
     def writable(self) -> tuple[Column, ...]:
         """Колонки, которые нам разрешено писать прямо сейчас."""
-        return tuple(c for c in self.columns if _may_write(c.owner, self.spreadsheet))
+        return tuple(c for c in self.columns if _may_write(self, c))
 
     def check_writable(self, *fields: str) -> None:
         """Проверить право записи до того, как что-то уйдёт в лист.
@@ -189,25 +227,44 @@ class SheetSpec:
         """
         for field in fields:
             column = self.column(field)
-            if _may_write(column.owner, self.spreadsheet):
+            if _may_write(self, column):
                 continue
             raise ForbiddenWriteError(_explain(self, column))
 
 
-def _may_write(owner: Owner, spreadsheet: str) -> bool:
-    """Можно ли писать колонку этого владельца в этой книге.
+def _open_columns(spec: SheetSpec) -> OpenColumns | None:
+    """Что открыто в этом листе по :data:`WRITE_OPEN`; ``None`` — лист закрыт."""
+    sheets = WRITE_OPEN.get(spec.spreadsheet)
+    if sheets is None:
+        return None
+    return sheets.get(spec.title)
 
-    Человеческое закрыто всегда — ни снятый флаг, ни открытая книга этого
-    не меняют. Книга без своего пути записи закрыта целиком, даже наши
-    вычисляемые колонки. Общее закрыто ещё и пока живы боты.
+
+def _letter_closed(opened: OpenColumns, column: Column) -> bool:
+    """Колонки нет среди открытых букв листа.
+
+    Лист целиком открывает только сама метка :data:`WHOLE_SHEET`; всё прочее
+    сверяется как набор букв — ошибка в воротах закрывает, а не открывает.
     """
-    if owner is Owner.HUMAN:
+    return opened is not WHOLE_SHEET and column.letter not in opened
+
+
+def _may_write(spec: SheetSpec, column: Column) -> bool:
+    """Можно ли писать эту колонку этого листа.
+
+    Человеческое закрыто всегда — ни снятый флаг, ни открытый лист этого
+    не меняют. Закрыто всё, чего нет в воротах: книга без своего пути
+    записи, другой лист открытой книги, другая колонка открытого листа —
+    даже наши вычисляемые. Общее закрыто ещё и пока живы боты.
+    """
+    if column.owner is Owner.HUMAN:
         return False
-    if spreadsheet not in WRITE_OPEN:
+    opened = _open_columns(spec)
+    if opened is None or _letter_closed(opened, column):
         return False
-    if owner is Owner.SHARED:
+    if column.owner is Owner.SHARED:
         return not BOTS_ALIVE
-    return owner is Owner.APP
+    return column.owner is Owner.APP
 
 
 def _explain(spec: SheetSpec, column: Column) -> str:
@@ -218,11 +275,30 @@ def _explain(spec: SheetSpec, column: Column) -> str:
             f"{where} принадлежит людям — шеф или коммерческий отдел заполняют её "
             f"руками. Запись сюда стирает работу, которой больше нигде нет."
         )
-    if spec.spreadsheet not in WRITE_OPEN:
+    sheets = WRITE_OPEN.get(spec.spreadsheet)
+    if sheets is None:
         return (
             f"{where}: путь записи книги не открыт (ADR-0003). Таблица "
             f"«{spec.spreadsheet}» — не в WRITE_OPEN: для неё нет ни сверки ячейки "
             f"перед записью, ни журнала правок."
+        )
+    opened = sheets.get(spec.title)
+    if opened is None:
+        listed = ", ".join(f"«{title}»" for title in sheets)
+        return (
+            f"{where}: путь записи листа не открыт (ADR-0003). В таблице "
+            f"«{spec.spreadsheet}» платформа пишет только в {listed}, а для этого "
+            f"листа нет ни сверки ячейки перед записью, ни журнала правок."
+        )
+    if _letter_closed(opened, column):
+        # Сейчас набор букв есть у одного листа — ING, и всё, что в нём
+        # закрыто, заполняют формулы. Появится лист, где колонку закрывают
+        # по другой причине, — причина переедет в ворота вместе с буквами.
+        manual = ", ".join(c.letter for c in spec.columns if not _letter_closed(opened, c))
+        return (
+            f"{where}: её заполняет формула таблицы, и платформа сюда не пишет — "
+            f"запись поверх сломала бы формулу. В листе «{spec.title}» открыты "
+            f"только ручные колонки {manual} (ADR-0003, вторая ступень)."
         )
     return (
         f"{where} — общая колонка, в неё пишут Telegram-боты. Пока BOTS_ALIVE=True "

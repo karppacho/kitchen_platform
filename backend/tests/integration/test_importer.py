@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import func, select, text
 
 from kitchen.db import models
+from kitchen.db.links import LinkReference
 from kitchen.db.recipes import load_recipes
 from kitchen.domain.costs import calculate
 from kitchen.sync import specs
@@ -123,6 +124,114 @@ def test_reimport_preserves_confirmed_link(sessions) -> None:
         )
         assert card.link_status == "linked", "подтверждённая связь пережила переимпорт"
         assert card.ingredient_id == sugar_id
+
+
+# ---------------------------------------------------------------------------
+# Архивные тёзки (решение Александра 02.10)
+# ---------------------------------------------------------------------------
+def _ing_with(*lines: tuple[str, str, str]) -> dict[str, list[list[str]]]:
+    """Лист ING как обычно — Томаты и два активных «Сахара» — и ещё строки
+    ``(id, название, статус)``."""
+    extra = [
+        row(specs.INGREDIENTS, id=key, name=name, price_per_kg="100", status=status)
+        for key, name, status in lines
+    ]
+    return {"ING": [*kitchen_sheets()["ING"], *extra]}
+
+
+def _cards_named(*names: str) -> list[list[str]]:
+    return [*cards_sheet()[:2], *(row(specs.INGREDIENT_CARDS, name=name) for name in names)]
+
+
+def _pairs(sessions) -> dict[str, tuple[str | None, str, bool]]:
+    """Пара каждой карточки: id ингредиента в листе ING, статус пары и
+    подтвердил ли её человек."""
+    with sessions() as session:
+        return {
+            card.name: (
+                card.ingredient.legacy_id if card.ingredient is not None else None,
+                card.link_status,
+                card.link_confirmed_at is not None,
+            )
+            for card in session.scalars(select(models.IngredientCard))
+        }
+
+
+def test_card_with_archived_namesake_is_linked_to_it(sessions) -> None:
+    """Точный тёзка только в архиве — это и есть пара (живые данные 02.10).
+
+    У «Корж для римской пиццы» тёзка в архиве и похожая активная «Основа для
+    римской пиццы» — другой продукт; у «Огурцы маринованные, не резанные»
+    тёзка в архиве, похожих нет. Обе связываются с архивным сами — как
+    предложение: человек пару не подтверждал, следующий перенос вправе её
+    пересчитать.
+    """
+    kitchen = _ing_with(
+        ("70", "Корж для римской пиццы", "архив"),
+        ("71", "Основа для римской пиццы", "активное"),
+        ("72", "Огурцы маринованные, не резанные", "архив"),
+    )
+    cards = _cards_named("Корж для римской пиццы", "Огурцы маринованные, не резанные")
+
+    Importer(SheetsReader(sheets_client(kitchen=kitchen, cards=cards), IDS), sessions).run()
+
+    assert _pairs(sessions) == {
+        "Корж для римской пиццы": ("70", "linked", False),
+        "Огурцы маринованные, не резанные": ("72", "linked", False),
+    }
+
+
+def test_active_namesake_beats_archived(sessions) -> None:
+    """Активный тёзка важнее архивного: один — пара с ним; несколько —
+    по-прежнему «неоднозначно», и выбирать «Это он» — из активных."""
+    kitchen = _ing_with(
+        ("70", "Корж для римской пиццы", "архив"),
+        ("73", "Корж для римской пиццы", "активное"),
+        ("74", "Сахар", "архив"),
+    )
+    cards = _cards_named("Корж для римской пиццы", "Сахар")
+
+    Importer(SheetsReader(sheets_client(kitchen=kitchen, cards=cards), IDS), sessions).run()
+
+    assert _pairs(sessions) == {
+        "Корж для римской пиццы": ("73", "linked", False),
+        "Сахар": (None, "ambiguous", False),
+    }
+    with sessions() as session:
+        sugar = session.scalars(
+            select(models.IngredientCard).where(models.IngredientCard.name == "Сахар")
+        ).one()
+        offered = [c.legacy_id for c in LinkReference(session).candidates(sugar)]
+    assert offered == ["2", "3"], "архивный «Сахар» в выбор не попадает"
+
+
+def test_confirmed_pair_is_kept_despite_archived_namesake(sessions) -> None:
+    """Пару, подтверждённую человеком, архивный тёзка не перебивает: шеф
+    решил, что «Корж для римской пиццы» — это «Основа …», и переимпорт это
+    решение сохраняет."""
+    kitchen = _ing_with(
+        ("70", "Корж для римской пиццы", "архив"),
+        ("71", "Основа для римской пиццы", "активное"),
+    )
+    importer = Importer(
+        SheetsReader(
+            sheets_client(kitchen=kitchen, cards=_cards_named("Корж для римской пиццы")), IDS
+        ),
+        sessions,
+    )
+    importer.run()
+    with sessions() as session, session.begin():
+        chosen = session.scalar(
+            select(models.Ingredient.id).where(models.Ingredient.legacy_id == "71")
+        )
+        card = session.scalars(select(models.IngredientCard)).one()
+        card.ingredient_id = chosen
+        card.link_status = "linked"
+        card.link_confirmed_at = text("now()")
+
+    importer.run()
+
+    assert _pairs(sessions) == {"Корж для римской пиццы": ("71", "linked", True)}
 
 
 def test_run_is_recorded(sessions) -> None:

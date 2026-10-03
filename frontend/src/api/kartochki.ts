@@ -253,9 +253,10 @@ function pauza(ms: number): Promise<void> {
  *
  * Мобильная сеть у плиты рвётся: обрыв — повод повторить, а не бросить.
  * Отказ сервера повтором не лечится — сразу наверх. `onPovtor` — номер
- * начатой попытки (2, 3): повар видит, что работа не брошена.
+ * начатой попытки (2, 3): повар видит, что работа не брошена. Тем же
+ * повторяется перенос карточки в справочник (`api/svarka.ts`).
  */
-async function sPovtoramiPriObryve<T>(
+export async function sPovtoramiPriObryve<T>(
   zapros: () => Promise<T>,
   povtorov: number,
   onPovtor: (popytka: number) => void,

@@ -1,0 +1,313 @@
+/* «Сверка» как список дел: действия у карточек и форма переноса в
+   справочник. Свой файл, а не хвост sverka.css: в его конец дописывает
+   правила ветка мобильного вида, и правка того же файла дала бы конфликт
+   при слиянии. */
+
+/* --- Действия у карточек --------------------------------------------- */
+
+/* Кнопки — от 44 px на любом экране: шеф и коммерция работают и с
+   телефона, в кнопку попадают пальцем. */
+.sverka-kartochka .deystviya button {
+  min-height: 44px;
+  color: var(--tekst);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.sverka-kartochka .deystviya button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Пояснение «не согласована» — рядом с кнопкой, цветом внимания: это
+   причина, а не поломка. */
+.sverka-kartochka .svarka-ne-soglasovana {
+  color: var(--vnimanie);
+  font-size: 14px;
+}
+
+.svarka-otkaz {
+  margin: calc(var(--shag) * 2) 0 0;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-left: 3px solid var(--oshibka);
+  background: var(--oshibka-fon);
+  color: var(--tekst);
+}
+
+/* Итог последнего действия — над списком: карточка, у которой нажимали,
+   уже ушла со «Сверки». Живая область есть всегда, даже пустая: в
+   появившуюся сразу с текстом читалка экрана часто не заглядывает. */
+.svarka-itog {
+  display: grid;
+  gap: var(--shag);
+  margin: calc(var(--shag) * 3) 0;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-left: 3px solid var(--aktsent);
+  background: var(--poverhnost);
+}
+
+.svarka-itog--vnimanie {
+  border-left-color: var(--vnimanie);
+  background: var(--vnimanie-fon);
+}
+
+/* Фокус на итог ставит экран, а не человек: рамка зрячему ни к чему. */
+.svarka-itog:focus {
+  outline: none;
+}
+
+.svarka-itog p,
+.svarka-itog ul {
+  margin: 0;
+}
+
+.svarka-itog ul {
+  padding-left: calc(var(--shag) * 5);
+}
+
+/* --- Форма: панель справа на компьютере, лист снизу на телефоне ------- */
+
+/* Пока форма открыта, список за ней недоступен: запись одна за раз. */
+.svarka-fon {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: rgb(26 27 29 / 0.35);
+}
+
+.svarka-panel {
+  position: fixed;
+  z-index: 11;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 92vh;
+  max-height: 92dvh;
+  background: var(--fon);
+  border-radius: calc(var(--radius) * 4) calc(var(--radius) * 4) 0 0;
+  box-shadow: 0 -4px 24px rgb(0 0 0 / 0.2);
+}
+
+/* Порог — тот же, что у переключения таблицы и списка (ui/useWide.ts). */
+@media (min-width: 1080px) {
+  .svarka-panel {
+    top: 0;
+    left: auto;
+    width: 520px;
+    max-height: none;
+    border-radius: 0;
+    box-shadow: -4px 0 24px rgb(0 0 0 / 0.2);
+  }
+}
+
+.svarka-panel-shapka {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: calc(var(--shag) * 3);
+  padding: calc(var(--shag) * 3) calc(var(--shag) * 4);
+  border-bottom: 1px solid var(--granitsa);
+  background: var(--poverhnost);
+}
+
+.svarka-panel-shapka h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+/* Заголовок получает фокус при открытии — для читалки экрана. */
+.svarka-panel-shapka h2:focus {
+  outline: none;
+}
+
+.svarka-imya {
+  margin: var(--shag) 0 0;
+  overflow-wrap: anywhere;
+}
+
+/* Прокручивается тело, а шапка с «Закрыть» и кнопки внизу — на месте. */
+.svarka-panel-telo {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: grid;
+  align-content: start;
+  gap: calc(var(--shag) * 3);
+  padding: calc(var(--shag) * 3) calc(var(--shag) * 4) 0;
+}
+
+.svarka-panel-telo p {
+  margin: 0;
+}
+
+.svarka-panel button {
+  min-height: 44px;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 4);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  color: var(--tekst);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.svarka-panel button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* Кнопки — внизу панели всегда видны; на телефоне с полосой жестов — над
+   ней. */
+.svarka-panel-knopki {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 2);
+  padding: calc(var(--shag) * 3) 0 max(calc(var(--shag) * 3), env(safe-area-inset-bottom));
+  background: var(--fon);
+}
+
+/* Главное действие — во всю оставшуюся ширину: до него дотягивается
+   большой палец. */
+.svarka-panel-knopki .svarka-glavnaya {
+  flex: 1;
+  border-color: var(--aktsent);
+  background: var(--aktsent);
+  color: #fff;
+}
+
+.svarka-poyasnenie {
+  color: var(--priglushyonnyy);
+}
+
+.svarka-zamechanie {
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-left: 3px solid var(--vnimanie);
+  background: var(--vnimanie-fon);
+}
+
+.svarka-zhivaya {
+  display: grid;
+  gap: calc(var(--shag) * 2);
+}
+
+.svarka-zhdyom {
+  padding: calc(var(--shag) * 3);
+  border: 1px dashed var(--granitsa);
+  border-radius: var(--radius);
+}
+
+/* Подтянутое формулой — подпись слева, значение справа; длинный состав
+   переносится, а не раздвигает панель. */
+.svarka-podtyanuto {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--shag) calc(var(--shag) * 3);
+  margin: 0;
+  padding: calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+}
+
+.svarka-podtyanuto dt {
+  color: var(--priglushyonnyy);
+}
+
+.svarka-podtyanuto dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.svarka-kbzhu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--shag) * 3);
+}
+
+.svarka-pole {
+  display: grid;
+  gap: var(--shag);
+}
+
+/* 16 px и больше: мельче iOS увеличивает страницу при фокусе в поле. */
+.svarka-vvod {
+  width: 100%;
+  min-height: 48px;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font-size: 16px;
+}
+
+.svarka-vvod[aria-invalid='true'] {
+  border-color: var(--oshibka);
+}
+
+.svarka-edinitsy {
+  display: flex;
+  gap: calc(var(--shag) * 2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.svarka-edinitsy legend {
+  margin-bottom: var(--shag);
+  padding: 0;
+}
+
+.svarka-edinitsy label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--shag) * 2);
+  min-height: 48px;
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  background: var(--poverhnost);
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.svarka-edinitsy label:has(input:checked) {
+  border-color: var(--aktsent);
+  box-shadow: inset 0 0 0 1px var(--aktsent);
+}
+
+.svarka-edinitsy input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+}
+
+.svarka-gruppa {
+  display: grid;
+  gap: calc(var(--shag) * 3);
+  margin: 0;
+  padding: calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+}
+
+.svarka-gruppa legend {
+  padding: 0 var(--shag);
+  color: var(--priglushyonnyy);
+}
+
+/* Подсказка формы — не отказ: цвет внимания, решает сервер. */
+.svarka-podskazka {
+  color: var(--vnimanie);
+}
+
+.svarka-oshibka-polya {
+  padding: var(--shag) calc(var(--shag) * 3);
+  border-left: 3px solid var(--oshibka);
+  background: var(--oshibka-fon);
+}

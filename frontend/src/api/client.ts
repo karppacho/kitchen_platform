@@ -1,16 +1,21 @@
 /** Что, кроме текста, сервер кладёт в отказ — для экрана: у отказа правки —
  *  поле, которое подсветить; у дубля карточки — строку листа; у неполного
- *  черновика — чего не хватает (названиями для повара). */
+ *  черновика — чего не хватает (названиями для повара); у отказа «Сверки» —
+ *  причину кодом (`not_yet`, `not_approved`…) и ошибки формы по полям. */
 export type PodrobnostiOtkaza = {
   field?: string | null
   row?: number | null
   missing?: readonly string[] | null
+  reason?: string | null
+  errors?: Readonly<Record<string, string>> | null
 }
 
 export class ApiError extends Error {
   readonly field: string | null
   readonly row: number | null
   readonly missing: readonly string[] | null
+  readonly reason: string | null
+  readonly errors: Readonly<Record<string, string>> | null
 
   constructor(
     readonly status: number,
@@ -22,11 +27,26 @@ export class ApiError extends Error {
     this.field = podrobnosti.field ?? null
     this.row = podrobnosti.row ?? null
     this.missing = podrobnosti.missing ?? null
+    this.reason = podrobnosti.reason ?? null
+    this.errors = podrobnosti.errors ?? null
   }
 }
 
+/** Ошибки по полям: непустой объект «поле → текст», все значения — строки.
+ *  Иное — не ошибки формы, а мусор: экрану их не показывать. Пустой объект
+ *  — тоже не ошибки у полей: иначе отказ прошёл бы молча, без текста. */
+function oshibkiPoPolyam(errors: unknown): Readonly<Record<string, string>> | null {
+  if (typeof errors !== 'object' || errors === null || Array.isArray(errors)) return null
+  const zapisi = Object.entries(errors)
+  return zapisi.length > 0 && zapisi.every(([, tekst]) => typeof tekst === 'string')
+    ? (Object.fromEntries(zapisi) as Record<string, string>)
+    : null
+}
+
 const NET_SVYAZI = 'Нет связи с сервером'
-const NE_DOZHDALIS = 'Сервер не ответил вовремя — проверьте связь'
+/** Ошибка связи, когда вышел срок запроса (`srok`), а не оборвалась связь:
+ *  экран может отличить «ждали и не дождались» от «нет сети». */
+export const NE_DOZHDALIS = 'Сервер не ответил вовремя — проверьте связь'
 
 /** Текст отказа, у которого нет своего текста: тело не JSON (страница
  *  nginx, сбой сервера до ответа). Экран может заменить его своим. */
@@ -114,9 +134,11 @@ async function razobratOtkaz(otvet: Response, zapas = NE_POLUCHILOS): Promise<Ot
       field?: unknown
       row?: unknown
       missing?: unknown
+      reason?: unknown
+      errors?: unknown
     }
     if (typeof telo.detail === 'string') {
-      const { field, row, missing } = telo
+      const { field, row, missing, reason, errors } = telo
       return {
         tekst: telo.detail,
         podrobnosti: {
@@ -124,6 +146,8 @@ async function razobratOtkaz(otvet: Response, zapas = NE_POLUCHILOS): Promise<Ot
           row: typeof row === 'number' ? row : null,
           missing:
             Array.isArray(missing) && missing.every((m) => typeof m === 'string') ? missing : null,
+          reason: typeof reason === 'string' ? reason : null,
+          errors: oshibkiPoPolyam(errors),
         },
       }
     }

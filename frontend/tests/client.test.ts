@@ -421,6 +421,59 @@ test('отказ без поля — поля пустые, а не мусор �
   expect(oshibka).toMatchObject({ field: null, row: null, missing: null })
 })
 
+test('отказ «Сверки» несёт причину и ошибки формы по полям; мусор в них — пусто', async () => {
+  server.use(
+    http.post('/api/reconciliation/7/to-reference', () =>
+      HttpResponse.json(
+        {
+          detail: 'Строка ещё не появилась в справочнике',
+          reason: 'not_yet',
+          row: null,
+        },
+        { status: 409 },
+      ),
+    ),
+    http.post('/api/reconciliation/8/to-reference', () =>
+      HttpResponse.json(
+        {
+          detail: 'Короткое имя для iiko — обязательно',
+          errors: { short_name: 'Короткое имя для iiko — обязательно' },
+        },
+        { status: 422 },
+      ),
+    ),
+    http.post('/api/reconciliation/9/to-reference', () =>
+      HttpResponse.json(
+        { detail: 'Что-то не так', reason: 3, errors: { short_name: 5 } },
+        { status: 422 },
+      ),
+    ),
+    // Пустой объект — не «ошибки у полей»: показать надо текст отказа.
+    http.post('/api/reconciliation/10/to-reference', () =>
+      HttpResponse.json({ detail: 'Форма не принята', errors: {} }, { status: 422 }),
+    ),
+  )
+
+  await expect(api('/reconciliation/7/to-reference', { method: 'POST' })).rejects.toMatchObject({
+    status: 409,
+    reason: 'not_yet',
+    errors: null,
+  })
+  await expect(api('/reconciliation/8/to-reference', { method: 'POST' })).rejects.toMatchObject({
+    status: 422,
+    reason: null,
+    errors: { short_name: 'Короткое имя для iiko — обязательно' },
+  })
+  await expect(api('/reconciliation/9/to-reference', { method: 'POST' })).rejects.toMatchObject({
+    reason: null,
+    errors: null,
+  })
+  await expect(api('/reconciliation/10/to-reference', { method: 'POST' })).rejects.toMatchObject({
+    message: 'Форма не принята',
+    errors: null,
+  })
+})
+
 test.each([
   [429, 'Слишком часто — подождите минуту'],
   [413, 'Фото больше 8 МБ — сфотографируйте ещё раз'],
