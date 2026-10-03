@@ -19,20 +19,6 @@
   opacity: 0.5;
 }
 
-/* Вариант выбирается касанием по всей строке, а не только по кружку. */
-.sverka-kartochka .varianty label {
-  min-height: 44px;
-  cursor: pointer;
-}
-
-.sverka-kartochka .varianty input {
-  width: 20px;
-  height: 20px;
-  margin: 0;
-  flex: none;
-  align-self: center;
-}
-
 /* Пояснение «не согласована» — рядом с кнопкой, цветом внимания: это
    причина, а не поломка. */
 .sverka-kartochka .svarka-ne-soglasovana {

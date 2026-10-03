@@ -3,6 +3,8 @@ import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { delay, http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { MemoryRouter } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 
@@ -312,9 +314,120 @@ test('у спорных пар — «Это он» и «Это новый»; н�
   expect(within(sakhar).queryByText(NE_SOGLASOVANA)).not.toBeInTheDocument()
 
   const tomat = screen.getByTestId('kartochka-9')
-  expect(within(tomat).getByRole('button', { name: 'Это он' })).toBeInTheDocument()
+  expect(within(tomat).getByRole('button', { name: 'Это он: «Томаты»' })).toBeInTheDocument()
   expect(within(tomat).queryByRole('button', { name: 'Это новый' })).not.toBeInTheDocument()
   expect(within(tomat).getByText(NE_SOGLASOVANA)).toBeInTheDocument()
+})
+
+test('кандидат один — выбирать не из чего: «Это он: «Томаты»» сразу подтверждает пару', async () => {
+  // Живая проверка 02.10: кружок у единственного варианта непонятен —
+  // кнопка сама называет, с чем связать карточку.
+  svodka.rows[1] = { ...svodka.rows[1]!, approved: true, actions: ['confirm', 'to_reference'] }
+  narisovat()
+  const tomat = await screen.findByTestId('kartochka-9')
+  expect(within(tomat).queryByRole('radio')).not.toBeInTheDocument()
+  // С чем связывается — видно рядом: имя справочника, id и цена.
+  expect(within(tomat).getByText('id 1')).toBeInTheDocument()
+  expect(within(tomat).getByText('85,00 ₽/кг')).toBeInTheDocument()
+  expect(within(tomat).getByRole('button', { name: 'Это новый' })).toBeEnabled()
+
+  await userEvent.click(within(tomat).getByRole('button', { name: 'Это он: «Томаты»' }))
+
+  expect(
+    await screen.findByText('Пара подтверждена: ингредиент «Томаты», id 1'),
+  ).toBeInTheDocument()
+  await waitFor(() => expect(screen.queryByTestId('kartochka-9')).not.toBeInTheDocument())
+  expect(podtverzhdeniya).toEqual([{ cardId: 9, telo: { ingredient_id: 1 }, zashchita: '1' }])
+})
+
+/** Строка варианта, в которой стоит переключатель с этим id. */
+function strokaVarianta(kartochka: HTMLElement, legacyId: string): HTMLElement {
+  return within(kartochka)
+    .getByRole('radio', { name: new RegExp(`id ${legacyId}\\b`) })
+    .closest('label')!
+}
+
+test('кандидатов несколько — нажатие на строку варианта выбирает его, затем «Это он»', async () => {
+  narisovat()
+  const sakhar = await screen.findByTestId('kartochka-6')
+  const etoOn = within(sakhar).getByRole('button', { name: 'Это он' })
+  expect(etoOn).toBeDisabled()
+
+  // Нажимают не в кружок, а в любое место строки — например, в цену.
+  await userEvent.click(within(sakhar).getByText('85,00 ₽/шт'))
+
+  // Программа чтения экрана слышит выбор: переключатель отмечен.
+  expect(within(sakhar).getByRole('radio', { name: /id 99\b/ })).toBeChecked()
+  expect(within(sakhar).getByRole('radio', { name: /id 98\b/ })).not.toBeChecked()
+  // Глаз видит его словами, а не только цветом рамки.
+  expect(within(strokaVarianta(sakhar, '99')).getByText('выбран')).toBeInTheDocument()
+  expect(within(strokaVarianta(sakhar, '98')).queryByText('выбран')).not.toBeInTheDocument()
+
+  expect(etoOn).toBeEnabled()
+  await userEvent.click(etoOn)
+  await waitFor(() => expect(screen.queryByTestId('kartochka-6')).not.toBeInTheDocument())
+  expect(podtverzhdeniya).toEqual([{ cardId: 6, telo: { ingredient_id: 4 }, zashchita: '1' }])
+})
+
+test('варианты выбираются с клавиатуры: группа подписана, стрелки, пробел, Enter', async () => {
+  narisovat()
+  const sakhar = await screen.findByTestId('kartochka-6')
+  expect(within(sakhar).getByRole('radiogroup', { name: 'Варианты из справочника' })).toBeInTheDocument()
+  const [pervyi, vtoroi] = within(sakhar).getAllByRole('radio')
+
+  act(() => pervyi!.focus())
+  await userEvent.keyboard(' ')
+  expect(pervyi).toBeChecked()
+  await userEvent.keyboard('{ArrowDown}')
+  expect(vtoroi).toBeChecked()
+  expect(vtoroi).toHaveFocus()
+  expect(pervyi).not.toBeChecked()
+
+  await userEvent.tab()
+  const etoOn = within(sakhar).getByRole('button', { name: 'Это он' })
+  expect(etoOn).toHaveFocus()
+  await userEvent.keyboard('{Enter}')
+  await waitFor(() => expect(podtverzhdeniya).toHaveLength(1))
+  expect(podtverzhdeniya[0]!.telo).toEqual({ ingredient_id: 4 })
+})
+
+/** Стили экрана — те же файлы, что берёт сборка: jsdom считает по ним
+ *  getComputedStyle. Вернёт уборку. */
+function podklyuchitStili(): () => void {
+  const faily = [
+    'pages/pages.css',
+    'pages/sverka.css',
+    'pages/svarka/formaSpravochnika.css',
+    'pages/svarka/kandidaty.css',
+  ]
+  const stili = faily.map((fail) => {
+    const stil = document.createElement('style')
+    stil.textContent = readFileSync(join(__dirname, '../src', fail), 'utf8')
+    document.head.appendChild(stil)
+    return stil
+  })
+  return () => stili.forEach((stil) => stil.remove())
+}
+
+test('кнопки и строки вариантов — от 44 px: в них попадают пальцем', async () => {
+  const ubratStili = podklyuchitStili()
+  try {
+    svodka.rows[1] = { ...svodka.rows[1]!, approved: true, actions: ['confirm', 'to_reference'] }
+    narisovat()
+    const sakhar = await screen.findByTestId('kartochka-6')
+    const tomat = screen.getByTestId('kartochka-9')
+    const tseli = [
+      within(sakhar).getByRole('button', { name: 'Это он' }),
+      within(sakhar).getByRole('button', { name: 'Это новый' }),
+      strokaVarianta(sakhar, '98'),
+      strokaVarianta(sakhar, '99'),
+      within(tomat).getByRole('button', { name: 'Это он: «Томаты»' }),
+      within(tomat).getByRole('button', { name: 'Это новый' }),
+    ]
+    for (const tsel of tseli) expect(getComputedStyle(tsel).minHeight).toBe('44px')
+  } finally {
+    ubratStili()
+  }
 })
 
 test('«Это он» — выбор кандидата: пара подтверждается, карточка уходит со «Сверки»', async () => {

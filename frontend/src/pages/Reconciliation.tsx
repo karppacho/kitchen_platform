@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, NE_POLUCHILOS } from '../api/client'
 import { useIngredients, useReconciliation } from '../api/queries'
 import { usePodtverzhdenie } from '../api/svarka'
-import type { Ingredient, LinkStatus, ReconciliationRow } from '../api/types'
+import type { Candidate, Ingredient, LinkStatus, ReconciliationRow } from '../api/types'
 import { NameDiff } from '../ui/NameDiff'
 import { Num } from '../ui/Num'
 import { estDannye, SboyObnovleniya, Sostoyanie } from '../ui/Sostoyanie'
@@ -11,6 +11,7 @@ import './pages.css'
 import './sverka.css'
 import { FormaSpravochnika } from './svarka/FormaSpravochnika'
 import './svarka/formaSpravochnika.css'
+import './svarka/kandidaty.css'
 
 // Три группы требуют разных действий (решение 7 спеки этапа 6): выбрать из
 // тёзок, подтвердить похожее — или признать новым и добавить в справочник.
@@ -19,16 +20,18 @@ const GRUPPY: { status: LinkStatus; zagolovok: string; chto: string }[] = [
     status: 'ambiguous',
     zagolovok: 'Несколько совпадений',
     chto:
-      'В справочнике несколько позиций с этим именем. Выберите, какая имелась в виду, — ' +
-      'различает их не имя, а цена и единица — и нажмите «Это он». Если ни одна — ' +
+      'В справочнике несколько позиций с этим именем. Различает их не имя, а цена и ' +
+      'единица: нажмите на нужную строку, затем «Это он». Если ни одна не подходит — ' +
       '«Это новый».',
   },
   {
     status: 'candidate',
     zagolovok: 'Есть похожее',
     chto:
-      'Точного совпадения нет. Если похожее — то самое, выберите его и нажмите «Это он»; ' +
-      'если в справочнике такого нет — «Это новый».',
+      'Точного совпадения нет. Если похожее — то самое, нажмите «Это он» (вариантов ' +
+      'несколько — сначала нажмите на нужную строку); если в справочнике такого нет — ' +
+      '«Это новый». В имени из справочника цветом отмечено то, чего нет в карточке, ' +
+      'зачёркнуто — то, чего нет в справочнике.',
   },
   {
     status: 'orphan',
@@ -99,7 +102,7 @@ export function Reconciliation() {
       <p className="poyasnenie">
         Справочник ингредиентов и карточки, которые заполняют повара, лежат в разных
         таблицах и не связаны между собой. Что склеилось по точному совпадению имени —
-        склеилось; остальное решает человек.
+        склеилось, в том числе с позицией в архиве справочника; остальное решает человек.
       </p>
 
       <div className="krupno">
@@ -213,6 +216,11 @@ function Pokazatel({
  * сервер (`actions`): «Это он» — выбрать кандидата; «Это новый» или
  * «Добавить в справочник» — форма переноса. Не согласованной в справочник
  * нельзя — вместо кнопки сказано почему.
+ *
+ * Кандидат один — выбирать не из чего: кнопка называет его («Это он:
+ * «…»») и сразу подтверждает. Кандидатов несколько — два шага: нажать на
+ * строку варианта, затем «Это он». Подтверждённую пару экран не отменяет,
+ * и промах пальцем мимо строки не должен сразу стать решением.
  */
 function Kartochka({
   stroka,
@@ -232,6 +240,9 @@ function Kartochka({
   const mozhnoVybrat = stroka.actions.includes('confirm')
   const mozhnoPerenesti = stroka.actions.includes('to_reference')
   const idyot = podtverzhdenie.idyot
+  const edinstvennyi = stroka.candidates.length === 1 ? stroka.candidates[0]! : null
+  const neskolko = stroka.candidates.length > 1
+  const vyborZakryt = !mozhnoVybrat || idyot
 
   return (
     <article className="sverka-kartochka" data-testid={`kartochka-${stroka.card_id}`}>
@@ -243,46 +254,61 @@ function Kartochka({
         <span className="postavshchik">{stroka.supplier}</span>
       </header>
 
-      {stroka.candidates.length > 0 && (
-        <ul className="varianty">
+      {edinstvennyi && (
+        <div className="varianty">
+          <div className="variant">
+            <Variant kandidat={edinstvennyi} imyaKartochki={stroka.name} poId={poId} />
+          </div>
+        </div>
+      )}
+
+      {neskolko && (
+        // Обычные переключатели, только кружок скрыт: стрелки, пробел и
+        // «отмечен, 1 из 2» у программы чтения экрана — от браузера.
+        <div className="varianty" role="radiogroup" aria-label="Варианты из справочника">
           {stroka.candidates.map((kandidat) => {
-            const ingredient = poId?.get(kandidat.ingredient_id)
+            const vybran = vybrannyi === kandidat.ingredient_id
+            const klass = ['variant', 'variant--vybor']
+            if (vybran) klass.push('variant--vybran')
+            if (vyborZakryt) klass.push('variant--zhdyot')
             return (
-              <li key={kandidat.ingredient_id}>
-                <label>
-                  {/* Предвыбранного варианта нет. Подсвеченное как очевидное
-                      совпадение человек примет не глядя. */}
-                  <input
-                    type="radio"
-                    name={`vybor-${stroka.card_id}`}
-                    checked={vybrannyi === kandidat.ingredient_id}
-                    disabled={!mozhnoVybrat || idyot}
-                    onChange={() => zadatVybor(kandidat.ingredient_id)}
-                  />
-                  <NameDiff a={kandidat.name} b={stroka.name} />
-                  <span className="variant-otlichie">
-                    <span className="variant-id">{kandidat.legacy_id}</span>
-                    {poId &&
-                      (ingredient ? (
-                        <Num
-                          value={ingredient.price_per_kg}
-                          fraction={2}
-                          unit={`₽/${ingredient.unit}`}
-                        />
-                      ) : (
-                        // Справочник пришёл, а позиции в нём нет.
-                        <Num value={null} />
-                      ))}
+              <label key={kandidat.ingredient_id} className={klass.join(' ')}>
+                {/* Предвыбранного варианта нет. Подсвеченное как очевидное
+                    совпадение человек примет не глядя. */}
+                <input
+                  type="radio"
+                  className="vizualno-skryto"
+                  name={`vybor-${stroka.card_id}`}
+                  checked={vybran}
+                  disabled={vyborZakryt}
+                  onChange={() => zadatVybor(kandidat.ingredient_id)}
+                />
+                <Variant kandidat={kandidat} imyaKartochki={stroka.name} poId={poId} />
+                {/* Выбор программе чтения экрана называет переключатель;
+                    слово — для глаза. */}
+                {vybran && (
+                  <span className="variant-vybran" aria-hidden="true">
+                    выбран
                   </span>
-                </label>
-              </li>
+                )}
+              </label>
             )
           })}
-        </ul>
+        </div>
       )}
 
       <div className="deystviya">
-        {mozhnoVybrat && (
+        {mozhnoVybrat && edinstvennyi && (
+          <button
+            type="button"
+            className="eto-on"
+            disabled={idyot}
+            onClick={() => podtverzhdenie.podtverdit(stroka.card_id, edinstvennyi.ingredient_id)}
+          >
+            Это он: «{edinstvennyi.name}»
+          </button>
+        )}
+        {mozhnoVybrat && neskolko && (
           <button
             type="button"
             disabled={vybrannyi === null || idyot}
@@ -311,5 +337,36 @@ function Kartochka({
         </p>
       )}
     </article>
+  )
+}
+
+/** Что известно о кандидате: имя справочника с отличиями от карточки, id
+ *  и цена — тёзок различают по ним, а не по имени. */
+function Variant({
+  kandidat,
+  imyaKartochki,
+  poId,
+}: {
+  kandidat: Candidate
+  imyaKartochki: string
+  poId: Map<number, Ingredient> | null
+}) {
+  const ingredient = poId?.get(kandidat.ingredient_id)
+  return (
+    <>
+      <span className="variant-imya">
+        <NameDiff a={kandidat.name} b={imyaKartochki} />
+      </span>
+      <span className="variant-otlichie">
+        <span className="variant-id">id {kandidat.legacy_id}</span>
+        {poId &&
+          (ingredient ? (
+            <Num value={ingredient.price_per_kg} fraction={2} unit={`₽/${ingredient.unit}`} />
+          ) : (
+            // Справочник пришёл, а позиции в нём нет.
+            <Num value={null} />
+          ))}
+      </span>
+    </>
   )
 }

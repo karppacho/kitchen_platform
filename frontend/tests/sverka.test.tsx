@@ -177,13 +177,15 @@ test('у каждой группы свои действия, как в реше
   // группах стёрли бы разницу, ради которой группы и стоят врозь.
   narisovat()
   const pohozhee = await screen.findByTestId('kartochka-25')
-  expect(within(pohozhee).getByRole('button', { name: 'Это он' })).toBeInTheDocument()
+  expect(
+    within(pohozhee).getByRole('button', { name: 'Это он: «Корж для пиццы»' }),
+  ).toBeInTheDocument()
   expect(within(pohozhee).getByRole('button', { name: 'Это новый' })).toBeEnabled()
   expect(within(pohozhee).queryByRole('button', { name: 'Добавить в справочник' })).toBe(null)
 
   const sirota = screen.getByTestId('kartochka-24')
   expect(within(sirota).getByRole('button', { name: 'Добавить в справочник' })).toBeEnabled()
-  expect(within(sirota).queryByRole('button', { name: 'Это он' })).toBe(null)
+  expect(within(sirota).queryByRole('button', { name: /^Это он/ })).toBe(null)
 })
 
 test('справочник не загрузился — экран говорит об этом, а не молчит', async () => {

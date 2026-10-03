@@ -1,0 +1,72 @@
+/* Кандидаты пары на «Сверке». Без кружка: на живой проверке 02.10 он
+   был непонятен. Один кандидат — просто строка, выбирает кнопка с его
+   именем; несколько — строки, каждая выбирается нажатием в любое место.
+   Свой файл, а не sverka.css: тот правит ветка мобильного вида. */
+
+.sverka-kartochka .varianty {
+  display: grid;
+  gap: var(--shag);
+}
+
+.sverka-kartochka .variant {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--shag) calc(var(--shag) * 3);
+  padding: var(--shag) 0;
+}
+
+/* Имена бывают длинными и без пробелов в нужных местах: на 360 px они
+   переносятся, а не выталкивают страницу вбок. */
+.sverka-kartochka .variant-imya {
+  overflow-wrap: anywhere;
+}
+
+/* Строка, которую выбирают: рамкой видно, что она нажимается; от 44 px —
+   в неё попадают пальцем. */
+.sverka-kartochka .variant--vybor {
+  min-height: 44px;
+  align-items: center;
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border: 1px solid var(--granitsa);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.sverka-kartochka .variant--vybor:hover {
+  background: var(--fon);
+}
+
+/* Сам переключатель скрыт — фокус клавиатуры видно на всей строке. */
+.sverka-kartochka .variant--vybor:focus-within {
+  outline: 2px solid var(--aktsent);
+  outline-offset: 2px;
+}
+
+/* Выбранная — рамкой акцента и словом «выбран»: не одним цветом. */
+.sverka-kartochka .variant--vybran {
+  border-color: var(--aktsent);
+  box-shadow: inset 0 0 0 1px var(--aktsent);
+}
+
+.sverka-kartochka .variant-vybran {
+  color: var(--aktsent);
+  font-weight: 600;
+}
+
+/* Пока идёт подтверждение, выбор не меняют. */
+.sverka-kartochka .variant--zhdyot {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.sverka-kartochka .variant--zhdyot:hover {
+  background: none;
+}
+
+/* «Это он: «…»» несёт имя кандидата — длинное переносится внутри кнопки. */
+.sverka-kartochka .deystviya .eto-on {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
