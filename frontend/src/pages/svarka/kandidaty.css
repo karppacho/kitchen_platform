@@ -33,14 +33,35 @@
   cursor: pointer;
 }
 
-.sverka-kartochka .variant--vybor:hover {
-  background: var(--fon);
+/* Наведение — только там, где оно есть: на телефоне :hover залипает после
+   касания, и строка выглядела бы выбранной. */
+@media (hover: hover) {
+  .sverka-kartochka .variant--vybor:hover {
+    background: var(--fon);
+  }
+
+  .sverka-kartochka .variant--zhdyot:hover {
+    background: none;
+  }
 }
 
-/* Сам переключатель скрыт — фокус клавиатуры видно на всей строке. */
+/* Сам переключатель скрыт — фокус клавиатуры видно на всей строке. Запасной
+   вариант — :focus-within: рамка и после щелчка мышью, зато она есть. */
 .sverka-kartochka .variant--vybor:focus-within {
   outline: 2px solid var(--aktsent);
   outline-offset: 2px;
+}
+
+/* Где браузер знает :has — рамка только от клавиатуры, как у кнопок. */
+@supports selector(:has(*)) {
+  .sverka-kartochka .variant--vybor:focus-within {
+    outline: none;
+  }
+
+  .sverka-kartochka .variant--vybor:has(:focus-visible) {
+    outline: 2px solid var(--aktsent);
+    outline-offset: 2px;
+  }
 }
 
 /* Выбранная — рамкой акцента и словом «выбран»: не одним цветом. */
@@ -58,10 +79,6 @@
 .sverka-kartochka .variant--zhdyot {
   cursor: default;
   opacity: 0.6;
-}
-
-.sverka-kartochka .variant--zhdyot:hover {
-  background: none;
 }
 
 /* «Это он: «…»» несёт имя кандидата — длинное переносится внутри кнопки. */

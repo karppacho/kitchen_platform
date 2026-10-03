@@ -372,7 +372,8 @@ test('кандидатов несколько — нажатие на строк
 test('варианты выбираются с клавиатуры: группа подписана, стрелки, пробел, Enter', async () => {
   narisovat()
   const sakhar = await screen.findByTestId('kartochka-6')
-  expect(within(sakhar).getByRole('radiogroup', { name: 'Варианты из справочника' })).toBeInTheDocument()
+  // Подпись с именем карточки: на «Сверке» групп вариантов несколько.
+  expect(within(sakhar).getByRole('radiogroup', { name: 'Варианты для «Сахар»' })).toBeInTheDocument()
   const [pervyi, vtoroi] = within(sakhar).getAllByRole('radio')
 
   act(() => pervyi!.focus())
