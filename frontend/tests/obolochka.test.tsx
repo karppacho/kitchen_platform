@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { MemoryRouter } from 'react-router-dom'
-import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
+import { afterAll, afterEach, beforeAll, expect, test, vi } from 'vitest'
 
 import { App } from '../src/App'
 import { dostupnye, RAZDELY } from '../src/shell/razdely'
@@ -140,25 +140,66 @@ test('неизвестный адрес не даёт пустой экран', 
   expect(screen.getByRole('link', { name: 'Блюда' })).toHaveAttribute('aria-current', 'page')
 })
 
-test('на узком экране меню открывается кнопкой и закрывается после выбора пункта', async () => {
+test('на телефоне меню — шторка поверх страницы: открывается кнопкой, закрывается по пункту', async () => {
   setViewport(360)
-  const { container } = narisovat()
-  await screen.findByText('Алексей')
+  narisovat()
+  await screen.findByRole('heading', { name: 'Блюда' })
 
   const knopka = screen.getByRole('button', { name: 'Разделы' })
   expect(knopka).toHaveAttribute('aria-expanded', 'false')
-  // Кнопка — обычный <button>, поэтому таб-порядок и активация с клавиатуры
-  // (Enter/Space) даёт браузер сам, без ручной обвязки.
-  expect(knopka.tagName).toBe('BUTTON')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 
   await userEvent.click(knopka)
+  const shtorka = screen.getByRole('dialog', { name: 'Разделы' })
   expect(knopka).toHaveAttribute('aria-expanded', 'true')
-  expect(container.querySelector('.bok')).toHaveClass('bok--otkryt')
+  expect(knopka).toHaveAttribute('aria-controls', shtorka.id)
+  // Все восемь разделов — внутри шторки, тем же Nav.
+  for (const razdel of RAZDELY) {
+    expect(within(shtorka).getByRole('link', { name: razdel.nazvanie })).toBeInTheDocument()
+  }
 
-  await userEvent.click(screen.getByRole('link', { name: 'Справочник' }))
-
+  await userEvent.click(within(shtorka).getByRole('link', { name: 'Справочник' }))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   expect(knopka).toHaveAttribute('aria-expanded', 'false')
-  expect(container.querySelector('.bok')).not.toHaveClass('bok--otkryt')
+  expect(await screen.findByRole('heading', { name: 'Справочник ингредиентов' })).toBeInTheDocument()
+})
+
+test('на телефоне шторка закрывается по Escape и по нажатию на затемнение', async () => {
+  setViewport(360)
+  const { baseElement } = narisovat()
+  await screen.findByRole('heading', { name: 'Блюда' })
+  const knopka = screen.getByRole('button', { name: 'Разделы' })
+
+  await userEvent.click(knopka)
+  expect(screen.getByRole('dialog', { name: 'Разделы' })).toBeInTheDocument()
+  await userEvent.keyboard('{Escape}')
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(knopka).toHaveFocus()
+
+  await userEvent.click(knopka)
+  // Затемнение закрывает по click, а не по pointerdown (см. ModalnayaPanel):
+  // иначе синтезированный после touchend click попал бы в то, что под ним.
+  await userEvent.click(baseElement.querySelector('.modalnaya-fon')!)
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+})
+
+test('на телефоне смена адреса закрывает шторку', async () => {
+  // Системная «Назад» на Android при открытой шторке меняет страницу под
+  // затемнением, минуя пункт шторки, — шторка должна закрыться и по этому
+  // пути, иначе остаётся открытой с `inert` на всей странице. Смену адреса
+  // мимо шторки даёт ссылка во вкладках внизу: они под затемнением `inert`,
+  // но jsdom этот атрибут не применяет — щелчок проходит.
+  setViewport(360)
+  narisovat()
+  await screen.findByRole('heading', { name: 'Блюда' })
+
+  await userEvent.click(screen.getByRole('button', { name: 'Разделы' }))
+  expect(screen.getByRole('dialog', { name: 'Разделы' })).toBeInTheDocument()
+
+  const vkladki = screen.getByRole('navigation', { name: 'Основные разделы' })
+  await userEvent.click(within(vkladki).getByRole('link', { name: 'Справочник' }))
+  expect(await screen.findByRole('heading', { name: 'Справочник ингредиентов' })).toBeInTheDocument()
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
 })
 
 test('строка свежести стоит над экраном', async () => {
@@ -172,29 +213,85 @@ test('строка свежести стоит над экраном', async () 
   expect(stroka.compareDocumentPosition(zagolovok) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 })
 
-test('шапка показывает обе роли по-русски, включая узкий экран', async () => {
-  // Основной случай, не редкий: у настоящего шефа по ТЗ несколько ролей
-  // (['chef', 'developer']) — во всех остальных тестах в моках только
-  // одна, этот проверяет реальный сценарий входа.
+test('на телефоне имя, роли и «Выйти» — в шторке, а в шапке — название раздела', async () => {
   server.use(
     http.get('/api/me', () =>
-      HttpResponse.json({
-        email: 'chef@example.com',
-        display_name: 'Алексей',
-        roles: ['chef', 'developer'],
-      }),
+      HttpResponse.json({ email: 'chef@example.com', display_name: 'Алексей', roles: ['chef', 'developer'] }),
     ),
+    http.post('/api/auth/logout', () => new HttpResponse(null, { status: 204 })),
   )
-
   setViewport(360)
-  narisovat()
+  narisovat('/dishes/B001')
+  await screen.findByRole('heading', { name: 'Тестовое блюдо' })
 
-  // jsdom не считает раскладку (нет движка вёрстки) — горизонтальное
-  // переполнение шапки на 360 px тут программно не подтвердить, гарантию
-  // на этот счёт даёт CSS (overflow-wrap на .shapka-kto в shell.css), не
-  // тест. Тест подтверждает то, что можно: обе роли по-русски видны
-  // одновременно, а не срезаны логикой рендера.
-  expect(await screen.findByText('бренд-шеф, разработчик')).toBeInTheDocument()
+  // У карточки блюда свой <header> внутри <main>. По ARIA это не banner
+  // (banner — только header вне секций), но Testing Library это ограничение
+  // не учитывает и находит два — берём шапку оболочки: ту, что вне <main>.
+  const shapka = screen.getAllByRole('banner').find((el) => el.closest('main') === null)!
+  expect(shapka).toHaveTextContent('Блюда')
+  expect(within(shapka).queryByRole('button', { name: 'Выйти' })).not.toBeInTheDocument()
+  expect(within(shapka).queryByText('Алексей')).not.toBeInTheDocument()
+
+  await userEvent.click(screen.getByRole('button', { name: 'Разделы' }))
+  const shtorka = screen.getByRole('dialog', { name: 'Разделы' })
+  expect(within(shtorka).getByText('Алексей')).toBeInTheDocument()
+  expect(within(shtorka).getByText('бренд-шеф, разработчик')).toBeInTheDocument()
+
+  await userEvent.click(within(shtorka).getByRole('button', { name: 'Выйти' }))
+  expect(await screen.findByRole('heading', { name: 'Кухня' })).toBeInTheDocument()
+})
+
+test('на телефоне внизу вкладки живых разделов, на компьютере их нет', async () => {
+  setViewport(360)
+  const { unmount } = narisovat()
+  await screen.findByRole('heading', { name: 'Блюда' })
+  const vkladki = screen.getByRole('navigation', { name: 'Основные разделы' })
+  expect(within(vkladki).getByRole('link', { name: 'Блюда' })).toHaveAttribute('aria-current', 'page')
+  // Шефу открыты все четыре живых раздела — по вкладке на каждый.
+  expect(within(vkladki).getAllByRole('link')).toHaveLength(4)
+  unmount()
+
+  setViewport(1440)
+  narisovat()
+  await screen.findByText('Алексей')
+  expect(screen.queryByRole('navigation', { name: 'Основные разделы' })).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Выйти' })).toBeInTheDocument()
+})
+
+test('у повара на телефоне нет вкладок, в шапке — его раздел', async () => {
+  // Повару открыт один раздел: одна вкладка бессмысленна, полосы внизу
+  // нет вовсе. Шапка при этом по-прежнему называет раздел.
+  server.use(
+    http.get('/api/me', () =>
+      HttpResponse.json({ email: 'cook@example.com', display_name: 'Повар', roles: ['cook'] }),
+    ),
+    // Экран повара при открытии спрашивает текущий черновик — без ответа
+    // запрос ушёл бы мимо msw. Черновика нет: экран показывает «Начать».
+    http.get('/api/cards/drafts/current', () => HttpResponse.json(null)),
+  )
+  setViewport(360)
+  narisovat('/cards')
+  await screen.findByRole('button', { name: 'Начать' })
+
+  expect(screen.queryByRole('navigation', { name: 'Основные разделы' })).not.toBeInTheDocument()
+  const shapka = screen.getAllByRole('banner').find((el) => el.closest('main') === null)!
+  expect(shapka).toHaveTextContent('Новый ингредиент')
+})
+
+test('сломавшийся экран не роняет оболочку', async () => {
+  // Ответ карточки, от которого экран падает при отрисовке: components не
+  // массив. Граница показывает сообщение, шапка и меню остаются. Заглушку
+  // console.error снимаем в finally: упади проверка раньше — она осталась бы
+  // висеть на соседних тестах.
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    server.use(http.get('/api/dishes/B001', () => HttpResponse.json({ legacy_id: 'B001', name: 'Сломанное', components: null })))
+    narisovat('/dishes/B001')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Экран не открылся')
+    expect(screen.getByRole('button', { name: 'Выйти' })).toBeInTheDocument()
+  } finally {
+    vi.restoreAllMocks()
+  }
 })
 
 test('доступные разделы отбираются только по ролям, «скоро» — отдельный фильтр', () => {
