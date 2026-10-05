@@ -362,6 +362,7 @@ def test_piece_without_piece_weight_stays_raw(piece_weight: Decimal | None) -> N
     [
         ({"weight_per_piece_g": None}, "вес 1 шт"),
         ({"price_per_unit": None}, "не заполнена цена"),
+        ({"price_per_unit": Decimal("0")}, "не заполнена цена"),
     ],
 )
 def test_zero_net_on_zero_cost_row_keeps_only_its_old_warning(
@@ -370,10 +371,14 @@ def test_zero_net_on_zero_cost_row_keeps_only_its_old_warning(
     """Строка, которая и так стоит 0, получает одно замечание о стоимости — прежнее.
 
     Так было и при решении 23.09: второе «не учтён» к той же строке — шум,
-    шефу уже сказано, чего не хватает.
+    шефу уже сказано, чего не хватает. Цена ровно 0 — то же, что пустая
+    (правило 6 стража): разведи кто-нибудь проверки «пусто» и «0» по разным
+    местам, и штучная строка с ценой 0 получила бы замечание о нуле в ТТК
+    вместо замечания о цене.
     """
     result = calculate(dish(main(croissant(**overrides), "0")))
 
+    assert result.uc_rub == Decimal("0.00")
     assert any(old_fragment in w for w in result.warnings)
     assert not any(ZERO_NET in w for w in result.warnings)
 
@@ -515,6 +520,29 @@ def test_removed_ingredient_without_price_gets_both_warnings() -> None:
     assert any("не заполнена цена" in w for w in result.warnings)
     assert result.uc_rub == Decimal("0.00")
     assert len(result.components) == 1, "строка остаётся в составе"
+
+
+def test_removed_piece_counted_in_pieces_gets_both_notes() -> None:
+    """Удалённый штучный со штуками в ТТК: и замечание об удалении, и справка.
+
+    Замечание об удалении добавочное (правило 9 стража): штуки пересчитываются
+    по последним известным данным как обычно — 1 шт = 60 г = 49,50 ₽, а не
+    0,83 ₽ за «1 г». Пересчёт, пропущенный у удалённых, молча занизил бы
+    себестоимость; ранний выход после замечания об удалении — ещё и выкинул бы
+    строку из состава. Порядок — как у любой строки: сначала об удалении,
+    потом о том, как прочитана запись. Эталон сверяет замечания вместе с
+    порядком, поэтому здесь весь список.
+    """
+    item = croissant(removed=True, kcal_100g=Decimal("400"))
+    result = calculate(dish(main(item, "1")))
+
+    assert result.uc_rub == Decimal("49.50")
+    assert result.output_grams == Decimal("60")
+    assert result.warnings == [
+        "Ингредиент «Круассан сливочный 60гр» удалён из справочника — посчитан по "
+        "последним известным данным, поправьте ТТК",
+        "Штучный «Круассан сливочный 60гр»: в ТТК 1 — посчитано штуками: 1 шт = 60 г",
+    ]
 
 
 def test_removed_packaging_counts_and_warns() -> None:
