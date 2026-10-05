@@ -196,9 +196,16 @@ def test_piece_without_weight_warns() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Штучные: в ТТК вписано количество штук, а не граммы
+# Штучные: в ТТК бывает вписано число штук, а не граммы
 # ---------------------------------------------------------------------------
-PIECES_NOT_GRAMS = "похоже, вписано количество штук"
+# Решение Александра 03.10.2026 заменило решение 23.09. Тогда расчёт читал
+# любое значение как граммы и только предупреждал «похоже, вписано
+# количество штук», а лист должен был править шеф; тесты того решения
+# закрепляли 0,83 ₽ у круассана B001 и замечание вместо пересчёта. Они
+# заменены здесь осознанно: значение меньше 10 % веса штуки — это штуки, и
+# пересчитывает их в граммы платформа.
+PIECES_NOTE = "посчитано штуками"
+ZERO_NET = "в ТТК нетто 0"
 
 
 def croissant(**overrides: object) -> IngredientSpec:
@@ -214,87 +221,182 @@ def croissant(**overrides: object) -> IngredientSpec:
 
 
 @pytest.mark.parametrize(
-    ("grams", "warns"),
-    [("1", True), ("0", True), ("5.9", True), ("6", False), ("30", False)],
+    ("value", "cost", "net", "pieces"),
+    [
+        ("1", "49.50", "60", "1"),
+        ("0.5", "24.75", "30", "0.5"),
+        ("5.9", "292.05", "354", "5.9"),
+        ("6", "4.95", "6", None),
+        ("30", "24.75", "30", None),
+    ],
 )
-def test_piece_net_below_tenth_of_piece_weight_warns(grams: str, warns: bool) -> None:
-    """Нетто меньше 10 % веса штуки — почти наверняка штуки вместо граммов.
+def test_piece_value_below_tenth_of_piece_weight_is_a_count(
+    value: str, cost: str, net: str, pieces: str | None
+) -> None:
+    """Меньше 10 % веса штуки — число штук: нетто = штуки × вес штуки.
 
-    B001: в ТТК «1» у круассана весом 60 г. Расчёт понимает граммы и берёт
-    1/60 штуки — 0,83 ₽ вместо 49,50 ₽, а шеф не видит ни одного замечания.
-    0 г — тот же случай, только без единой штуки. 5,9 г и 6 г держат порог
-    с двух сторон: ровно 10 % замечания не дают, правило — «меньше 10 %».
-    30 г из 60 — честные полштуки.
+    B001: в ТТК «1» у круассана весом 60 г. Прочитанная граммами, единица
+    давала 1/60 штуки — 0,83 ₽ вместо 49,50 ₽. Полштуки шеф вправе записать
+    как «0.5»: 30 г, 24,75 ₽. 5,9 и 6 держат порог с двух сторон: 5,9 шт —
+    это 354 г и 292,05 ₽, а ровно 10 % (6 из 60) — уже граммы, правило —
+    «меньше 10 %»: 6 г = 0,1 штуки = 4,95 ₽. 30 г из 60 — честные полштуки
+    граммами, как и раньше. Справка ставится только там, где был пересчёт.
     """
-    result = calculate(dish(main(croissant(), grams)))
+    result = calculate(dish(main(croissant(), value)))
+    [row] = result.components
 
-    assert any(PIECES_NOT_GRAMS in w for w in result.warnings) is warns
-
-
-def test_piece_warning_keeps_cost() -> None:
-    """Правило только предупреждает — себестоимость прежняя.
-
-    1 г круассана = 1/60 штуки × 49,50 ₽ = 0,825 → 0,83 ₽, ровно как у
-    B001 в эталоне бота. Решение 23.09.2026: платформа предупреждает, а лист
-    правит шеф. Число, «исправленное» догадкой, разошлось бы с таблицей.
-    """
-    result = calculate(dish(main(croissant(), "1")))
-
-    assert any(PIECES_NOT_GRAMS in w for w in result.warnings)
-    assert result.uc_rub == Decimal("0.83")
+    assert result.uc_rub == Decimal(cost)
+    assert row.net_weight_g == Decimal(net)
+    assert row.pieces == (Decimal(pieces) if pieces is not None else None)
+    assert any(PIECES_NOTE in w for w in result.warnings) is (pieces is not None)
 
 
-def test_piece_warning_writes_weights_as_chef_does() -> None:
-    """Замечание называет позицию и оба веса без хвостовых нулей.
+def test_piece_note_writes_numbers_as_chef_does() -> None:
+    """Справка называет позицию, число из ТТК и вес штуки — без хвостовых нулей.
 
-    База хранит веса как Numeric(12,3) и отдаёт «1.000» и «60.000». Шеф
-    прочитал бы «нетто 1.000 г» как тысячу граммов — ровно обратное тому,
-    о чём замечание.
+    База хранит веса как Numeric(12,3) и отдаёт «1.000» и «60.000». «В ТТК
+    1.000» шеф прочитал бы как тысячу — ровно обратное тому, о чём справка.
     """
     item = croissant(weight_per_piece_g=Decimal("60.000"))
     result = calculate(dish(main(item, "1.000")))
 
-    [warning] = [w for w in result.warnings if PIECES_NOT_GRAMS in w]
-    assert "«Круассан сливочный 60гр»" in warning
-    assert "нетто 1 г" in warning
-    assert "весе штуки 60 г" in warning
+    assert (
+        "Штучный «Круассан сливочный 60гр»: в ТТК 1 — посчитано штуками: 1 шт = 60 г"
+        in result.warnings
+    )
+
+
+def test_piece_zero_net_warns_and_costs_zero() -> None:
+    """Нетто 0 — ни штук, ни граммов: строка в себестоимость не попала.
+
+    B114 и B115 («Котлета по киевски»): в ТТК 0 при цене 133,33 ₽ за штуку.
+    Пересчитывать нечего, а молчать нельзя — шеф должен вписать штуки или
+    граммы. Строка при этом остаётся в составе, как любая нулевая.
+    """
+    result = calculate(dish(main(croissant(), "0")))
+
+    assert result.uc_rub == Decimal("0.00")
+    assert (
+        "Штучный «Круассан сливочный 60гр»: в ТТК нетто 0 — в себестоимости не учтён, "
+        "впишите штуки или граммы" in result.warnings
+    )
+    assert not any(PIECES_NOTE in w for w in result.warnings)
+    assert len(result.components) == 1
+
+
+def test_piece_count_gets_losses_on_top() -> None:
+    """Штуки переводятся в нетто, потери накидываются сверху — как у граммов.
+
+    1 шт = 60 г нетто; при потерях 10 % брутто 60 / 0,9 = 66,67 г, это
+    1,111… штуки × 49,50 ₽ = 55,00 ₽. Мимо потерь (штуки × цена) вышло бы
+    49,50 ₽ — недосчёт ровно на потери.
+    """
+    result = calculate(dish(main(croissant(losses_cutting=Decimal("0.1")), "1")))
+    [row] = result.components
+
+    assert row.gross_weight_g == Decimal("66.67")
+    assert result.uc_rub == Decimal("55.00")
+
+
+def test_piece_count_goes_to_output_and_kbju_as_grams() -> None:
+    """Выход блюда и КБЖУ — по граммам, а не по числу из ТТК.
+
+    Круассан 400 ккал на 100 г: 1 шт = 60 г = 240 ккал; белки 8 × 0,6 = 4,8,
+    жиры 20 × 0,6 = 12, углеводы 45 × 0,6 = 27. По сырому значению выход
+    вышел бы 1 г, а калорий — 4.
+    """
+    item = croissant(
+        protein_100g=Decimal("8"),
+        fat_100g=Decimal("20"),
+        carbs_100g=Decimal("45"),
+        kcal_100g=Decimal("400"),
+    )
+    result = calculate(dish(main(item, "1")))
+
+    assert result.output_grams == Decimal("60")
+    assert result.protein_g == Decimal("4.8")
+    assert result.fat_g == Decimal("12.0")
+    assert result.carbs_g == Decimal("27.0")
+    assert result.kcal == Decimal("240")
+    assert result.kbju_coverage == Decimal("1")
+
+
+@pytest.mark.parametrize("price", [None, Decimal("0")])
+def test_piece_count_without_price_still_gives_grams(price: Decimal | None) -> None:
+    """Без цены — стоимость 0 и прежнее замечание, но граммы считаются.
+
+    От граммов зависят выход и КБЖУ, а им цена не нужна. Справка ставится и
+    здесь: шеф должен видеть, что «1» прочитана как 60 г.
+    """
+    result = calculate(dish(main(croissant(price_per_unit=price), "1")))
+    [row] = result.components
+
+    assert result.uc_rub == Decimal("0.00")
+    assert row.net_weight_g == Decimal("60")
+    assert result.output_grams == Decimal("60")
+    assert any("не заполнена цена" in w for w in result.warnings)
+    assert any(PIECES_NOTE in w for w in result.warnings)
+
+
+@pytest.mark.parametrize("piece_weight", [None, Decimal("0.000")])
+def test_piece_without_piece_weight_stays_raw(piece_weight: Decimal | None) -> None:
+    """Без веса штуки пересчитать нельзя — как раньше: замечание, значение сырое.
+
+    Вес 0 — отдельный случай: база отдаёт его как «0.000», и проверка
+    `is None` вместо «пусто» пропустила бы строку с нулевой стоимостью без
+    единого замечания.
+    """
+    result = calculate(dish(main(croissant(weight_per_piece_g=piece_weight), "1")))
+    [row] = result.components
+
+    assert result.uc_rub == Decimal("0.00")
+    assert any("вес 1 шт" in w for w in result.warnings)
+    assert not any(PIECES_NOTE in w for w in result.warnings)
+    assert row.net_weight_g == Decimal("1")
+    assert row.pieces is None
+    assert result.output_grams == Decimal("1")
 
 
 @pytest.mark.parametrize(
     ("overrides", "old_fragment"),
     [
         ({"weight_per_piece_g": None}, "вес 1 шт"),
-        ({"weight_per_piece_g": Decimal("0.000")}, "вес 1 шт"),
         ({"price_per_unit": None}, "не заполнена цена"),
         ({"price_per_unit": Decimal("0")}, "не заполнена цена"),
     ],
 )
-def test_zero_cost_row_keeps_only_its_old_warning(
+def test_zero_net_on_zero_cost_row_keeps_only_its_old_warning(
     overrides: dict[str, object], old_fragment: str
 ) -> None:
-    """Строка, которая и так стоит 0, получает одно замечание — прежнее.
+    """Строка, которая и так стоит 0, получает одно замечание о стоимости — прежнее.
 
-    Второе к той же строке было бы шумом: шефу уже сказано, чего не хватает.
-    Вес штуки 0 — отдельный случай: база отдаёт его как «0.000», и проверка
-    `is None` вместо «пусто» пропустила бы строку с нулевой стоимостью без
-    единого замечания.
+    Так было и при решении 23.09: второе «не учтён» к той же строке — шум,
+    шефу уже сказано, чего не хватает. Цена ровно 0 — то же, что пустая
+    (правило 6 стража): разведи кто-нибудь проверки «пусто» и «0» по разным
+    местам, и штучная строка с ценой 0 получила бы замечание о нуле в ТТК
+    вместо замечания о цене.
     """
-    result = calculate(dish(main(croissant(**overrides), "1")))
+    result = calculate(dish(main(croissant(**overrides), "0")))
 
+    assert result.uc_rub == Decimal("0.00")
     assert any(old_fragment in w for w in result.warnings)
-    assert not any(PIECES_NOT_GRAMS in w for w in result.warnings)
+    assert not any(ZERO_NET in w for w in result.warnings)
 
 
-def test_weight_ingredient_with_piece_weight_does_not_warn() -> None:
+def test_weight_ingredient_with_piece_weight_is_not_converted() -> None:
     """Ветку выбирает единица из справочника, а не наличие «Вес 1 шт».
 
     У весового ингредиента колонка «Вес 1 шт» может быть заполнена, но 1 г
-    соли на порцию — это просто 1 г.
+    соли на порцию — это просто 1 г: 1 / 1000 × 177 ₽ = 0,177 → 0,18 ₽.
     """
     salt = ing(name="Соль", unit="кг", weight_per_piece_g=Decimal("60"))
     result = calculate(dish(main(salt, "1")))
+    [row] = result.components
 
-    assert not any(PIECES_NOT_GRAMS in w for w in result.warnings)
+    assert result.uc_rub == Decimal("0.18")
+    assert row.net_weight_g == Decimal("1")
+    assert row.pieces is None
+    assert not any(PIECES_NOTE in w for w in result.warnings)
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +520,29 @@ def test_removed_ingredient_without_price_gets_both_warnings() -> None:
     assert any("не заполнена цена" in w for w in result.warnings)
     assert result.uc_rub == Decimal("0.00")
     assert len(result.components) == 1, "строка остаётся в составе"
+
+
+def test_removed_piece_counted_in_pieces_gets_both_notes() -> None:
+    """Удалённый штучный со штуками в ТТК: и замечание об удалении, и справка.
+
+    Замечание об удалении добавочное (правило 9 стража): штуки пересчитываются
+    по последним известным данным как обычно — 1 шт = 60 г = 49,50 ₽, а не
+    0,83 ₽ за «1 г». Пересчёт, пропущенный у удалённых, молча занизил бы
+    себестоимость; ранний выход после замечания об удалении — ещё и выкинул бы
+    строку из состава. Порядок — как у любой строки: сначала об удалении,
+    потом о том, как прочитана запись. Эталон сверяет замечания вместе с
+    порядком, поэтому здесь весь список.
+    """
+    item = croissant(removed=True, kcal_100g=Decimal("400"))
+    result = calculate(dish(main(item, "1")))
+
+    assert result.uc_rub == Decimal("49.50")
+    assert result.output_grams == Decimal("60")
+    assert result.warnings == [
+        "Ингредиент «Круассан сливочный 60гр» удалён из справочника — посчитан по "
+        "последним известным данным, поправьте ТТК",
+        "Штучный «Круассан сливочный 60гр»: в ТТК 1 — посчитано штуками: 1 шт = 60 г",
+    ]
 
 
 def test_removed_packaging_counts_and_warns() -> None:
