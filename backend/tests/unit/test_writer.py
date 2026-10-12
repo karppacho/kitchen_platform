@@ -219,6 +219,14 @@ def test_row_with_only_q_or_w_is_skipped(column: int) -> None:
     assert rig.sheet.get_all_values()[5] == only
 
 
+def _checkbox_column(tick: str) -> list[list[str]]:
+    """Живой случай 06.10.2026: карточки в строках 3–117, а колонка галочек W
+    — до строки 333."""
+    cards = [[*_pad(["", f"Карточка {number}"]), tick] for number in range(3, 118)]
+    ticks = [[""] * WIDTH + [tick] for _ in range(118, 334)]
+    return _cards(*cards, *ticks)
+
+
 @pytest.mark.parametrize(
     ("cells", "expected"),
     [
@@ -229,10 +237,37 @@ def test_row_with_only_q_or_w_is_skipped(column: int) -> None:
         (_cards(EXISTING[0], [], EXISTING[1]), 6),
         (_cards(*EXISTING, [""] * 16 + ["Q"], [], [""] * 22 + ["W"]), 7),
         (_cards(*EXISTING, ["", "   ", "пробелы в имени — не имя, но строка не пуста"]), 7),
+        (_checkbox_column("FALSE"), 118),
+        (_checkbox_column("ЛОЖЬ"), 118),
+        (_cards(*EXISTING, [""] * WIDTH + [" false "]), 6),
+        (_cards(*EXISTING, [""] * WIDTH + ["TRUE"]), 7),
+        (_cards(*EXISTING, [""] * WIDTH + ["ИСТИНА"]), 7),
+        (_cards(*EXISTING, [""] * WIDTH + ["заметка"]), 7),
+        (_cards(*EXISTING, [""] * (WIDTH - 1) + ["FALSE"]), 7),
     ],
-    ids=["empty", "one-header-row", "header-only", "three", "gap", "q-then-gap", "blank-name"],
+    ids=[
+        "empty",
+        "one-header-row",
+        "header-only",
+        "three",
+        "gap",
+        "q-then-gap",
+        "blank-name",
+        "unticked-w-to-333",
+        "unticked-w-ru",
+        "unticked-any-case",
+        "ticked-w",
+        "ticked-w-ru",
+        "text-w",
+        "false-in-v",
+    ],
 )
 def test_find_free_row(cells: list[list[str]], expected: int) -> None:
+    """Галочка без отметки («FALSE», «ЛОЖЬ») правее V строку не занимает: шеф
+    держит колонку галочек на сотни строк вперёд, и 06.10.2026 карточка легла
+    под неё — в строку 334 вместо 118. Отмеченная галочка и текст правее V —
+    заметка шефа, строка занята; в A–V занята любая непустая ячейка, «FALSE»
+    тоже."""
     assert find_free_row(cells) == expected
 
 
