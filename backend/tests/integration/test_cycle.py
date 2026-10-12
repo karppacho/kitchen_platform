@@ -13,10 +13,10 @@ from sqlalchemy.exc import OperationalError
 
 from kitchen.db import models
 from kitchen.sync import specs
-from kitchen.sync.cycle import SyncCycle
+from kitchen.sync.cycle import SHIFT_PROBLEM_START, SyncCycle
 from kitchen.sync.importer import take_import_lock
 from kitchen.sync.reader import BOOK_OPEN_FAILED, SheetsReader
-from tests.fake_sheets import IDS, cards_sheet, kitchen_sheets, row, sheets_client
+from tests.fake_sheets import IDS, cards_sheet, header, kitchen_sheets, row, sheets_client
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -546,6 +546,166 @@ def test_failed_import_of_one_book_spares_the_other(sessions) -> None:
     _cycle(sessions, clock, kitchen={"ING": _losses_150()}, cards=cards).run()
 
     assert len(_failure_notes(sessions)) == 1, "повтор той же беды — не событие"
+
+
+# ---------------------------------------------------------------------------
+# Строки ING съехали относительно id: книга кухни не переносится
+# ---------------------------------------------------------------------------
+
+_SEVEN = (
+    ("1", "Томаты", "177"),
+    ("2", "Сахар", "100"),
+    ("3", "Сахар", "0"),
+    ("4", "Сырная котлета", "450"),
+    ("5", "Фритюрное масло", "180"),
+    ("6", "Лук репчатый", "40"),
+    ("7", "Сыр чеддер", "900"),
+)
+"""ING на семь позиций: id, название (вывод ``QUERY``), цена (ручная колонка).
+id 1–3 — как в фальшивке: на id 1 ссылается ТТК."""
+
+
+def _ing(*lines: tuple[str, str, str]) -> list[list[str]]:
+    return [
+        header(specs.INGREDIENTS),
+        *(
+            row(specs.INGREDIENTS, id=ref_id, name=name, price_per_kg=price, status="активное")
+            for ref_id, name, price in lines
+        ),
+    ]
+
+
+def _query_lost(legacy_id: str) -> list[list[str]]:
+    """ING, из вывода ``QUERY`` которого ушла строка этого id: карточку в книге
+    карточек перевели в «Нет». Ручные колонки (id, цена) стоят на месте, а
+    названия ниже съехали на строку вверх; у последнего id вывода не осталось."""
+    names = [name for ref_id, name, _ in _SEVEN if ref_id != legacy_id]
+    return _ing(
+        *(
+            (ref_id, name, price)
+            for (ref_id, _, price), name in zip(_SEVEN, [*names, ""], strict=True)
+        )
+    )
+
+
+def _names(sessions) -> dict[str, str]:
+    """Названия ингредиентов в базе: id → название."""
+    query = select(models.Ingredient.legacy_id, models.Ingredient.name)
+    with sessions() as session:
+        return dict(session.execute(query).tuples().all())
+
+
+def test_shifted_ing_rows_block_kitchen_but_not_cards(sessions) -> None:
+    """Сдвиг строк ING — как сдвиг колонок: книга кухни не переносится, старые
+    названия остаются, причина — на сайт, полный список — в журнал. Карточки
+    переносятся как обычно (Spec 2)."""
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    before = _names(sessions)
+    checked = clock.now
+    clock.tick()
+    cards = cards_sheet()
+    cards[2] = row(specs.INGREDIENT_CARDS, name="Томаты", supplier="Новый поставщик")
+
+    result = _cycle(sessions, clock, kitchen={"ING": _query_lost("4")}, cards=cards).run()
+
+    kitchen = result.outcomes["kitchen"]
+    assert kitchen.action == "failed"
+    assert kitchen.problem.startswith(
+        f"{SHIFT_PROBLEM_START}: у 3 id название пришло от другого id — "
+    )
+    assert "стр. 5, id 4: было «Сырная котлета», стало «Фритюрное масло»" in kitchen.problem
+    assert "стр. 7, id 6: «Лук репчатый» → «Сыр чеддер» (было у id 7)" in kitchen.details
+    assert _names(sessions) == before, "названия в базе прежние"
+    state = _state(sessions, "kitchen")
+    assert (state.problem, state.problem_since) == (kitchen.problem, clock.now)
+    assert state.checked_at == checked, "непереносимое не считается свежим"
+    assert _failure_notes(sessions) == [f"kitchen: {kitchen.problem} — {kitchen.details}"]
+    assert result.outcomes["ingredient_cards"].action == "imported"
+    assert _tomato_supplier(sessions) == "Новый поставщик", "карточки в базе новые"
+
+
+def test_same_shift_is_journaled_once(sessions) -> None:
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    clock.tick()
+    _cycle(sessions, clock, kitchen={"ING": _query_lost("4")}).run()
+    since = clock.now
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _query_lost("4")}).run()
+
+    assert result.outcomes["kitchen"].action == "failed"
+    assert len(_failure_notes(sessions)) == 1, "повтор той же причины — не событие"
+    assert _state(sessions, "kitchen").problem_since == since
+
+
+def test_force_does_not_import_shifted_rows(sessions) -> None:
+    """Ручной импорт переносит и без изменений, но не съехавший лист: по id в
+    базу приехали бы чужие названия и КБЖУ."""
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    before = _names(sessions)
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _query_lost("4")}).run(force=True)
+
+    kitchen = result.outcomes["kitchen"]
+    assert kitchen.action == "failed"
+    assert kitchen.problem.startswith(SHIFT_PROBLEM_START)
+    assert _names(sessions) == before
+    assert result.outcomes["ingredient_cards"].action == "imported"
+
+
+def test_aligned_sheet_is_imported_and_clears_shift(sessions) -> None:
+    """Шеф выровнял лист — убрал строку ушедшей карточки целиком, с id и ценой.
+    Перенос идёт сам, причина снимается."""
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    clock.tick()
+    _cycle(sessions, clock, kitchen={"ING": _query_lost("4")}).run()
+    clock.tick()
+    aligned = _ing(*(line for line in _SEVEN if line[0] != "4"))
+
+    result = _cycle(sessions, clock, kitchen={"ING": aligned}).run()
+
+    assert result.outcomes["kitchen"].action == "imported"
+    state = _state(sessions, "kitchen")
+    assert (state.problem, state.problem_since) == (None, None)
+    assert state.checked_at == clock.now
+    assert _names(sessions)["5"] == "Фритюрное масло"
+
+
+@pytest.mark.parametrize(
+    "renamed",
+    [
+        {"4": "Котлета сырная"},
+        # Одно чужое название — ещё не сдвиг: шеф отдал название id 5 позиции
+        # id 4, а id 5 назвал по-новому.
+        {"4": "Фритюрное масло", "5": "Масло для фритюра"},
+    ],
+    ids=["новое название", "название соседа"],
+)
+def test_chef_rename_is_imported(sessions, renamed) -> None:
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    clock.tick()
+    ing = _ing(*((ref_id, renamed.get(ref_id, name), price) for ref_id, name, price in _SEVEN))
+
+    result = _cycle(sessions, clock, kitchen={"ING": ing}).run()
+
+    assert result.outcomes["kitchen"].action == "imported"
+    assert _state(sessions, "kitchen").problem is None
+    names = _names(sessions)
+    assert {ref_id: names[ref_id] for ref_id in renamed} == renamed
+
+
+def test_first_import_has_nothing_to_compare(sessions) -> None:
+    """В пустой базе названий нет — и сравнивать не с чем: лист переносится."""
+    result = _cycle(sessions, Clock(), kitchen={"ING": _query_lost("4")}).run()
+
+    assert result.outcomes["kitchen"].action == "imported"
+    assert _names(sessions)["4"] == "Фритюрное масло"
 
 
 # ---------------------------------------------------------------------------

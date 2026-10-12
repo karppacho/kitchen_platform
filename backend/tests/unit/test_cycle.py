@@ -11,8 +11,19 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 from sqlalchemy.exc import DataError, IntegrityError, OperationalError, SQLAlchemyError
 
 from kitchen.config import Settings
+from kitchen.domain.ing_shift import MovedName
 from kitchen.sync import specs
-from kitchen.sync.cycle import BOOKS, SyncCycle, explain, explain_import, judge, reader_from
+from kitchen.sync.cycle import (
+    BOOKS,
+    SHIFT_PROBLEM_START,
+    SyncCycle,
+    explain,
+    explain_import,
+    judge,
+    reader_from,
+    shift_details,
+    shift_problem,
+)
 from kitchen.sync.importer import Importer
 from kitchen.sync.reader import (
     BOOK_OPEN_FAILED,
@@ -519,6 +530,63 @@ def test_import_failure_speaks_plainly(error: SQLAlchemyError, problem: str) -> 
     ячейку. Прочее (таймаут, обрыв) — без догадки про лист. Исходник — не
     здесь, а в журнале."""
     assert explain_import(error) == problem
+
+
+# ---------------------------------------------------------------------------
+# Строки ING съехали относительно id — причина словами шефа
+# ---------------------------------------------------------------------------
+
+_SHIFT_ADVICE = (
+    "так бывает, когда в книге карточек удалили согласованную карточку или сменили ей "
+    "статус: верните ручные колонки (A, E, L–O, Q–T) к своим названиям — перенос "
+    "возобновится сам"
+)
+
+
+def _moved(count: int) -> tuple[MovedName, ...]:
+    """Съехавший блок: у id N название id N+1, строка листа — N+1."""
+    names = ["Сырная котлета", "Фритюрное масло", "Лук репчатый", "Сыр чеддер", "Перец", "Укроп"]
+    return tuple(
+        MovedName(ref_id=str(n), row=n + 1, was=names[n - 1], now=names[n], owner=str(n + 1))
+        for n in range(1, count + 1)
+    )
+
+
+def test_shift_problem_names_count_examples_and_remedy() -> None:
+    """Шеф видит, сколько id задето, где смотреть и что делать."""
+    assert shift_problem(_moved(2)) == (
+        "в листе «ING» строки съехали относительно id: у 2 id название пришло от другого id — "
+        "стр. 2, id 1: было «Сырная котлета», стало «Фритюрное масло»; "
+        "стр. 3, id 2: было «Фритюрное масло», стало «Лук репчатый»; "
+        f"{_SHIFT_ADVICE}"
+    )
+
+
+def test_shift_problem_shows_three_examples_and_counts_the_rest() -> None:
+    """При сдвиге задеты десятки id, а полосу на сайте читают целиком."""
+    problem = shift_problem(_moved(5))
+
+    assert problem.startswith(f"{SHIFT_PROBLEM_START}: у 5 id название пришло от другого id — ")
+    assert problem.count("стр. ") == 3
+    assert "стр. 4, id 3: было «Лук репчатый», стало «Сыр чеддер»; и ещё 2; так бывает" in problem
+    assert problem.endswith(_SHIFT_ADVICE)
+
+
+def test_shift_details_list_everything_with_owners() -> None:
+    """Полный список — журналу и логу: по нему выравнивают лист."""
+    assert shift_details(_moved(5)) == "; ".join(
+        f"стр. {n + 1}, id {n}: «{was}» → «{now}» (было у id {n + 1})"
+        for n, (was, now) in enumerate(
+            [
+                ("Сырная котлета", "Фритюрное масло"),
+                ("Фритюрное масло", "Лук репчатый"),
+                ("Лук репчатый", "Сыр чеддер"),
+                ("Сыр чеддер", "Перец"),
+                ("Перец", "Укроп"),
+            ],
+            start=1,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
