@@ -107,10 +107,11 @@ class ChangeLog:
             if outcome.action == "failed":
                 if previous is None or previous.problem != outcome.problem:
                     # Исходный текст ошибки — сюда, а на сайт нет: по переведённой
-                    # причине закрытый доступ не отличить от выключенного API.
+                    # причине закрытый доступ не отличить от выключенного API. У
+                    # сдвига строк ING здесь полный список съехавших строк.
                     # Новизна же — по причине: исходник той же беды от цикла к
                     # циклу разный, и по нему запись шла бы каждые пять минут.
-                    raw = f" (исходная ошибка: {outcome.details})" if outcome.details else ""
+                    raw = f" (подробности: {outcome.details})" if outcome.details else ""
                     self._logger.warning("%s: не переносится — %s%s", book, outcome.problem, raw)
             else:
                 # Возврат в строй — и когда лист не менялся, и когда вернулся

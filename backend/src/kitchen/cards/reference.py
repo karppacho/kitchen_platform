@@ -412,12 +412,20 @@ def to_reference(
         _check_known_id(session, card_id, name, result)
     problem = run_import(books, KITCHEN)
     if problem is not None:
+        # При сдвиге строк ING «перенесёт следующий цикл» — неправда: книгу
+        # кухни цикл не переносит, пока лист не выровняли.
+        what = (
+            "перенос книги кухни в базу остановлен сдвигом строк ING — ингредиент появится "
+            "после выравнивания листа"
+            if _is_shift(problem)
+            else "перенос книги кухни в базу не удался — его перенесёт следующий цикл"
+        )
         log.warning(
-            "карточка %s: ингредиент в строке %s листа ING (id %s), но перенос книги кухни в "
-            "базу не удался — его перенесёт следующий цикл: %s",
+            "карточка %s: ингредиент в строке %s листа ING (id %s), но %s: %s",
             card_id,
             result.row,
             result.ref_id,
+            what,
             problem,
         )
     pair = _confirm_written(session, card_id, name, result.ref_id, wait)
