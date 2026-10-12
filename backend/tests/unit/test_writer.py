@@ -219,6 +219,14 @@ def test_row_with_only_q_or_w_is_skipped(column: int) -> None:
     assert rig.sheet.get_all_values()[5] == only
 
 
+def _checkbox_column(tick: str) -> list[list[str]]:
+    """Живой случай 06.10.2026: карточки в строках 3–117, а колонка галочек W
+    — до строки 333."""
+    cards = [[*_pad(["", f"Карточка {number}"]), tick] for number in range(3, 118)]
+    ticks = [[""] * WIDTH + [tick] for _ in range(118, 334)]
+    return _cards(*cards, *ticks)
+
+
 @pytest.mark.parametrize(
     ("cells", "expected"),
     [
@@ -229,11 +237,85 @@ def test_row_with_only_q_or_w_is_skipped(column: int) -> None:
         (_cards(EXISTING[0], [], EXISTING[1]), 6),
         (_cards(*EXISTING, [""] * 16 + ["Q"], [], [""] * 22 + ["W"]), 7),
         (_cards(*EXISTING, ["", "   ", "пробелы в имени — не имя, но строка не пуста"]), 7),
+        (_checkbox_column("FALSE"), 118),
+        (_checkbox_column("ЛОЖЬ"), 118),
+        (_cards(*EXISTING, [""] * WIDTH + [" false "]), 6),
+        (_cards(*EXISTING, [""] * WIDTH + ["TRUE"]), 7),
+        (_cards(*EXISTING, [""] * WIDTH + ["ИСТИНА"]), 7),
+        (_cards(*EXISTING, [""] * WIDTH + ["заметка"]), 7),
+        (_cards(*EXISTING, [""] * (WIDTH - 1) + ["FALSE"]), 7),
     ],
-    ids=["empty", "one-header-row", "header-only", "three", "gap", "q-then-gap", "blank-name"],
+    ids=[
+        "empty",
+        "one-header-row",
+        "header-only",
+        "three",
+        "gap",
+        "q-then-gap",
+        "blank-name",
+        "unticked-w-to-333",
+        "unticked-w-ru",
+        "unticked-any-case",
+        "ticked-w",
+        "ticked-w-ru",
+        "text-w",
+        "false-in-v",
+    ],
 )
 def test_find_free_row(cells: list[list[str]], expected: int) -> None:
+    """Галочка без отметки («FALSE», «ЛОЖЬ») правее V строку не занимает: шеф
+    держит колонку галочек на сотни строк вперёд, и 06.10.2026 карточка легла
+    под неё — в строку 334 вместо 118. Отмеченная галочка и текст правее V —
+    заметка шефа, строка занята; в A–V занята любая непустая ячейка, «FALSE»
+    тоже."""
     assert find_free_row(cells) == expected
+
+
+UNTICKED = [""] * WIDTH + ["FALSE"]
+"""Строка, пустая в A–V, с галочкой без отметки в W."""
+
+
+@pytest.mark.parametrize(
+    ("cells", "expected"),
+    [
+        (_cards(*([*_pad(line), "FALSE"] for line in EXISTING), UNTICKED, UNTICKED), 6),
+        ([header(SPEC), UNTICKED, UNTICKED, UNTICKED], 3),
+    ],
+    ids=["under-cards", "first-card"],
+)
+def test_card_lands_on_unticked_checkbox_row_and_the_tick_stays(
+    cells: list[list[str]], expected: int
+) -> None:
+    """Выбор строки и сверка после записи видят лист одинаково: строка, где в
+    A–V пусто, а в W галочка без отметки, — свободна, карточка ложится в неё,
+    и запись подтверждена (``verified``). Галочку мы не пишем — она на месте.
+    У первой карточки строка выше — вторая строка шапки с той же галочкой: она
+    сверяется целиком, но только A–V."""
+    rig = _rig(cells=cells)
+
+    result = rig.append()
+
+    assert result == AppendResult(row=expected, journal_id=1, already_written=False)
+    assert rig.journal.only().status == VERIFIED
+    assert rig.line(expected)[_index("name")] == "Соус Барбекю"
+    assert rig.sheet.get_all_values()[expected - 1][WIDTH] == "FALSE"
+
+
+def test_write_not_landed_on_unticked_checkbox_row_is_failed() -> None:
+    """Google отказал, ничего не записав: строка 6 — как при чтении (в A–V
+    пусто, в W галочка), строка выше на месте. Запись не легла — ``failed``,
+    раскладка подтверждена, а не «таблицу меняли»: галочку правее V сверка не
+    видит, как не видел её и выбор строки."""
+    rig = _rig(cells=_cards(*EXISTING, UNTICKED))
+    rig.book.fail_next("values_batch_update", applied=False)
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.append()
+
+    assert (caught.value.row, caught.value.layout_confirmed) == (6, True)
+    record = rig.journal.only()
+    assert (record.status, record.note) == (FAILED, None)
+    assert rig.sheet.get_all_values()[5] == UNTICKED
 
 
 # ---------------------------------------------------------------------------
