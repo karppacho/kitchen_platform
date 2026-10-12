@@ -572,6 +572,20 @@ def test_shift_problem_shows_three_examples_and_counts_the_rest() -> None:
     assert problem.endswith(_SHIFT_ADVICE)
 
 
+def test_shift_problem_counts_ids_not_rows() -> None:
+    """id, который стоит в листе дважды, — один id; примеры — по строкам."""
+    moved = (
+        MovedName(ref_id="1", row=2, was="Томаты", now="Сахар", owner="2"),
+        MovedName(ref_id="1", row=3, was="Томаты", now="Соль", owner="3"),
+        MovedName(ref_id="4", row=5, was="Сырная котлета", now="Перец", owner="5"),
+    )
+
+    problem = shift_problem(moved)
+
+    assert problem.startswith(f"{SHIFT_PROBLEM_START}: у 2 id название пришло от другого id — ")
+    assert problem.count("стр. ") == 3
+
+
 def test_shift_details_list_everything_with_owners() -> None:
     """Полный список — журналу и логу: по нему выравнивают лист."""
     assert shift_details(_moved(5)) == "; ".join(

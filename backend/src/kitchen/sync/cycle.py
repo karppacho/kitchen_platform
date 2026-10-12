@@ -32,10 +32,10 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 
 from kitchen.db import models
-from kitchen.domain.ing_shift import SheetName, looks_shifted, moved_names
+from kitchen.domain.ing_shift import SheetName, looks_shifted, moved_id_count, moved_names
 from kitchen.sync import specs
 from kitchen.sync.client import GspreadClient
-from kitchen.sync.importer import Importer, ImportResult, take_import_lock
+from kitchen.sync.importer import Importer, ImportResult, cell_text, take_import_lock
 from kitchen.sync.reader import (
     BOOK_OPEN_FAILED,
     BOOK_READ_FAILED,
@@ -53,7 +53,6 @@ if TYPE_CHECKING:
     from kitchen.config import Settings
     from kitchen.domain.ing_shift import MovedName
     from kitchen.sync.ownership import SheetSpec
-    from kitchen.sync.reader import CellValue
 
 BOOKS: dict[str, tuple[SheetSpec, ...]] = {
     "kitchen": (specs.INGREDIENTS, specs.PACKAGING, specs.COOKING_METHODS, specs.DISHES, specs.TTK),
@@ -218,7 +217,7 @@ def shift_problem(moved: Sequence[MovedName]) -> str:
         [f"стр. {m.row}, id {m.ref_id}: было «{m.was}», стало «{m.now}»" for m in moved]
     )
     return (
-        f"{SHIFT_PROBLEM_START}: у {len(moved)} id название пришло от другого id — "
+        f"{SHIFT_PROBLEM_START}: у {moved_id_count(moved)} id название пришло от другого id — "
         f"{examples}; так бывает, когда в книге карточек удалили согласованную "
         "карточку или сменили ей статус: верните ручные колонки (A, E, L–O, Q–T) "
         "к своим названиям — перенос возобновится сам"
@@ -341,11 +340,6 @@ def _limit_waits(session: Session, lock: timedelta, statement: timedelta) -> Non
         session.execute(text(f"set local {name} = '{milliseconds}ms'"))
 
 
-def _cell_text(value: CellValue) -> str:
-    """Ячейка текстом — как её читает импорт: без пробелов по краям."""
-    return "" if value is None else str(value).strip()
-
-
 def _ing_moved(session: Session, sheets: Mapping[str, SheetData | str]) -> tuple[MovedName, ...]:
     """id листа ING, к которым пришло чужое название.
 
@@ -359,9 +353,9 @@ def _ing_moved(session: Session, sheets: Mapping[str, SheetData | str]) -> tuple
         return ()
     sheet: list[SheetName] = []
     for row in data.rows:
-        ref_id = _cell_text(row["id"])
+        ref_id = cell_text(row["id"])
         if ref_id:
-            sheet.append(SheetName(ref_id=ref_id, name=_cell_text(row["name"]), row=row.number))
+            sheet.append(SheetName(ref_id=ref_id, name=cell_text(row["name"]), row=row.number))
     query = select(models.Ingredient.legacy_id, models.Ingredient.name).where(
         models.Ingredient.removed_at.is_(None)
     )

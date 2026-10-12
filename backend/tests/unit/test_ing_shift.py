@@ -16,6 +16,7 @@ from kitchen.domain.ing_shift import (
     MovedName,
     SheetName,
     looks_shifted,
+    moved_id_count,
     moved_names,
 )
 
@@ -175,6 +176,17 @@ def test_duplicate_moved_away_names_the_id_that_lost_it() -> None:
     )
 
 
+def test_owner_gone_from_sheet_lost_the_name() -> None:
+    """Шеф удалил ручные ячейки строки id 4 со сдвигом вверх: id 4 из листа
+    пропал, а вывод ``QUERY`` остался на месте — «Сырная котлета» пришла к
+    id 5. Владелец, которого в листе нет, название потерял."""
+    sheet = _sheet(("1", "Томаты"), ("2", "Сахар"), ("3", "Соль"), ("5", "Сырная котлета"))
+
+    assert moved_names(KNOWN, sheet) == (
+        MovedName(ref_id="5", row=5, was="Фритюрное масло", now="Сырная котлета", owner="4"),
+    )
+
+
 def test_owner_is_the_smallest_id_that_lost_the_name() -> None:
     """Несколько id потеряли одно название — владелец наименьший, числа — по
     числу: 9 раньше 10, иначе текст причины зависел бы от записи id."""
@@ -186,6 +198,28 @@ def test_owner_is_the_smallest_id_that_lost_the_name() -> None:
         ("9", "11"),
         ("11", "9"),
     ]
+
+
+def test_owner_tie_is_broken_by_text() -> None:
+    """«7» и «007» — одно число, но разные id. Владелец не зависит от порядка
+    строк в базе: при равном числе — по тексту."""
+    known = {"7": "Сахар", "007": "Сахар", "8": "Соль"}
+
+    sheet = _sheet(("7", "Перец"), ("007", "Укроп"), ("8", "Сахар"))
+
+    [moved] = moved_names(known, sheet)
+    assert moved.owner == "007"
+
+
+def test_superscript_digit_id_does_not_break_owner_order() -> None:
+    """«²» для `str.isdigit` — цифра, а `int` его не берёт: такой id в базе не
+    должен ронять цикл синхронизации. Он не число — и идёт после чисел."""
+    known = {"²": "Сахар", "10": "Сахар", "11": "Соль"}
+
+    sheet = _sheet(("²", "Перец"), ("10", "Укроп"), ("11", "Сахар"))
+
+    [moved] = moved_names(known, sheet)
+    assert moved.owner == "10"
 
 
 def test_moves_come_in_sheet_order() -> None:
@@ -210,3 +244,23 @@ def test_shift_starts_from_two_moved_ids(count: int, shifted: bool) -> None:
 
     assert looks_shifted(moved) is shifted
     assert SHIFT_MIN_MOVED == 2
+
+
+def test_one_id_in_two_rows_is_one_id() -> None:
+    """id стоит в листе дважды (дефект данных), и в обеих строках — чужое
+    название. Это одна позиция, а не сдвиг: порог считает id, а не строки.
+    Два разных id — уже сдвиг (обмен названиями выше)."""
+    sheet = _sheet(
+        ("1", "Сахар"),
+        ("1", "Соль"),
+        ("2", "Перец"),
+        ("3", "Укроп"),
+        ("4", "Сырная котлета"),
+        ("5", "Фритюрное масло"),
+    )
+
+    moved = moved_names(KNOWN, sheet)
+
+    assert [(m.ref_id, m.row) for m in moved] == [("1", 2), ("1", 3)], "строки — каждая"
+    assert moved_id_count(moved) == 1
+    assert not looks_shifted(moved)

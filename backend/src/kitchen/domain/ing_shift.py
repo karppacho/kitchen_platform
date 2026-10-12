@@ -81,7 +81,8 @@ def moved_names(known: Mapping[str, str], sheet: Sequence[SheetName]) -> tuple[M
     """id листа, к которым пришло чужое название, — в порядке строк листа.
 
     ``known`` — id → название у ингредиентов в базе, которых не скрыли.
-    ``sheet`` — строки листа с непустым id.
+    ``sheet`` — строки листа с непустым id. Ответ — по строке на каждое
+    чужое название: id, который стоит в листе дважды, может дать две.
     """
     holders: dict[str, list[str]] = {}
     for ref_id, name in known.items():
@@ -114,6 +115,14 @@ def moved_names(known: Mapping[str, str], sheet: Sequence[SheetName]) -> tuple[M
     return tuple(moved)
 
 
+def moved_id_count(moved: Sequence[MovedName]) -> int:
+    """Сколько разных id получили чужое название.
+
+    Не строк: id, который стоит в листе дважды (дефект данных), — одна
+    позиция, и сам по себе сдвига не даёт."""
+    return len({m.ref_id for m in moved})
+
+
 def looks_shifted(moved: Sequence[MovedName]) -> bool:
     """Съехал ли лист: чужие названия у :data:`SHIFT_MIN_MOVED` id и больше."""
-    return len(moved) >= SHIFT_MIN_MOVED
+    return moved_id_count(moved) >= SHIFT_MIN_MOVED
