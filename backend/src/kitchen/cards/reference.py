@@ -13,7 +13,8 @@
   перенос книги кухни в базу коротким путём (как после отправки карточки,
   :func:`kitchen.cards.submit.run_import`) и подтверждение пары с
   ингредиентом этой строки. Перенос не удался — ответ всё равно удачный,
-  ``imported=false``: строка уже в листе, ингредиент перенесёт воркер.
+  ``imported=false``: строка уже в листе, ингредиент перенесёт воркер (если
+  перенос нашёл сдвиг строк ING — после выравнивания листа, оговорка своя).
 
 Правила, ради которых этот слой есть:
 
@@ -119,6 +120,13 @@ NOT_IMPORTED = (
     "Ингредиент записан в справочник, но на сайт пока не перенесён — появится при "
     "следующем обновлении, через несколько минут"
 )
+SHIFT_NOT_IMPORTED = (
+    "Ингредиент записан в справочник, но на сайт не перенесён: в листе ING строки съехали "
+    "относительно id. Выровняйте лист ING — ингредиент появится со следующим обновлением"
+)
+"""Вместо :data:`NOT_IMPORTED`, когда перенос книги кухни после записи нашёл
+сдвиг строк ING: «через несколько минут» было бы неправдой — пока лист не
+выровняли, книгу кухни не переносит ни этот перенос, ни цикл."""
 PAIR_NOT_CONFIRMED = (
     "Пару карточки и ингредиента подтвердить не удалось — если карточка осталась на «Сверке», "
     "откройте её ещё раз: второй записи не будет"
@@ -263,9 +271,10 @@ class Transferred:
     базе, не удалён из листа и называется как карточка. Так при подтверждённой
     паре — и когда пару подтвердить не дали, но наш ингредиент на сайте.
     ``False`` — перенос не удался или под этим id на сайте не наш ингредиент;
-    тогда в ``notes`` всегда оговорка: :data:`NOT_IMPORTED` или, если после
-    удачного переноса под этим id на сайте другой ингредиент, — проверить
-    строку листа (без обещания «появится»)."""
+    тогда в ``notes`` всегда оговорка: :data:`NOT_IMPORTED` (перенос нашёл
+    сдвиг строк ING — :data:`SHIFT_NOT_IMPORTED`) или, если после удачного
+    переноса под этим id на сайте другой ингредиент, — проверить строку листа
+    (без обещания «появится»)."""
     linked: bool
     """Пара «карточка — ингредиент» подтверждена."""
     ingredient_id: int | None
@@ -412,7 +421,7 @@ def to_reference(
             problem,
         )
     pair = _confirm_written(session, card_id, name, result.ref_id, wait)
-    return _answer(card_id, result, pair, imported=problem is None)
+    return _answer(card_id, result, pair, problem=problem)
 
 
 def _fill(
@@ -617,17 +626,21 @@ def _ours_on_site(session: Session, card_id: int, name: str, ref_id: str) -> boo
         session.rollback()
 
 
-def _answer(card_id: int, result: FillResult, pair: _Pair, *, imported: bool) -> Transferred:
+def _answer(card_id: int, result: FillResult, pair: _Pair, *, problem: str | None) -> Transferred:
     """Ответ человеку — или отказ, если id в строке стоял до нас и не того
     ингредиента.
 
-    Перенос прошёл (``imported``), а под id строки на сайте не наш ингредиент
-    (его нет или у него другое название): id стоял до нас — строки сдвинуты
-    (409); id записали мы — запись состоялась, ответ удачный, а пара не
-    подтверждена: оговорка «проверьте строку листа» и ERROR в лог. Без
-    обещания «появится через несколько минут»: само это не пройдёт. Иначе наш
-    ингредиент на сайте не виден — оговорка :data:`NOT_IMPORTED`.
+    ``problem`` — почему не удался перенос книги кухни после записи
+    (:func:`~kitchen.cards.submit.run_import`); ``None`` — перенесена. Перенос
+    прошёл, а под id строки на сайте не наш ингредиент (его нет или у него
+    другое название): id стоял до нас — строки сдвинуты (409); id записали мы
+    — запись состоялась, ответ удачный, а пара не подтверждена: оговорка
+    «проверьте строку листа» и ERROR в лог. Без обещания «появится через
+    несколько минут»: само это не пройдёт. Иначе наш ингредиент на сайте не
+    виден — оговорка :data:`NOT_IMPORTED`, а если перенос нашёл сдвиг строк ING,
+    — :data:`SHIFT_NOT_IMPORTED`: до выравнивания листа само не появится.
     """
+    imported = problem is None
     found_in_sheet = result.journal_id is None
     stranger = pair.outcome == "other" or (pair.outcome == "missing" and imported)
     if stranger and found_in_sheet:
@@ -636,7 +649,7 @@ def _answer(card_id: int, result: FillResult, pair: _Pair, *, imported: bool) ->
     if result.shifted is not None:
         notes.append(_shifted_note(result.shifted))
     if not pair.on_site and not stranger:
-        notes.append(NOT_IMPORTED)
+        notes.append(SHIFT_NOT_IMPORTED if _is_shift(problem) else NOT_IMPORTED)
     if pair.outcome == "failed":
         notes.append(PAIR_NOT_CONFIRMED)
     if pair.outcome == "kept":
@@ -712,9 +725,14 @@ def _kitchen_shifted(session: Session) -> bool:
     :data:`~kitchen.sync.cycle.SHIFT_PROBLEM_START`: цикл узнал сдвиг строк ING
     и книгу не переносит. Другие причины (лист не прочитан, сдвинулись колонки,
     Google не ответил) перенос не откладывают: лист писатель сверяет сам."""
-    problem = session.scalar(
-        select(models.SyncState.problem).where(models.SyncState.book == KITCHEN)
+    return _is_shift(
+        session.scalar(select(models.SyncState.problem).where(models.SyncState.book == KITCHEN))
     )
+
+
+def _is_shift(problem: str | None) -> bool:
+    """Причина книги кухни — «строки ING съехали»
+    (:data:`~kitchen.sync.cycle.SHIFT_PROBLEM_START`)."""
     return problem is not None and problem.startswith(SHIFT_PROBLEM_START)
 
 

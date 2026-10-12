@@ -35,6 +35,7 @@ from kitchen.cards.reference import (
     NOT_A_CANDIDATE,
     NOT_CONFIGURED,
     NOT_IMPORTED,
+    SHIFT_NOT_IMPORTED,
     SHIFT_POSTPONED,
     WRITING_CLOSED,
 )
@@ -47,13 +48,13 @@ from kitchen.domain.cards import APPROVED, REJECTED
 from kitchen.domain.ing_shift import MovedName
 from kitchen.domain.reference_row import NotFound
 from kitchen.sync import ownership, specs
-from kitchen.sync.cycle import shift_problem
+from kitchen.sync.cycle import SHIFT_PROBLEM_START, shift_problem
 from kitchen.sync.reference_writer import HEADER_DRIFT, NOT_CONFIRMED, ReferenceRowFiller
 from kitchen.sync.sheet_write import SHEET_WRITE_LOCK_KEY
 from kitchen.web import auth, reconciliation
 from kitchen.web.app import create_app
 from kitchen.web.csrf import REJECTED as CSRF_REJECTED
-from tests.conftest import CARDS_ORDER, FakeSheetsClient, Formula, ing_sheet
+from tests.conftest import CARDS_ORDER, FakeSheetsClient, Formula, Spill, ing_sheet
 from tests.fake_sheets import IDS, cards_sheet, kitchen_sheets, row, sheets_client
 from tests.integration.test_database import _url
 from tests.integration.test_reference_flow import (
@@ -1156,6 +1157,36 @@ def test_other_kitchen_problem_does_not_postpone_transfer(
     assert (body["row"], body["ref_id"], body["linked"]) == (7, "131", True)
     assert filler.calls == ["preview", "fill"]
     assert _ing(world).cell("A7") == 131
+
+
+def test_transfer_that_finds_the_shift_itself_says_align_the_sheet(
+    sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
+) -> None:
+    """Строки ING съехали (Кетчуп и Моцарелла поменялись названиями), а цикл
+    ещё не записал причину: запрета нет, строка записана, но короткий перенос
+    книги кухни находит сдвиг и книгу не переносит. 200, ``imported=false``,
+    пара — как при любом неудачном переносе; оговорка — не «появится через
+    несколько минут» (само не появится), а «выровняйте лист ING»."""
+    _ing(world).put("C5", Spill("Моцарелла"))
+    _ing(world).put("C6", Spill("Кетчуп"))
+    card = _card(sessions, "Соус Барбекю")
+
+    reply = transfer(chef, card.id)
+
+    assert reply.status_code == 200, reply.text
+    body = reply.json()
+    assert (body["row"], body["ref_id"], body["already"]) == (7, "131", False)
+    assert (body["imported"], body["linked"], body["ingredient_id"]) == (False, False, None)
+    assert body["notes"] == [SHIFT_NOT_IMPORTED]
+    assert SHIFT_NOT_IMPORTED == (
+        "Ингредиент записан в справочник, но на сайт не перенесён: в листе ING строки "
+        "съехали относительно id. Выровняйте лист ING — ингредиент появится со следующим "
+        "обновлением"
+    )
+    assert _ing(world).cell("A7") == 131
+    assert _pair(_card(sessions, "Соус Барбекю")) == (None, "orphan", False)
+    problem = _kitchen_problem_now(sessions)
+    assert problem is not None and problem.startswith(SHIFT_PROBLEM_START)
 
 
 def test_this_is_it_works_while_ing_is_shifted(

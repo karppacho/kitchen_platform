@@ -271,6 +271,53 @@ def test_find_free_row(cells: list[list[str]], expected: int) -> None:
     assert find_free_row(cells) == expected
 
 
+UNTICKED = [""] * WIDTH + ["FALSE"]
+"""Строка, пустая в A–V, с галочкой без отметки в W."""
+
+
+@pytest.mark.parametrize(
+    ("cells", "expected"),
+    [
+        (_cards(*([*_pad(line), "FALSE"] for line in EXISTING), UNTICKED, UNTICKED), 6),
+        ([header(SPEC), UNTICKED, UNTICKED, UNTICKED], 3),
+    ],
+    ids=["under-cards", "first-card"],
+)
+def test_card_lands_on_unticked_checkbox_row_and_the_tick_stays(
+    cells: list[list[str]], expected: int
+) -> None:
+    """Выбор строки и сверка после записи видят лист одинаково: строка, где в
+    A–V пусто, а в W галочка без отметки, — свободна, карточка ложится в неё,
+    и запись подтверждена (``verified``). Галочку мы не пишем — она на месте.
+    У первой карточки строка выше — вторая строка шапки с той же галочкой: она
+    сверяется целиком, но только A–V."""
+    rig = _rig(cells=cells)
+
+    result = rig.append()
+
+    assert result == AppendResult(row=expected, journal_id=1, already_written=False)
+    assert rig.journal.only().status == VERIFIED
+    assert rig.line(expected)[_index("name")] == "Соус Барбекю"
+    assert rig.sheet.get_all_values()[expected - 1][WIDTH] == "FALSE"
+
+
+def test_write_not_landed_on_unticked_checkbox_row_is_failed() -> None:
+    """Google отказал, ничего не записав: строка 6 — как при чтении (в A–V
+    пусто, в W галочка), строка выше на месте. Запись не легла — ``failed``,
+    раскладка подтверждена, а не «таблицу меняли»: галочку правее V сверка не
+    видит, как не видел её и выбор строки."""
+    rig = _rig(cells=_cards(*EXISTING, UNTICKED))
+    rig.book.fail_next("values_batch_update", applied=False)
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.append()
+
+    assert (caught.value.row, caught.value.layout_confirmed) == (6, True)
+    record = rig.journal.only()
+    assert (record.status, record.note) == (FAILED, None)
+    assert rig.sheet.get_all_values()[5] == UNTICKED
+
+
 # ---------------------------------------------------------------------------
 # Тело записи
 # ---------------------------------------------------------------------------
