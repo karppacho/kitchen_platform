@@ -11,7 +11,7 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 from sqlalchemy.exc import DataError, IntegrityError, OperationalError, SQLAlchemyError
 
 from kitchen.config import Settings
-from kitchen.domain.ing_shift import MovedName
+from kitchen.domain.ing_shift import LostName, MovedName
 from kitchen.sync import specs
 from kitchen.sync.cycle import (
     BOOKS,
@@ -538,8 +538,8 @@ def test_import_failure_speaks_plainly(error: SQLAlchemyError, problem: str) -> 
 
 _SHIFT_ADVICE = (
     "так бывает, когда в книге карточек удалили согласованную карточку или сменили ей "
-    "статус: верните ручные колонки (A, E, L–O, Q–T) к своим названиям — перенос "
-    "возобновится сам"
+    "статус: верните ручные колонки (A, E, L–O, Q–T) к своим названиям, а в строках "
+    "без названия очистите их — перенос возобновится сам"
 )
 
 
@@ -552,9 +552,13 @@ def _moved(count: int) -> tuple[MovedName, ...]:
     )
 
 
+_LAST_GONE = (LostName(ref_id="7", row=8, was="Сыр чеддер"),)
+"""Ушла последняя карточка вывода: у последнего id название пропало."""
+
+
 def test_shift_problem_names_count_examples_and_remedy() -> None:
     """Шеф видит, сколько id задето, где смотреть и что делать."""
-    assert shift_problem(_moved(2)) == (
+    assert shift_problem(_moved(2), ()) == (
         "в листе «ING» строки съехали относительно id: у 2 id название пришло от другого id — "
         "стр. 2, id 1: было «Сырная котлета», стало «Фритюрное масло»; "
         "стр. 3, id 2: было «Фритюрное масло», стало «Лук репчатый»; "
@@ -562,14 +566,53 @@ def test_shift_problem_names_count_examples_and_remedy() -> None:
     )
 
 
+def test_shift_problem_for_lost_name_only() -> None:
+    """Чужих названий нет — о них и не говорим: только о пропавшем."""
+    assert shift_problem((), _LAST_GONE) == (
+        "в листе «ING» строки съехали относительно id: у 1 id название пропало — "
+        "стр. 8, id 7: было «Сыр чеддер», стало пусто; "
+        f"{_SHIFT_ADVICE}"
+    )
+
+
+def test_shift_problem_names_both_kinds_in_sheet_order() -> None:
+    """Оба вида — оба числа; примеры — вперемешку, по строкам листа."""
+    moved = (
+        MovedName(ref_id="1", row=2, was="Томаты", now="Сахар", owner="2"),
+        MovedName(ref_id="4", row=5, was="Сырная котлета", now="Перец", owner="5"),
+    )
+    lost = (LostName(ref_id="3", row=4, was="Соль"),)
+
+    assert shift_problem(moved, lost) == (
+        "в листе «ING» строки съехали относительно id: у 2 id название пришло от другого id, "
+        "у 1 id название пропало — "
+        "стр. 2, id 1: было «Томаты», стало «Сахар»; "
+        "стр. 4, id 3: было «Соль», стало пусто; "
+        "стр. 5, id 4: было «Сырная котлета», стало «Перец»; "
+        f"{_SHIFT_ADVICE}"
+    )
+
+
 def test_shift_problem_shows_three_examples_and_counts_the_rest() -> None:
     """При сдвиге задеты десятки id, а полосу на сайте читают целиком."""
-    problem = shift_problem(_moved(5))
+    problem = shift_problem(_moved(5), ())
 
     assert problem.startswith(f"{SHIFT_PROBLEM_START}: у 5 id название пришло от другого id — ")
     assert problem.count("стр. ") == 3
     assert "стр. 4, id 3: было «Лук репчатый», стало «Сыр чеддер»; и ещё 2; так бывает" in problem
     assert problem.endswith(_SHIFT_ADVICE)
+
+
+def test_shift_problem_counts_the_rest_across_both_kinds() -> None:
+    """«и ещё N» — общий счёт строк: пропавшее, не попавшее в примеры, тоже в
+    нём."""
+    problem = shift_problem(_moved(3), _LAST_GONE)
+
+    assert problem.startswith(
+        f"{SHIFT_PROBLEM_START}: у 3 id название пришло от другого id, у 1 id название пропало — "
+    )
+    assert problem.count("стр. ") == 3
+    assert "стр. 4, id 3: было «Лук репчатый», стало «Сыр чеддер»; и ещё 1; так бывает" in problem
 
 
 def test_shift_problem_counts_ids_not_rows() -> None:
@@ -579,16 +622,30 @@ def test_shift_problem_counts_ids_not_rows() -> None:
         MovedName(ref_id="1", row=3, was="Томаты", now="Соль", owner="3"),
         MovedName(ref_id="4", row=5, was="Сырная котлета", now="Перец", owner="5"),
     )
+    lost = (
+        LostName(ref_id="6", row=7, was="Перец"),
+        LostName(ref_id="6", row=8, was="Перец"),
+    )
 
-    problem = shift_problem(moved)
+    problem = shift_problem(moved, lost)
 
-    assert problem.startswith(f"{SHIFT_PROBLEM_START}: у 2 id название пришло от другого id — ")
+    assert problem.startswith(
+        f"{SHIFT_PROBLEM_START}: у 2 id название пришло от другого id, у 1 id название пропало — "
+    )
     assert problem.count("стр. ") == 3
+
+
+def test_shift_details_lost_name_goes_to_empty() -> None:
+    """В журнале пропавшее — рядом с чужими, по строкам: «X» → пусто."""
+    assert shift_details(_moved(1), _LAST_GONE) == (
+        "стр. 2, id 1: «Сырная котлета» → «Фритюрное масло» (было у id 2); "
+        "стр. 8, id 7: «Сыр чеддер» → пусто"
+    )
 
 
 def test_shift_details_list_everything_with_owners() -> None:
     """Полный список — журналу и логу: по нему выравнивают лист."""
-    assert shift_details(_moved(5)) == "; ".join(
+    assert shift_details(_moved(5), ()) == "; ".join(
         f"стр. {n + 1}, id {n}: «{was}» → «{now}» (было у id {n + 1})"
         for n, (was, now) in enumerate(
             [

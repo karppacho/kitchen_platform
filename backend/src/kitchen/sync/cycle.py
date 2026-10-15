@@ -9,10 +9,10 @@
   остаются, причина уходит на сайт. Колонки читаются по позиции: сдвиг дал бы
   цену из колонки веса — тихо и каждые пять минут. Так же не переносится
   кухня, у которой в листе ING строки съехали относительно id — название
-  одного id пришло к другому (`kitchen.domain.ing_shift`): по id в базу
-  приехали бы чужие названия и КБЖУ, тоже тихо. База отвергла данные книги
-  при переносе — откатывается только эта книга (своя точка сохранения), и
-  причина тоже уходит на сайт.
+  одного id пришло к другому или пропало (`kitchen.domain.ing_shift`): по id
+  в базу приехали бы чужие названия и КБЖУ или пустые, тоже тихо. База
+  отвергла данные книги при переносе — откатывается только эта книга (своя
+  точка сохранения), и причина тоже уходит на сайт.
 * **Только изменения.** Отпечаток книги совпал с перенесённым — в базу
   пишется одна отметка «проверено».
 * **Сбой в журнал — один раз**, когда причина появилась или сменилась. Рядом
@@ -32,7 +32,14 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 
 from kitchen.db import models
-from kitchen.domain.ing_shift import SheetName, looks_shifted, moved_id_count, moved_names
+from kitchen.domain.ing_shift import (
+    SheetName,
+    looks_shifted,
+    lost_id_count,
+    lost_names,
+    moved_id_count,
+    moved_names,
+)
 from kitchen.sync import specs
 from kitchen.sync.client import GspreadClient
 from kitchen.sync.importer import Importer, ImportResult, cell_text, take_import_lock
@@ -46,12 +53,12 @@ from kitchen.sync.reader import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from sqlalchemy.orm import Session, sessionmaker
 
     from kitchen.config import Settings
-    from kitchen.domain.ing_shift import MovedName
+    from kitchen.domain.ing_shift import LostName, MovedName
     from kitchen.sync.ownership import SheetSpec
 
 BOOKS: dict[str, tuple[SheetSpec, ...]] = {
@@ -205,34 +212,54 @@ SHIFT_PROBLEM_START = "в листе «ING» строки съехали отн�
 состоянии книги кухни среди прочих — остальной текст зависит от листа."""
 
 
-def shift_problem(moved: Sequence[MovedName]) -> str:
+def _by_row(lines: Iterable[tuple[int, str]]) -> list[str]:
+    """Тексты строк листа по возрастанию номера строки: чужие названия и
+    пропавшие — вперемешку, как их видит шеф в листе."""
+    return [line for _, line in sorted(lines, key=lambda pair: pair[0])]
+
+
+def shift_problem(moved: Sequence[MovedName], lost: Sequence[LostName]) -> str:
     """Причина «строки ING съехали» — для шефа, на сайт.
 
-    Сколько id получили чужое название, до трёх примеров и что делать. В
-    тексте только строки листа по возрастанию — ни времени, ни случайного
-    порядка: одна и та же беда даёт ту же причину, и журнал пополняется лишь
-    при её смене.
+    Сколько id получили чужое название и сколько потеряли его (вид, которого
+    нет, не называется), до трёх примеров и что делать. В тексте только
+    строки листа по возрастанию — ни времени, ни случайного порядка: одна и
+    та же беда даёт ту же причину, и журнал пополняется лишь при её смене.
     """
-    examples = _listed(
-        [f"стр. {m.row}, id {m.ref_id}: было «{m.was}», стало «{m.now}»" for m in moved]
-    )
+    counts = []
+    if moved:
+        counts.append(f"у {moved_id_count(moved)} id название пришло от другого id")
+    if lost:
+        counts.append(f"у {lost_id_count(lost)} id название пропало")
+    foreign = [
+        (m.row, f"стр. {m.row}, id {m.ref_id}: было «{m.was}», стало «{m.now}»") for m in moved
+    ]
+    empty = [
+        (item.row, f"стр. {item.row}, id {item.ref_id}: было «{item.was}», стало пусто")
+        for item in lost
+    ]
     return (
-        f"{SHIFT_PROBLEM_START}: у {moved_id_count(moved)} id название пришло от другого id — "
-        f"{examples}; так бывает, когда в книге карточек удалили согласованную "
-        "карточку или сменили ей статус: верните ручные колонки (A, E, L–O, Q–T) "
-        "к своим названиям — перенос возобновится сам"
+        f"{SHIFT_PROBLEM_START}: {', '.join(counts)} — {_listed(_by_row([*foreign, *empty]))}; "
+        "так бывает, когда в книге карточек удалили согласованную карточку или сменили ей "
+        "статус: верните ручные колонки (A, E, L–O, Q–T) к своим названиям, а в строках "
+        "без названия очистите их — перенос возобновится сам"
     )
 
 
-def shift_details(moved: Sequence[MovedName]) -> str:
-    """Все id с чужим названием и откуда оно пришло — журналу и логу, не сайту.
+def shift_details(moved: Sequence[MovedName], lost: Sequence[LostName]) -> str:
+    """Все строки признака — журналу и логу, не сайту.
 
     По этому списку выравнивают лист: у каждого id — его строка и id, чьё
-    название он получил.
+    название он получил, или «пусто», если название пропало.
     """
-    return "; ".join(
-        f"стр. {m.row}, id {m.ref_id}: «{m.was}» → «{m.now}» (было у id {m.owner})" for m in moved
-    )
+    foreign = [
+        (m.row, f"стр. {m.row}, id {m.ref_id}: «{m.was}» → «{m.now}» (было у id {m.owner})")
+        for m in moved
+    ]
+    empty = [
+        (item.row, f"стр. {item.row}, id {item.ref_id}: «{item.was}» → пусто") for item in lost
+    ]
+    return "; ".join(_by_row([*foreign, *empty]))
 
 
 def judge(book: str, sheets: Mapping[str, SheetData | str]) -> Verdict:
@@ -340,8 +367,10 @@ def _limit_waits(session: Session, lock: timedelta, statement: timedelta) -> Non
         session.execute(text(f"set local {name} = '{milliseconds}ms'"))
 
 
-def _ing_moved(session: Session, sheets: Mapping[str, SheetData | str]) -> tuple[MovedName, ...]:
-    """id листа ING, к которым пришло чужое название.
+def _ing_shift(
+    session: Session, sheets: Mapping[str, SheetData | str]
+) -> tuple[tuple[MovedName, ...], tuple[LostName, ...]]:
+    """Строки листа ING, где к id пришло чужое название и где оно пропало.
 
     Строки листа — те, что перенёс бы импорт: с непустым id. База — в
     транзакции цикла, уже после очереди импорта: ручной импорт, прошедший
@@ -350,7 +379,7 @@ def _ing_moved(session: Session, sheets: Mapping[str, SheetData | str]) -> tuple
     data = sheets.get(sheet_label(specs.INGREDIENTS))
     if not isinstance(data, SheetData):
         # Лист не прочитан — такую книгу judge не пропустил бы к переносу.
-        return ()
+        return (), ()
     sheet: list[SheetName] = []
     for row in data.rows:
         ref_id = cell_text(row["id"])
@@ -360,7 +389,7 @@ def _ing_moved(session: Session, sheets: Mapping[str, SheetData | str]) -> tuple
         models.Ingredient.removed_at.is_(None)
     )
     known = dict(session.execute(query).tuples().all())
-    return moved_names(known, sheet)
+    return moved_names(known, sheet), lost_names(known, sheet)
 
 
 def _mark_checked(state: models.SyncState, now: datetime) -> None:
@@ -455,9 +484,9 @@ class SyncCycle:
                     _record_failure(session, state, verdict.problem, verdict.details, now)
                     result.outcomes[book] = BookOutcome("failed", verdict.problem, verdict.details)
                 elif force or state.fingerprint != verdict.fingerprint:
-                    moved = _ing_moved(session, sheets) if book == "kitchen" else ()
-                    if looks_shifted(moved):
-                        problem, details = shift_problem(moved), shift_details(moved)
+                    moved, lost = _ing_shift(session, sheets) if book == "kitchen" else ((), ())
+                    if looks_shifted(moved, lost):
+                        problem, details = shift_problem(moved, lost), shift_details(moved, lost)
                         _record_failure(session, state, problem, details, now)
                         result.outcomes[book] = BookOutcome("failed", problem, details)
                     else:

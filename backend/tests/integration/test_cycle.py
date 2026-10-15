@@ -612,10 +612,11 @@ def test_shifted_ing_rows_block_kitchen_but_not_cards(sessions) -> None:
     kitchen = result.outcomes["kitchen"]
     assert kitchen.action == "failed"
     assert kitchen.problem.startswith(
-        f"{SHIFT_PROBLEM_START}: у 3 id название пришло от другого id — "
+        f"{SHIFT_PROBLEM_START}: у 3 id название пришло от другого id, у 1 id название пропало — "
     )
     assert "стр. 5, id 4: было «Сырная котлета», стало «Фритюрное масло»" in kitchen.problem
     assert "стр. 7, id 6: «Лук репчатый» → «Сыр чеддер» (было у id 7)" in kitchen.details
+    assert kitchen.details.endswith("стр. 8, id 7: «Сыр чеддер» → пусто")
     assert _names(sessions) == before, "названия в базе прежние"
     state = _state(sessions, "kitchen")
     assert (state.problem, state.problem_since) == (kitchen.problem, clock.now)
@@ -674,6 +675,45 @@ def test_aligned_sheet_is_imported_and_clears_shift(sessions) -> None:
     assert (state.problem, state.problem_since) == (None, None)
     assert state.checked_at == clock.now
     assert _names(sessions)["5"] == "Фритюрное масло"
+
+
+def test_last_card_gone_blocks_kitchen(sessions) -> None:
+    """Ушла последняя согласованная карточка: съезжать нечему, чужих названий
+    нет, но у последнего id название пропало — импорт стёр бы его. Кухня не
+    переносится (Spec 1)."""
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    before = _names(sessions)
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _query_lost("7")}).run()
+
+    kitchen = result.outcomes["kitchen"]
+    assert kitchen.action == "failed"
+    assert kitchen.problem.startswith(
+        f"{SHIFT_PROBLEM_START}: у 1 id название пропало — "
+        "стр. 8, id 7: было «Сыр чеддер», стало пусто; "
+    )
+    assert kitchen.details == "стр. 8, id 7: «Сыр чеддер» → пусто"
+    assert _names(sessions) == before, "названия в базе прежние"
+    assert _failure_notes(sessions) == [f"kitchen: {kitchen.problem} — {kitchen.details}"]
+
+
+def test_aligned_after_last_card_gone_is_imported(sessions) -> None:
+    """Шеф убрал строку ушедшей карточки целиком — перенос идёт сам."""
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    clock.tick()
+    _cycle(sessions, clock, kitchen={"ING": _query_lost("7")}).run()
+    clock.tick()
+    aligned = _ing(*(line for line in _SEVEN if line[0] != "7"))
+
+    result = _cycle(sessions, clock, kitchen={"ING": aligned}).run()
+
+    assert result.outcomes["kitchen"].action == "imported"
+    state = _state(sessions, "kitchen")
+    assert (state.problem, state.problem_since) == (None, None)
+    assert _names(sessions)["6"] == "Лук репчатый"
 
 
 @pytest.mark.parametrize(
