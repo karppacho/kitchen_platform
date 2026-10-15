@@ -15,11 +15,14 @@ from kitchen.domain.ing_shift import LostName, MovedName
 from kitchen.sync import specs
 from kitchen.sync.cycle import (
     BOOKS,
+    QUERY_GONE_START,
     SHIFT_PROBLEM_START,
     SyncCycle,
     explain,
     explain_import,
+    ing_blocks_reference,
     judge,
+    query_gone_problem,
     reader_from,
     shift_details,
     shift_problem,
@@ -641,6 +644,58 @@ def test_shift_details_lost_name_goes_to_empty() -> None:
         "стр. 2, id 1: «Сырная котлета» → «Фритюрное масло» (было у id 2); "
         "стр. 8, id 7: «Сыр чеддер» → пусто"
     )
+
+
+_QUERY_ADVICE = (
+    "ручные колонки не трогайте: проверьте формулу QUERY в колонке B и доступ к листу "
+    "импорта карточек — перенос возобновится сам, когда названия вернутся"
+)
+
+
+def _lost(count: int) -> tuple[LostName, ...]:
+    """Вывод ``QUERY`` пуст: у id N, строка N+1, названия нет."""
+    names = ["Томаты", "Сахар", "Соль", "Сырная котлета", "Фритюрное масло"]
+    return tuple(LostName(ref_id=str(n), row=n + 1, was=names[n - 1]) for n in range(1, count + 1))
+
+
+def test_query_gone_problem_says_not_to_touch_manual_columns() -> None:
+    """Пропал вывод формулы — не сдвиг: ручные колонки трогать нельзя, иначе
+    вместе с пустыми строками уйдут цены и потери всей зоны."""
+    assert query_gone_problem(_lost(3)) == (
+        "в листе «ING» пропал вывод формулы QUERY: у 3 id нет названия — "
+        "стр. 2, id 1: было «Томаты», стало пусто; "
+        "стр. 3, id 2: было «Сахар», стало пусто; "
+        "стр. 4, id 3: было «Соль», стало пусто; "
+        f"{_QUERY_ADVICE}"
+    )
+
+
+def test_query_gone_problem_shows_three_examples_and_counts_the_rest() -> None:
+    problem = query_gone_problem(_lost(5))
+
+    assert problem.startswith(f"{QUERY_GONE_START}: у 5 id нет названия — ")
+    assert problem.count("стр. ") == 3
+    assert "стр. 4, id 3: было «Соль», стало пусто; и ещё 2; ручные колонки" in problem
+    assert not problem.startswith(SHIFT_PROBLEM_START)
+
+
+@pytest.mark.parametrize(
+    ("problem", "blocks"),
+    [
+        (shift_problem(_moved(2), ()), True),
+        (shift_problem((), _LAST_GONE), True),
+        (query_gone_problem(_lost(3)), True),
+        (None, False),
+        ("лист «ТТК» не прочитан", False),
+        ("в листе «ING» сдвинулись колонки — колонка C: ожидался заголовок «Название»", False),
+    ],
+    ids=["сдвиг", "пропало название", "пропал вывод", "нет причины", "не прочитан", "колонки"],
+)
+def test_ing_blocks_reference(problem: str | None, blocks: bool) -> None:
+    """«Сверка» откладывает перенос в справочник, пока кухню держит лист ING —
+    съехавший или без вывода формулы. Прочие причины лист писатель сверяет
+    сам."""
+    assert ing_blocks_reference(problem) is blocks
 
 
 def test_shift_details_list_everything_with_owners() -> None:

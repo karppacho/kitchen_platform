@@ -10,9 +10,11 @@
   цену из колонки веса — тихо и каждые пять минут. Так же не переносится
   кухня, у которой в листе ING строки съехали относительно id — название
   одного id пришло к другому или пропало (`kitchen.domain.ing_shift`): по id
-  в базу приехали бы чужие названия и КБЖУ или пустые, тоже тихо. База
-  отвергла данные книги при переносе — откатывается только эта книга (своя
-  точка сохранения), и причина тоже уходит на сайт.
+  в базу приехали бы чужие названия и КБЖУ или пустые, тоже тихо. И кухня,
+  у которой в ING пропал вывод формулы `QUERY` целиком, — причина у этой беды
+  своя: совет сдвига («очистите строки без названия») стёр бы цены всей зоны.
+  База отвергла данные книги при переносе — откатывается только эта книга
+  (своя точка сохранения), и причина тоже уходит на сайт.
 * **Только изменения.** Отпечаток книги совпал с перенесённым — в базу
   пишется одна отметка «проверено».
 * **Сбой в журнал — один раз**, когда причина появилась или сменилась. Рядом
@@ -34,7 +36,7 @@ from sqlalchemy.exc import DataError, IntegrityError, SQLAlchemyError
 from kitchen.db import models
 from kitchen.domain.ing_shift import (
     SheetName,
-    looks_shifted,
+    ing_trouble,
     lost_id_count,
     lost_names,
     moved_id_count,
@@ -218,6 +220,14 @@ def _by_row(lines: Iterable[tuple[int, str]]) -> list[str]:
     return [line for _, line in sorted(lines, key=lambda pair: pair[0])]
 
 
+def _lost_examples(lost: Iterable[LostName]) -> list[tuple[int, str]]:
+    """Пропавшие названия для причины на сайт — строка листа и текст."""
+    return [
+        (item.row, f"стр. {item.row}, id {item.ref_id}: было «{item.was}», стало пусто")
+        for item in lost
+    ]
+
+
 def shift_problem(moved: Sequence[MovedName], lost: Sequence[LostName]) -> str:
     """Причина «строки ING съехали» — для шефа, на сайт.
 
@@ -234,12 +244,9 @@ def shift_problem(moved: Sequence[MovedName], lost: Sequence[LostName]) -> str:
     foreign = [
         (m.row, f"стр. {m.row}, id {m.ref_id}: было «{m.was}», стало «{m.now}»") for m in moved
     ]
-    empty = [
-        (item.row, f"стр. {item.row}, id {item.ref_id}: было «{item.was}», стало пусто")
-        for item in lost
-    ]
+    examples = _listed(_by_row([*foreign, *_lost_examples(lost)]))
     return (
-        f"{SHIFT_PROBLEM_START}: {', '.join(counts)} — {_listed(_by_row([*foreign, *empty]))}; "
+        f"{SHIFT_PROBLEM_START}: {', '.join(counts)} — {examples}; "
         "так бывает, когда в книге карточек удалили согласованную карточку или сменили ей "
         "статус: верните ручные колонки (A, E, L–O, Q–T) к своим названиям, а в строках "
         "без названия очистите их — перенос возобновится сам"
@@ -260,6 +267,38 @@ def shift_details(moved: Sequence[MovedName], lost: Sequence[LostName]) -> str:
         (item.row, f"стр. {item.row}, id {item.ref_id}: «{item.was}» → пусто") for item in lost
     ]
     return "; ".join(_by_row([*foreign, *empty]))
+
+
+QUERY_GONE_START = "в листе «ING» пропал вывод формулы QUERY"
+"""Начало причины «пропал вывод формулы QUERY». Открыто, как
+:data:`SHIFT_PROBLEM_START`: по нему эту причину узнают среди прочих."""
+
+
+def query_gone_problem(lost: Sequence[LostName]) -> str:
+    """Причина «пропал вывод формулы QUERY» — для шефа, на сайт.
+
+    Не сдвиг: ручные колонки на месте, пусты названия. Совет сдвига —
+    «очистите строки без названия» — здесь стёр бы цены и потери всей зоны,
+    поэтому совет обратный: колонки не трогать, чинить формулу и доступ.
+    Подробности — :func:`shift_details` без чужих названий.
+    """
+    return (
+        f"{QUERY_GONE_START}: у {lost_id_count(lost)} id нет названия — "
+        f"{_listed(_by_row(_lost_examples(lost)))}; ручные колонки не трогайте: проверьте "
+        "формулу QUERY в колонке B и доступ к листу импорта карточек — перенос возобновится "
+        "сам, когда названия вернутся"
+    )
+
+
+def ing_blocks_reference(problem: str | None) -> bool:
+    """Держит ли причина книги кухни перенос в справочник: строки ING съехали
+    или пропал вывод формулы ``QUERY``.
+
+    Пока так, книгу кухни не переносит ни цикл, ни короткий перенос после
+    записи: записанную строку сайт не увидел бы, а id рядом с названием может
+    оказаться чужим. Другие причины (лист не прочитан, сдвинулись колонки)
+    перенос не держат: лист писатель сверяет сам."""
+    return problem is not None and problem.startswith((SHIFT_PROBLEM_START, QUERY_GONE_START))
 
 
 def judge(book: str, sheets: Mapping[str, SheetData | str]) -> Verdict:
@@ -485,8 +524,14 @@ class SyncCycle:
                     result.outcomes[book] = BookOutcome("failed", verdict.problem, verdict.details)
                 elif force or state.fingerprint != verdict.fingerprint:
                     moved, lost = _ing_shift(session, sheets) if book == "kitchen" else ((), ())
-                    if looks_shifted(moved, lost):
-                        problem, details = shift_problem(moved, lost), shift_details(moved, lost)
+                    trouble = ing_trouble(moved, lost)
+                    if trouble is not None:
+                        problem = (
+                            shift_problem(moved, lost)
+                            if trouble == "shift"
+                            else query_gone_problem(lost)
+                        )
+                        details = shift_details(moved, lost)
                         _record_failure(session, state, problem, details, now)
                         result.outcomes[book] = BookOutcome("failed", problem, details)
                     else:

@@ -64,7 +64,7 @@ from kitchen.cards.submit import IMPORT_LOCK_WAIT, run_import
 from kitchen.db import links, models
 from kitchen.domain.matching import normalise_name
 from kitchen.domain.reference_row import NotFound, ReferenceForm, ReferenceFormError
-from kitchen.sync.cycle import SHIFT_PROBLEM_START
+from kitchen.sync.cycle import ing_blocks_reference
 from kitchen.sync.importer import wait_for_import_lock
 from kitchen.sync.ownership import ForbiddenWriteError
 from kitchen.sync.reference_writer import (
@@ -729,19 +729,19 @@ def _card(session: Session, card_id: int) -> _CardState:
 
 
 def _kitchen_shifted(session: Session) -> bool:
-    """Причина книги кухни в ``sync_state`` начинается с
-    :data:`~kitchen.sync.cycle.SHIFT_PROBLEM_START`: цикл узнал сдвиг строк ING
-    и книгу не переносит. Другие причины (лист не прочитан, сдвинулись колонки,
-    Google не ответил) перенос не откладывают: лист писатель сверяет сам."""
+    """Причина книги кухни в ``sync_state`` держит перенос: цикл узнал сдвиг
+    строк ING или пропавший вывод формулы ``QUERY`` и книгу не переносит.
+    Другие причины (лист не прочитан, сдвинулись колонки, Google не ответил)
+    перенос не откладывают: лист писатель сверяет сам."""
     return _is_shift(
         session.scalar(select(models.SyncState.problem).where(models.SyncState.book == KITCHEN))
     )
 
 
 def _is_shift(problem: str | None) -> bool:
-    """Причина книги кухни — «строки ING съехали»
-    (:data:`~kitchen.sync.cycle.SHIFT_PROBLEM_START`)."""
-    return problem is not None and problem.startswith(SHIFT_PROBLEM_START)
+    """Причина книги кухни — «строки ING съехали» или «пропал вывод формулы
+    QUERY» (:func:`~kitchen.sync.cycle.ing_blocks_reference`)."""
+    return ing_blocks_reference(problem)
 
 
 def _shifted(row: int) -> ReferenceConflictError:

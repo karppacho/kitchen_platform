@@ -22,6 +22,12 @@
   чужих названий нет, — и пустая копия id, оставленная после выравнивания.
   Сдвиг — уже с :data:`SHIFT_MIN_LOST` id.
 
+Не всякое пропавшее название — сдвиг (решение по ревью 15.10). Вывод
+``QUERY`` приходит через ``IMPORTRANGE`` и может пропасть целиком: тогда
+чужих названий нет, а пустых — у всех id. Это «пропал вывод формулы», у него
+свой совет — ручные колонки не трогать. Какая из двух бед — решает
+:func:`ing_trouble`.
+
 Названия сравниваются через :func:`normalise_name`: регистр, «ё» и
 пунктуация продуктов не различают, а название из одной пунктуации — пусто. В
 ответе — названия как написаны: шеф ищет строку по тому, что видит.
@@ -31,6 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from kitchen.domain.matching import normalise_name
 
@@ -46,6 +53,19 @@ SHIFT_MIN_LOST = 1
 
 С одного: законно название у известного id не пропадает, а уход последней
 карточки вывода других следов не оставляет — ни одного чужого названия."""
+
+QUERY_GONE_MIN_LOST = 3
+"""С какого числа id без названия — при ни одном чужом — пропал вывод формулы.
+
+Вывод ``QUERY`` приходит через ``IMPORTRANGE`` и может пропасть целиком: нет
+доступа к листу импорта карточек — пусто у всех id зоны, у десятков. Уход
+одной-двух последних карточек вывода даёт одно-два пустых. Ошибиться в
+сторону «пропал вывод» безопасно: его совет ничего не стирает. Ошибиться в
+сторону сдвига — нет: совет «очистите строки без названия» при пустом выводе
+стёр бы цены и потери всей зоны, а других копий у них нет."""
+
+IngTrouble = Literal["shift", "query_gone"]
+"""Беда листа ING: строки съехали — или пропал вывод формулы ``QUERY``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +200,25 @@ def shift_id_count(moved: Sequence[MovedName], lost: Sequence[LostName]) -> int:
 
 
 def looks_shifted(moved: Sequence[MovedName], lost: Sequence[LostName]) -> bool:
-    """Съехал ли лист: чужие названия у :data:`SHIFT_MIN_MOVED` id и больше
-    или пропавшие — у :data:`SHIFT_MIN_LOST`."""
+    """Сработал ли признак: чужие названия у :data:`SHIFT_MIN_MOVED` id и
+    больше или пропавшие — у :data:`SHIFT_MIN_LOST`.
+
+    Что это за беда — сдвиг или пропал вывод формулы, — решает
+    :func:`ing_trouble`; по нему и решают."""
     return moved_id_count(moved) >= SHIFT_MIN_MOVED or lost_id_count(lost) >= SHIFT_MIN_LOST
+
+
+def ing_trouble(moved: Sequence[MovedName], lost: Sequence[LostName]) -> IngTrouble | None:
+    """Что с листом ING: ``None`` — переносить можно, ``"shift"`` — строки
+    съехали, ``"query_gone"`` — пропал вывод формулы ``QUERY``.
+
+    Пропал вывод — ни одного чужого названия, а пропавшие у
+    :data:`QUERY_GONE_MIN_LOST` id и больше. Есть хоть одно чужое — вывод на
+    месте и съехал: это сдвиг, сколько бы названий ни пропало. Одна функция
+    на всех — цикл и ручной перенос решают по ней одинаково.
+    """
+    if not looks_shifted(moved, lost):
+        return None
+    if not moved and lost_id_count(lost) >= QUERY_GONE_MIN_LOST:
+        return "query_gone"
+    return "shift"

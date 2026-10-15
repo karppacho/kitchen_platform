@@ -14,8 +14,9 @@
 * на каждую строку таблицы «Ответы человеку» спеки — свой код и текст;
 * числа в ответах — строками, потери для формы — в процентах;
 * повтор после обрыва второй записи не даёт — «уже в справочнике»;
-* пока у книги кухни причина «строки ING съехали», перенос и его
-  предпросмотр отказывают, не позвав писателя; «Это он» работает;
+* пока у книги кухни причина «строки ING съехали» или «пропал вывод формулы
+  QUERY», перенос и его предпросмотр отказывают, не позвав писателя; «Это
+  он» работает;
 * список «Сверки» — кандидаты у спорных пар обоих видов, ``approved`` и
   ``actions``.
 """
@@ -45,10 +46,15 @@ from kitchen.db import models
 from kitchen.db.journal import DbJournal
 from kitchen.db.links import known_reference_ids
 from kitchen.domain.cards import APPROVED, REJECTED
-from kitchen.domain.ing_shift import MovedName
+from kitchen.domain.ing_shift import LostName, MovedName
 from kitchen.domain.reference_row import NotFound
 from kitchen.sync import ownership, specs
-from kitchen.sync.cycle import SHIFT_PROBLEM_START, shift_problem
+from kitchen.sync.cycle import (
+    QUERY_GONE_START,
+    SHIFT_PROBLEM_START,
+    query_gone_problem,
+    shift_problem,
+)
 from kitchen.sync.reference_writer import HEADER_DRIFT, NOT_CONFIRMED, ReferenceRowFiller
 from kitchen.sync.sheet_write import SHEET_WRITE_LOCK_KEY
 from kitchen.web import auth, reconciliation
@@ -1051,6 +1057,15 @@ SHIFTED = shift_problem(
 """Причина книги кухни, когда цикл узнал сдвиг строк ING: Кетчуп и Моцарелла
 поменялись названиями."""
 
+QUERY_GONE = query_gone_problem(
+    [
+        LostName(ref_id="129", row=5, was="Кетчуп"),
+        LostName(ref_id="130", row=6, was="Моцарелла"),
+        LostName(ref_id="131", row=7, was="Соус Барбекю"),
+    ]
+)
+"""Причина книги кухни, когда в листе ING пропал вывод формулы ``QUERY``."""
+
 
 def _kitchen_problem(sessions: sessionmaker[Session], problem: str) -> None:
     """Причина книги кухни в ``sync_state`` — как её оставляет цикл."""
@@ -1100,14 +1115,15 @@ class _Watched(ReferenceRowFiller):
         )
 
 
+@pytest.mark.parametrize("problem", [SHIFTED, QUERY_GONE], ids=["shift", "query-gone"])
 def test_shifted_ing_postpones_transfer_and_its_preview(
-    sessions: sessionmaker[Session], world: FakeSheetsClient
+    sessions: sessionmaker[Session], world: FakeSheetsClient, problem: str
 ) -> None:
-    """Пока у книги кухни причина «строки ING съехали», «Добавить в
-    справочник» и предпросмотр его формы — 503 словами спеки. Отказ — до
-    писателя: лист не читали, записи и журнала нет, книгу кухни в базу не
-    переносили — причина та, что оставил цикл."""
-    _kitchen_problem(sessions, SHIFTED)
+    """Пока у книги кухни причина «строки ING съехали» или «пропал вывод
+    формулы QUERY», «Добавить в справочник» и предпросмотр его формы — 503
+    словами спеки. Отказ — до писателя: лист не читали, записи и журнала нет,
+    книгу кухни в базу не переносили — причина та, что оставил цикл."""
+    _kitchen_problem(sessions, problem)
     filler = _Watched(world, sessions)
     client = make_client(world, filler=lambda: filler)
     card = _card(sessions, "Соус Барбекю")
@@ -1125,7 +1141,7 @@ def test_shifted_ing_postpones_transfer_and_its_preview(
     assert filler.calls == []
     assert len(world.opened) == opened, "лист не читали"
     _untouched(sessions, world)
-    assert _kitchen_problem_now(sessions) == SHIFTED
+    assert _kitchen_problem_now(sessions) == problem
 
 
 @pytest.mark.parametrize(
@@ -1188,6 +1204,28 @@ def test_transfer_that_finds_the_shift_itself_says_align_the_sheet(
     assert _pair(_card(sessions, "Соус Барбекю")) == (None, "orphan", False)
     problem = _kitchen_problem_now(sessions)
     assert problem is not None and problem.startswith(SHIFT_PROBLEM_START)
+
+
+def test_transfer_that_finds_query_gone_itself_does_not_promise_minutes(
+    sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
+) -> None:
+    """Названий нет у трёх id (Лук и оба Сахара), чужих нет — короткий перенос
+    после записи находит «пропал вывод формулы QUERY» и книгу кухни не
+    переносит. Само через несколько минут не появится — оговорка та же, что
+    при сдвиге: она ничего стирать не советует."""
+    for cell in ("C2", "C3", "C4"):
+        _ing(world).put(cell, "")
+    card = _card(sessions, "Соус Барбекю")
+
+    reply = transfer(chef, card.id)
+
+    assert reply.status_code == 200, reply.text
+    body = reply.json()
+    assert (body["row"], body["ref_id"], body["imported"]) == (7, "131", False)
+    assert body["notes"] == [SHIFT_NOT_IMPORTED]
+    assert _ing(world).cell("A7") == 131
+    problem = _kitchen_problem_now(sessions)
+    assert problem is not None and problem.startswith(QUERY_GONE_START)
 
 
 def test_this_is_it_works_while_ing_is_shifted(

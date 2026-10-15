@@ -13,7 +13,7 @@ from sqlalchemy.exc import OperationalError
 
 from kitchen.db import models
 from kitchen.sync import specs
-from kitchen.sync.cycle import SHIFT_PROBLEM_START, SyncCycle
+from kitchen.sync.cycle import QUERY_GONE_START, SHIFT_PROBLEM_START, SyncCycle
 from kitchen.sync.importer import take_import_lock
 from kitchen.sync.reader import BOOK_OPEN_FAILED, SheetsReader
 from tests.fake_sheets import IDS, cards_sheet, header, kitchen_sheets, row, sheets_client
@@ -714,6 +714,54 @@ def test_aligned_after_last_card_gone_is_imported(sessions) -> None:
     state = _state(sessions, "kitchen")
     assert (state.problem, state.problem_since) == (None, None)
     assert _names(sessions)["6"] == "Лук репчатый"
+
+
+def _query_gone() -> list[list[str]]:
+    """ING, у которого пропал вывод ``QUERY`` целиком (``IMPORTRANGE`` без
+    доступа): ручные колонки на месте, названий нет ни у одного id."""
+    return _ing(*((ref_id, "", price) for ref_id, _, price in _SEVEN))
+
+
+def test_query_output_gone_blocks_kitchen_without_advice_to_clear(sessions) -> None:
+    """Пропал вывод формулы — не сдвиг (Spec 2а): кухня не переносится,
+    названия в базе прежние, а причина своя — без совета чистить ручные
+    колонки: с ними ушли бы цены и потери всей зоны."""
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    before = _names(sessions)
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _query_gone()}).run()
+
+    kitchen = result.outcomes["kitchen"]
+    assert kitchen.action == "failed"
+    assert kitchen.problem == (
+        f"{QUERY_GONE_START}: у 7 id нет названия — "
+        "стр. 2, id 1: было «Томаты», стало пусто; "
+        "стр. 3, id 2: было «Сахар», стало пусто; "
+        "стр. 4, id 3: было «Сахар», стало пусто; и ещё 4; "
+        "ручные колонки не трогайте: проверьте формулу QUERY в колонке B и доступ к листу "
+        "импорта карточек — перенос возобновится сам, когда названия вернутся"
+    )
+    assert kitchen.details.count("→ пусто") == 7
+    assert _names(sessions) == before, "названия в базе прежние"
+    assert _failure_notes(sessions) == [f"kitchen: {kitchen.problem} — {kitchen.details}"]
+
+
+def test_query_output_back_clears_the_problem(sessions) -> None:
+    """Названия вернулись — причина снимается сама, без правок листа."""
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    clock.tick()
+    _cycle(sessions, clock, kitchen={"ING": _query_gone()}).run()
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+
+    assert result.outcomes["kitchen"].action == "unchanged"
+    state = _state(sessions, "kitchen")
+    assert (state.problem, state.problem_since) == (None, None)
+    assert state.checked_at == clock.now
 
 
 @pytest.mark.parametrize(

@@ -13,11 +13,14 @@ from __future__ import annotations
 import pytest
 
 from kitchen.domain.ing_shift import (
+    QUERY_GONE_MIN_LOST,
     SHIFT_MIN_LOST,
     SHIFT_MIN_MOVED,
+    IngTrouble,
     LostName,
     MovedName,
     SheetName,
+    ing_trouble,
     looks_shifted,
     lost_names,
     moved_id_count,
@@ -258,10 +261,12 @@ def test_name_of_punctuation_only_is_lost() -> None:
     assert lost_names(KNOWN, _known_sheet(id_3="—")) == (LostName(ref_id="3", row=4, was="Соль"),)
 
 
-def test_empty_name_that_was_empty_in_base_is_not_lost() -> None:
+@pytest.mark.parametrize("was", ["", "—"], ids=["пусто", "прочерк"])
+def test_empty_name_that_was_empty_in_base_is_not_lost(was: str) -> None:
     """Названия не было и в базе — терять нечего: такую строку импорт уже
-    перенёс, и сайт её уже показывает."""
-    known = {**KNOWN, "6": ""}
+    перенёс, и сайт её уже показывает. Прочерк — тоже не название: мерка та
+    же, что у листа."""
+    known = {**KNOWN, "6": was}
 
     sheet = (*_known_sheet(), SheetName(ref_id="6", name="", row=7))
 
@@ -371,6 +376,77 @@ def test_shift_id_count_joins_both_kinds() -> None:
     assert shift_id_count(moved, lost) == 3
     assert shift_id_count(moved, ()) == 2
     assert shift_id_count((), lost) == 2
+
+
+# ---------------------------------------------------------------------------
+# Вид беды: сдвиг или пропал вывод QUERY
+# ---------------------------------------------------------------------------
+
+
+def _trouble(sheet: tuple[SheetName, ...]) -> IngTrouble | None:
+    return ing_trouble(moved_names(KNOWN, sheet), lost_names(KNOWN, sheet))
+
+
+def test_whole_zone_empty_is_query_gone() -> None:
+    """``IMPORTRANGE`` потерял доступ — вывод ``QUERY`` пуст целиком: названий
+    нет ни у одного id, чужих тоже нет. Это не сдвиг: совет «очистите строки
+    без названия» стёр бы цены и потери всей зоны."""
+    sheet = _known_sheet(**{f"id_{ref_id}": "" for ref_id in KNOWN})
+
+    assert _trouble(sheet) == "query_gone"
+
+
+def test_three_lost_and_no_moved_is_query_gone() -> None:
+    assert _trouble(_known_sheet(id_3="", id_4="", id_5="")) == "query_gone"
+
+
+def test_two_lost_is_a_shift() -> None:
+    """Ушли две последние карточки вывода — у двух последних id пусто."""
+    assert _trouble(_known_sheet(id_4="", id_5="")) == "shift"
+
+
+def test_three_lost_and_one_moved_is_a_shift() -> None:
+    """Есть чужое название — вывод на месте, он съехал: это сдвиг, сколько бы
+    названий ни пропало."""
+    assert _trouble(_known_sheet(id_2="Соль", id_3="", id_4="", id_5="")) == "shift"
+
+
+def test_sheet_in_order_is_no_trouble() -> None:
+    assert _trouble(_known_sheet()) is None
+
+
+@pytest.mark.parametrize(
+    ("moved", "lost", "trouble"),
+    [
+        ((), (), None),
+        (("9",), (), None),
+        (("8", "9"), (), "shift"),
+        ((), ("1",), "shift"),
+        ((), ("1", "2"), "shift"),
+        ((), ("1", "2", "3"), "query_gone"),
+        ((), ("1", "2", "3", "4"), "query_gone"),
+        (("9",), ("1", "2", "3"), "shift"),
+        ((), ("1", "1", "1"), "shift"),
+    ],
+    ids=[
+        "ничего",
+        "одно чужое",
+        "два чужих",
+        "одно пропавшее",
+        "два пропавших",
+        "три пропавших",
+        "четыре пропавших",
+        "три пропавших и чужое",
+        "один id в трёх строках",
+    ],
+)
+def test_query_gone_from_three_lost_ids_without_moved(
+    moved: tuple[str, ...], lost: tuple[str, ...], trouble: IngTrouble | None
+) -> None:
+    """«Пропал вывод» — ни одного чужого названия и пропавшие у
+    :data:`QUERY_GONE_MIN_LOST` разных id; прочее, что ловит признак, — сдвиг."""
+    assert ing_trouble(_moved_ids(*moved), _lost_ids(*lost)) == trouble
+    assert QUERY_GONE_MIN_LOST == 3
 
 
 def test_one_id_in_two_rows_is_one_id() -> None:
