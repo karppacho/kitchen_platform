@@ -7281,8 +7281,8 @@
    "warnings": []
   },
   "B107": {
-   "carbs_g": "35.4",
-   "fats_g": "16.1",
+   "carbs_g": "37.8",
+   "fats_g": "17.6",
    "ingredients": [
     {
      "cost_rub": "22.89",
@@ -7336,20 +7336,20 @@
     }
    ],
    "kbju_coverage": "1",
-   "kcal": "357",
+   "kcal": "378",
    "margin_percent": "72.2",
    "margin_rub": "215.81",
    "name": "Хот дог французский с куриной сосиской",
    "output_grams": "152.8",
    "price_menu": "299",
-   "proteins_g": "15.9",
+   "proteins_g": "16.5",
    "uc_percent": "27.8",
    "uc_rub": "83.19",
    "warnings": []
   },
   "B108": {
-   "carbs_g": "32.5",
-   "fats_g": "19.9",
+   "carbs_g": "34.9",
+   "fats_g": "21.4",
    "ingredients": [
     {
      "cost_rub": "22.89",
@@ -7403,13 +7403,13 @@
     }
    ],
    "kbju_coverage": "1",
-   "kcal": "380",
+   "kcal": "402",
    "margin_percent": "63.1",
    "margin_rub": "188.67",
    "name": "Хот дог французский с говяжьей сосиской",
    "output_grams": "153.5",
    "price_menu": "299",
-   "proteins_g": "16.0",
+   "proteins_g": "16.6",
    "uc_percent": "36.9",
    "uc_rub": "110.33",
    "warnings": []
