@@ -63,11 +63,38 @@ _HAS_TEMPERATURE = re.compile(
     r"°|\b[tт]\s*[+\-−–]?\s*\d|температур|\bпри\s*[+\-−–]?\s*\d", re.IGNORECASE
 )
 _STARTS_WITH_PRI = re.compile(r"при\b", re.IGNORECASE)
-# «t +2..+6°C», «-18°C», «+4» — продолжение фразы «при …».
-_STARTS_WITH_TEMPERATURE = re.compile(r"(?:[tт]\s*)?[+\-−–]?\s*\d", re.IGNORECASE)
+# «t +2..+6°C», «-18°C», «+4» — продолжение фразы «при …». Число с единицей
+# времени («3 суток после вскрытия») — не температура: «при» к нему не
+# дописывается, иначе выходит обрывок «при 3 суток».
+_TIME_UNIT = r"(?:сут|дн|день|дне|час|недел|месяц|год|лет|мин)"
+_STARTS_WITH_TEMPERATURE = re.compile(
+    rf"(?:[tт]\s*)?[+\-−–]?\s*\d+(?:[.,]\d+)?(?![.,]?\d)(?!\s*{_TIME_UNIT})", re.IGNORECASE
+)
 # Границы частей условий хранения: точка с запятой и запятая — кроме
-# десятичной, между цифрами: «+2,5 °C» — одна часть.
-_CONDITION_PARTS = re.compile(r";|,(?!\d)|(?<!\d),")
+# десятичной, между цифрами: «+2,5 °C» — одна часть. Скобки оставляют знак в
+# результате split: при склейке нужен тот, что стоял в условиях.
+_CONDITION_PARTS = re.compile(r"(;|,(?!\d)|(?<!\d),)")
+
+# Температурная фраза, которую вырезают из части условий, когда температура
+# уже есть в периоде: «при», «температуре», «не выше/ниже», «t»/«т», число
+# со знаком, диапазон («+2...+6», «2-6», «от +2 до +6») и «°C»/«градусов».
+_NUMBER = r"[+\-−–]?\s*\d+(?:[.,]\d+)?(?![.,]?\d)"
+_DEGREES = r"(?:\s*°\s*(?:[CcСс](?![^\W\d_]))?|\s*градус\w*(?:\s+(?:Цельсия|[CcСс](?![^\W\d_])))?)"
+_TEMPERATURE_PHRASE = re.compile(
+    r"(?:\bпри\s+)?(?:температур\w*\s+)?(?:не\s+(?:выше|ниже)\s+)?(?:\b[tт]\s*)?"
+    rf"(?:от\s+{_NUMBER}{_DEGREES}?\s*до\s+{_NUMBER}{_DEGREES}?"
+    rf"|{_NUMBER}{_DEGREES}?(?:\s*(?:\.\.\.?|…|[-–—])\s*{_NUMBER}{_DEGREES}?)?)"
+    rf"(?!\s*{_TIME_UNIT})",
+    re.IGNORECASE,
+)
+# Совпадение — температура, а не просто число: есть «°», знак, диапазон,
+# «градусов» или слово-приставка. Голое «5» в «5 шт при -18°C» остаётся.
+_TEMPERATURE_MARK = re.compile(r"[°+\-−–…]|\.\.|градус|температур|\bпри\b|\b[tт]\b", re.IGNORECASE)
+# Висячее «при» на краю остатка: «хранить при» после снятия температуры.
+_EDGE_PRI = re.compile(r"^(?:при\s+)+|(?:\s+при)+$", re.IGNORECASE)
+_EDGE_PUNCTUATION = " ,;.:-–—"
+# В остатке должно быть слово: из «°», «C», «.» повару нечего читать.
+_WORD = re.compile(r"[^\W\d_]{3,}")
 
 
 def parse_label_date(raw: str | None) -> date | None:
@@ -227,24 +254,54 @@ def _missing_conditions(period: str, conditions: str) -> str:
     Период с этикетки нередко уже содержит температуру: «12 месяцев при
     -18 °C». Дописать к нему «при t -18°C» — повтор, который повар будет
     стирать руками. Поэтому условия делятся на части (по запятой и точке с
-    запятой) и пропускается часть, текст которой в периоде уже есть, и часть
-    с температурой, если температура есть и в периоде. Всё остальное
-    дописывается: температура из условий не должна теряться из-за
-    постороннего «при» («6 месяцев при условии герметичности»), а «в сухом
-    месте» — из-за температуры в периоде, в том числе когда они в условиях
-    вместе: «при -18°C, в сухом месте».
+    запятой) и пропускается часть, текст которой в периоде уже есть. Из
+    части с температурой, если температура есть и в периоде, вырезается
+    только температурная фраза, а слова вокруг неё остаются: «при -18°C в
+    сухом месте» даёт «в сухом месте». Температура из условий не должна
+    теряться из-за постороннего «при» («6 месяцев при условии
+    герметичности»), а слова — из-за температуры в периоде, ни через запятую,
+    ни без неё.
+
+    Части склеиваются тем знаком, что стоял перед ними в условиях («;»
+    остаётся «;»); если между оставленными частями была выкинутая, берётся
+    знак перед оставленной.
     """
     period_key = _key(period)
     period_has_temperature = bool(_HAS_TEMPERATURE.search(period))
-    kept: list[str] = []
-    for part in _CONDITION_PARTS.split(conditions):
+    parts = _CONDITION_PARTS.split(conditions)
+    result = ""
+    for index in range(0, len(parts), 2):
+        part = parts[index]
+        if period_has_temperature and _HAS_TEMPERATURE.search(part):
+            part = _without_temperature(part)
+            if not _WORD.search(part):
+                continue
         wanted = _key(part).removeprefix("при")
         if not wanted or wanted in period_key:
             continue
-        if period_has_temperature and _HAS_TEMPERATURE.search(part):
-            continue
-        kept.append(part.strip())
-    return ", ".join(kept)
+        part = part.strip()
+        if result:
+            result += f"{parts[index - 1]} {part}"
+        else:
+            result = part
+    return result
+
+
+def _without_temperature(part: str) -> str:
+    """Часть условий без температурной фразы; остаток без краевых знаков и «при».
+
+    Если фразы нет (детектор сработал на «при 3 суток»), часть возвращается
+    как была: терять слова нельзя, а повтор повар сотрёт.
+    """
+
+    def cut(match: re.Match[str]) -> str:
+        return " " if _TEMPERATURE_MARK.search(match.group(0)) else match.group(0)
+
+    cleaned = " ".join(_TEMPERATURE_PHRASE.sub(cut, part).split())
+    cleaned = cleaned.strip(_EDGE_PUNCTUATION)
+    while (stripped := _EDGE_PRI.sub("", cleaned).strip(_EDGE_PUNCTUATION)) != cleaned:
+        cleaned = stripped
+    return cleaned
 
 
 def _key(text: str) -> str:
