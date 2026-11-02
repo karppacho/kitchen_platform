@@ -437,7 +437,8 @@ def run_import(books: BookImport, book: str) -> str | None:
     (:data:`IMPORT_LOCK_WAIT`, :data:`IMPORT_GOOGLE_TIMEOUT`). ``None`` —
     перенесена (или её перенёс более свежий цикл); иначе — почему нет, для
     лога. Не исключение: запись уже состоялась, а следующий цикл
-    синхронизации перенесёт книгу сам."""
+    синхронизации перенесёт книгу сам; при сдвиге строк ING книгу кухни — только
+    после выравнивания листа."""
     try:
         result = books.run(force=True, books=(book,))
     except Exception as error:
