@@ -13,7 +13,8 @@
   перенос книги кухни в базу коротким путём (как после отправки карточки,
   :func:`kitchen.cards.submit.run_import`) и подтверждение пары с
   ингредиентом этой строки. Перенос не удался — ответ всё равно удачный,
-  ``imported=false``: строка уже в листе, ингредиент перенесёт воркер.
+  ``imported=false``: строка уже в листе, ингредиент перенесёт воркер (если
+  перенос нашёл сдвиг строк ING — после выравнивания листа, оговорка своя).
 
 Правила, ради которых этот слой есть:
 
@@ -24,11 +25,13 @@
   ручные колонки остались) рядом с нашим названием стоит чужой id. Перенос
   переименовал бы тот ингредиент в нашу карточку, сверка после него прошла
   бы, и подтверждённая пара пережила бы даже исправление листа. Поэтому id
-  другого ингредиента — отказ «сдвинуты», и перенос не начинается. Защита
-  действует, только пока база помнит прежнее название: следующий цикл
-  воркера сам перенесёт сдвинутый лист и переименует ингредиент по id —
-  после этого сдвиг отсюда не виден. Сигнал «у id сменилось название» — в
-  ROADMAP.
+  другого ингредиента — отказ «сдвинуты», и перенос не начинается. Защите
+  нужно, чтобы база помнила прежние названия, — так и есть, пока лист не
+  выровняли: цикл синхронизации сам узнаёт сдвиг (название одного id пришло к
+  другому) и книгу кухни не переносит. А пока у книги кухни такая причина,
+  перенос и его предпросмотр отказывают до чтения листа и записи
+  (:data:`SHIFT_POSTPONED`); «Это он» идёт только в базе и работает как
+  прежде.
 * **Решение человека не затираем.** Пару, которую человек уже подтвердил
   («Это он» или перенос у другого человека — список на экране устарел),
   перенос не трогает: строку, ждущую переноса, писатель не заполняет (409
@@ -53,13 +56,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from kitchen.cards.drafts import CardsError
 from kitchen.cards.submit import IMPORT_LOCK_WAIT, run_import
-from kitchen.db import links
+from kitchen.db import links, models
 from kitchen.domain.matching import normalise_name
 from kitchen.domain.reference_row import NotFound, ReferenceForm, ReferenceFormError
+from kitchen.sync.cycle import SHIFT_PROBLEM_START
 from kitchen.sync.importer import wait_for_import_lock
 from kitchen.sync.ownership import ForbiddenWriteError
 from kitchen.sync.reference_writer import (
@@ -86,7 +91,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 KITCHEN = "kitchen"
-"""Книга, которую переносят в базу сразу после записи строки ING."""
+"""Книга кухни: её переносят в базу сразу после записи строки ING, а по её
+причине в ``sync_state`` перенос узнаёт, что строки ING съехали."""
 
 PAIR_WAIT = IMPORT_LOCK_WAIT
 """Сколько подтверждение пары ждёт очередь импорта. Человек ждёт ответа на
@@ -103,10 +109,24 @@ NOT_A_CANDIDATE_REASON = "not_candidate"
 REFERENCE_BUSY = "Справочник сейчас обновляется — попробуйте ещё раз через минуту"
 NOT_CONFIGURED = "Таблица кухни или карточек не настроена — сообщите администратору"
 WRITING_CLOSED = "Запись в таблицу кухни сейчас закрыта — сообщите администратору"
+SHIFT_POSTPONED = (
+    "Перенос в справочник отложен: в листе ING строки съехали относительно id, и таблица "
+    "кухни не переносится на сайт. Сначала выровняйте лист ING"
+)
+"""Пока у книги кухни причина «строки ING съехали»
+(:data:`kitchen.sync.cycle.SHIFT_PROBLEM_START`): перенос и его предпросмотр
+отказывают до чтения листа."""
 NOT_IMPORTED = (
     "Ингредиент записан в справочник, но на сайт пока не перенесён — появится при "
     "следующем обновлении, через несколько минут"
 )
+SHIFT_NOT_IMPORTED = (
+    "Ингредиент записан в справочник, но на сайт не перенесён: в листе ING строки съехали "
+    "относительно id. Выровняйте лист ING — ингредиент появится со следующим обновлением"
+)
+"""Вместо :data:`NOT_IMPORTED`, когда перенос книги кухни после записи нашёл
+сдвиг строк ING: «через несколько минут» было бы неправдой — пока лист не
+выровняли, книгу кухни не переносит ни этот перенос, ни цикл."""
 PAIR_NOT_CONFIRMED = (
     "Пару карточки и ингредиента подтвердить не удалось — если карточка осталась на «Сверке», "
     "откройте её ещё раз: второй записи не будет"
@@ -175,8 +195,8 @@ class ReferenceFormInvalidError(CardsError):
 
 class ReferenceUnavailableError(CardsError):
     """Сделать нельзя, и дело не в карточке (503): колонки или формула листа
-    изменились, таблица занята, запись не настроена или закрыта, справочник
-    обновляется. В листе ничего не изменилось."""
+    изменились, строки ING съехали, таблица занята, запись не настроена или
+    закрыта, справочник обновляется. В листе ничего не изменилось."""
 
 
 class ReferenceFailedError(CardsError):
@@ -251,9 +271,10 @@ class Transferred:
     базе, не удалён из листа и называется как карточка. Так при подтверждённой
     паре — и когда пару подтвердить не дали, но наш ингредиент на сайте.
     ``False`` — перенос не удался или под этим id на сайте не наш ингредиент;
-    тогда в ``notes`` всегда оговорка: :data:`NOT_IMPORTED` или, если после
-    удачного переноса под этим id на сайте другой ингредиент, — проверить
-    строку листа (без обещания «появится»)."""
+    тогда в ``notes`` всегда оговорка: :data:`NOT_IMPORTED` (перенос нашёл
+    сдвиг строк ING — :data:`SHIFT_NOT_IMPORTED`) или, если после удачного
+    переноса под этим id на сайте другой ингредиент, — проверить строку листа
+    (без обещания «появится»)."""
     linked: bool
     """Пара «карточка — ингредиент» подтверждена."""
     ingredient_id: int | None
@@ -276,11 +297,14 @@ def preview(session: Session, filler: RowFiller | None, card_id: int) -> RowPrev
 
     ``filler`` — ``None``, если книга кухни или карточек не настроена. Строки
     нет или заполнить её нельзя — это не отказ: причина в ответе
-    (``reason``, ``message``). Отказы — сломанный лист (503) и Google (502).
+    (``reason``, ``message``). Отказы — сломанный лист (503) и Google (502);
+    строки ING съехали — 503 до чтения листа (:data:`SHIFT_POSTPONED`).
     """
     card = _card(session, card_id)
     if filler is None:
         raise ReferenceUnavailableError(NOT_CONFIGURED)
+    if card.kitchen_shifted:
+        raise ReferenceUnavailableError(SHIFT_POSTPONED)
     try:
         return filler.preview(card.name, confirmed=card.confirmed)
     except WriteRefusedError as error:
@@ -364,6 +388,10 @@ def to_reference(
     переноса отвечает по журналу. Подтверждённую пару после записи не
     затираем: она остаётся как есть, а в ответе — оговорка.
 
+    Пока у книги кухни причина «строки ING съехали», перенос отложен — 503
+    до писателя (:data:`SHIFT_POSTPONED`): записанную строку цикл в базу не
+    перенёс бы, а id рядом с названием может оказаться чужим.
+
     Отказы — наследники :class:`~kitchen.cards.drafts.CardsError` с текстом
     для человека; при любом отказе пара не подтверждается.
     """
@@ -371,6 +399,8 @@ def to_reference(
     name = card.name
     if filler is None:
         raise ReferenceUnavailableError(NOT_CONFIGURED)
+    if card.kitchen_shifted:
+        raise ReferenceUnavailableError(SHIFT_POSTPONED)
     form: ReferenceForm | ReferenceFormError
     try:
         form = ReferenceForm.parse(raw_form)
@@ -382,16 +412,24 @@ def to_reference(
         _check_known_id(session, card_id, name, result)
     problem = run_import(books, KITCHEN)
     if problem is not None:
+        # При сдвиге строк ING «перенесёт следующий цикл» — неправда: книгу
+        # кухни цикл не переносит, пока лист не выровняли.
+        what = (
+            "перенос книги кухни в базу остановлен сдвигом строк ING — ингредиент появится "
+            "после выравнивания листа"
+            if _is_shift(problem)
+            else "перенос книги кухни в базу не удался — его перенесёт следующий цикл"
+        )
         log.warning(
-            "карточка %s: ингредиент в строке %s листа ING (id %s), но перенос книги кухни в "
-            "базу не удался — его перенесёт следующий цикл: %s",
+            "карточка %s: ингредиент в строке %s листа ING (id %s), но %s: %s",
             card_id,
             result.row,
             result.ref_id,
+            what,
             problem,
         )
     pair = _confirm_written(session, card_id, name, result.ref_id, wait)
-    return _answer(card_id, result, pair, imported=problem is None)
+    return _answer(card_id, result, pair, problem=problem)
 
 
 def _fill(
@@ -596,17 +634,21 @@ def _ours_on_site(session: Session, card_id: int, name: str, ref_id: str) -> boo
         session.rollback()
 
 
-def _answer(card_id: int, result: FillResult, pair: _Pair, *, imported: bool) -> Transferred:
+def _answer(card_id: int, result: FillResult, pair: _Pair, *, problem: str | None) -> Transferred:
     """Ответ человеку — или отказ, если id в строке стоял до нас и не того
     ингредиента.
 
-    Перенос прошёл (``imported``), а под id строки на сайте не наш ингредиент
-    (его нет или у него другое название): id стоял до нас — строки сдвинуты
-    (409); id записали мы — запись состоялась, ответ удачный, а пара не
-    подтверждена: оговорка «проверьте строку листа» и ERROR в лог. Без
-    обещания «появится через несколько минут»: само это не пройдёт. Иначе наш
-    ингредиент на сайте не виден — оговорка :data:`NOT_IMPORTED`.
+    ``problem`` — почему не удался перенос книги кухни после записи
+    (:func:`~kitchen.cards.submit.run_import`); ``None`` — перенесена. Перенос
+    прошёл, а под id строки на сайте не наш ингредиент (его нет или у него
+    другое название): id стоял до нас — строки сдвинуты (409); id записали мы
+    — запись состоялась, ответ удачный, а пара не подтверждена: оговорка
+    «проверьте строку листа» и ERROR в лог. Без обещания «появится через
+    несколько минут»: само это не пройдёт. Иначе наш ингредиент на сайте не
+    виден — оговорка :data:`NOT_IMPORTED`, а если перенос нашёл сдвиг строк ING,
+    — :data:`SHIFT_NOT_IMPORTED`: до выравнивания листа само не появится.
     """
+    imported = problem is None
     found_in_sheet = result.journal_id is None
     stranger = pair.outcome == "other" or (pair.outcome == "missing" and imported)
     if stranger and found_in_sheet:
@@ -615,7 +657,7 @@ def _answer(card_id: int, result: FillResult, pair: _Pair, *, imported: bool) ->
     if result.shifted is not None:
         notes.append(_shifted_note(result.shifted))
     if not pair.on_site and not stranger:
-        notes.append(NOT_IMPORTED)
+        notes.append(SHIFT_NOT_IMPORTED if _is_shift(problem) else NOT_IMPORTED)
     if pair.outcome == "failed":
         notes.append(PAIR_NOT_CONFIRMED)
     if pair.outcome == "kept":
@@ -661,23 +703,45 @@ class _CardState:
     name: str
     confirmed: bool
     """Пару подтвердил человек (``link_confirmed_at``)."""
+    kitchen_shifted: bool
+    """У книги кухни причина «строки ING съехали» — перенос отложен."""
 
 
 def _card(session: Session, card_id: int) -> _CardState:
-    """Название карточки и подтверждена ли её пара — и сразу закрыть
-    транзакцию: дальше Google."""
+    """Название карточки, подтверждена ли её пара и не съехали ли строки ING —
+    и сразу закрыть транзакцию: дальше Google."""
     try:
         card = links.live_card(session, card_id)
         state = (
             None
             if card is None
-            else _CardState(card.name, confirmed=card.link_confirmed_at is not None)
+            else _CardState(
+                card.name,
+                confirmed=card.link_confirmed_at is not None,
+                kitchen_shifted=_kitchen_shifted(session),
+            )
         )
     finally:
         session.rollback()
     if state is None:
         raise ReferenceCardNotFoundError
     return state
+
+
+def _kitchen_shifted(session: Session) -> bool:
+    """Причина книги кухни в ``sync_state`` начинается с
+    :data:`~kitchen.sync.cycle.SHIFT_PROBLEM_START`: цикл узнал сдвиг строк ING
+    и книгу не переносит. Другие причины (лист не прочитан, сдвинулись колонки,
+    Google не ответил) перенос не откладывают: лист писатель сверяет сам."""
+    return _is_shift(
+        session.scalar(select(models.SyncState.problem).where(models.SyncState.book == KITCHEN))
+    )
+
+
+def _is_shift(problem: str | None) -> bool:
+    """Причина книги кухни — «строки ING съехали»
+    (:data:`~kitchen.sync.cycle.SHIFT_PROBLEM_START`)."""
+    return problem is not None and problem.startswith(SHIFT_PROBLEM_START)
 
 
 def _shifted(row: int) -> ReferenceConflictError:
