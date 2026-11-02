@@ -7,7 +7,7 @@ import { sobratGruppy, type GruppaFiltra, type OpisanieKolonki } from '../src/do
 import { Galochki } from '../src/ui/Galochki'
 
 // Группа галочек одной колонки — одна на обе ширины: в панели под значком
-// фильтра на широком экране и во встроенных «Фильтрах» на узком.
+// фильтра на широком экране и в панели «Сортировка и фильтры» на телефоне.
 
 const KATEGORIYA: GruppaFiltra = {
   kolonka: 'category',

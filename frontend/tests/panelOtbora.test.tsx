@@ -169,3 +169,17 @@ test('у заголовка группы — значок раскрытия, у
   await userEvent.click(zagolovokGruppy('Категория'))
   expect(gruppy[0]).toHaveAttribute('open')
 })
+
+test('внутри панели есть живая область: после галочки её текст — новое «Найдено N»', async () => {
+  // Узел «Найдено: N из M» снаружи под inert, пока панель открыта, —
+  // программа чтения с экрана его изменений не зачитывает. Своя область
+  // внутри диалога зачитывается.
+  render(<Stend />)
+  await userEvent.click(knopka())
+  const oblast = dialog().querySelector('[aria-live="polite"]')
+  expect(oblast).not.toBeNull()
+  expect(oblast).toHaveTextContent('Найдено 3')
+  await userEvent.click(zagolovokGruppy('Категория'))
+  await userEvent.click(within(dialog()).getByRole('checkbox', { name: 'Соус · 2' }))
+  expect(oblast).toHaveTextContent('Найдено 2')
+})

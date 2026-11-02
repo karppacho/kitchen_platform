@@ -71,7 +71,7 @@ export function PanelTablitsy<T>({
   // изменение живой области, и «5» без «из 130» ничего бы не сказало.
   // Узел один, место разное: на широком — рядом с полем, на телефоне — под
   // ним, в одном ряду с кнопкой отбора (поле там во всю строку).
-  const naidenoEl = (
+  const naidenoDom = (
     <span className="panel-tablitsy-naideno" aria-live="polite" aria-atomic="true">
       {`Найдено: ${naideno} из ${vsego}`}
     </span>
@@ -89,11 +89,11 @@ export function PanelTablitsy<T>({
           value={vvod}
           onChange={(event) => onVvod(event.target.value)}
         />
-        {wide && naidenoEl}
+        {wide && naidenoDom}
       </div>
       {!wide && (
         <div className="panel-tablitsy-ryad panel-tablitsy-ryad--otbor">
-          {naidenoEl}
+          {naidenoDom}
           <PanelOtbora
             knopka={knopkaFiltrov}
             kolonki={kolonki}

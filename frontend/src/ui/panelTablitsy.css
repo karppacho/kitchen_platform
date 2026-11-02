@@ -46,6 +46,7 @@
 
 .panel-otbora-knopka {
   min-height: 44px;
+  white-space: nowrap;
   padding: var(--shag) calc(var(--shag) * 3);
   border: 1px solid var(--granitsa);
   border-radius: var(--radius);
@@ -132,7 +133,7 @@
   width: 1px;
   height: 1px;
   overflow: hidden;
-  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
 }
 
 .panel-otbora-pokazat {

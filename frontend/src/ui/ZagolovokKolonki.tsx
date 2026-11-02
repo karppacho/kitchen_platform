@@ -55,7 +55,7 @@ export function ZagolovokKolonki<T>({ kolonka, sortirovka, onSort, gruppa, onVyb
           aria-haspopup="dialog"
           aria-expanded={otkryta}
           // Только открытой: закрытой панели в документе нет, ссылка вела бы
-          // в никуда. Так же у узкой кнопки «Фильтры».
+          // в никуда. Так же у кнопки «Сортировка и фильтры» на телефоне.
           aria-controls={otkryta ? idPaneli : undefined}
           onClick={() => otkryt(!otkryta)}
         >

@@ -61,10 +61,13 @@
   cursor: pointer;
 }
 
-/* Под палец строки выше: на телефоне те же галочки во встроенных «Фильтрах». */
+/* Под палец строки выше (цель касания — 44 px, спека 2.11): галочки живут в
+   панели снизу (`PanelOtbora`) и во всплывашке колонки на компьютере. */
 @media (pointer: coarse) {
   .galochki-variant,
   .galochki-sbros {
     padding: calc(var(--shag) * 2) 0;
+    min-height: 44px;
+    align-items: center;
   }
 }

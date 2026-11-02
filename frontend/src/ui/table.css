@@ -169,15 +169,24 @@ button.stroka-telo {
    цены» — под ними на обе колонки. Сетка, а не флекс с переносом:
    max-content флекс-строки считается без переносов (как одна бесконечная
    строка), и правая колонка раздувалась бы до суммы «UC + число +
-   подпись». У сетки элемент на две колонки даёт max-content =
+   замечание». У сетки элемент на две колонки даёт max-content =
    max(число с подписью, 18ch) — название блюда остаётся широким. */
 .stroka-znachenie {
   display: grid;
-  grid-template-columns: auto auto;
+  grid-template-columns: 1fr auto;
+  justify-items: end;
   justify-content: end;
   align-items: baseline;
   column-gap: var(--shag);
   white-space: nowrap;
+}
+
+/* Подписи нет («карточка есть», «нет карточки») — вторая колонка пуста, но
+   зазор между колонками остаётся, и значение стоит на 4 px левее края. Один
+   трек зазора не оставляет. В браузерах без `:has()` останутся те же 4 px —
+   косметика. */
+.stroka-znachenie:not(:has(.stroka-znachenie-podpis)) {
+  grid-template-columns: auto;
 }
 
 .stroka-znachenie .podpis-dorozhe {

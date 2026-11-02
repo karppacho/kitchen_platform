@@ -77,6 +77,12 @@ export function PanelOtbora<T>({ knopka, kolonki, naideno, sortirovka, onSortiro
             </>
           }
         >
+          {/* Живая область внутри диалога: «Найдено: N из M» снаружи лежит под
+              inert, пока панель открыта, и программа чтения с экрана его
+              изменений не зачитывает. */}
+          <span className="vizualno-skryto" aria-live="polite" aria-atomic="true">
+            {`Найдено ${naideno}`}
+          </span>
           <fieldset className="panel-otbora-sortirovka">
             <legend>Сортировка</legend>
             <label className="panel-otbora-variant">

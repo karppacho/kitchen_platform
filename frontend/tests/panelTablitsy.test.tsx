@@ -138,7 +138,7 @@ test('на 1440 px нет кнопки «Сортировка и фильтры�
   expect(fishka('Категория: Соус')).toBeInTheDocument()
 })
 
-test('на 360 px: поле во всю строку, «Найдено», кнопка «Сортировка и фильтры» открывает панель', async () => {
+test('на 360 px: нет выпадающих списков и «Фильтров», «Найдено» — живая область, кнопка «Сортировка и фильтры» открывает панель', async () => {
   setViewport(360)
   render(<Stend />)
   expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
