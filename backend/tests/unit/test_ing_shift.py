@@ -405,10 +405,23 @@ def test_two_lost_is_a_shift() -> None:
     assert _trouble(_known_sheet(id_4="", id_5="")) == "shift"
 
 
-def test_three_lost_and_one_moved_is_a_shift() -> None:
-    """Есть чужое название — вывод на месте, он съехал: это сдвиг, сколько бы
-    названий ни пропало."""
-    assert _trouble(_known_sheet(id_2="Соль", id_3="", id_4="", id_5="")) == "shift"
+def test_three_lost_and_one_moved_is_query_gone() -> None:
+    """Одно чужое название — ниже порога сдвига и само по себе не сигнал: при
+    пропавшем выводе оно приходит из правки шефа вне зоны ``QUERY``.
+
+    В задаче 1 этот случай был сдвигом. Поправка Spec 2а от 15.10: совет
+    сдвига «очистите строки без названия» стёр бы здесь цены и потери зоны, а
+    ошибиться в сторону «пропал вывод» безопасно — его совет ничего не стирает.
+    """
+    assert _trouble(_known_sheet(id_2="Соль", id_3="", id_4="", id_5="")) == "query_gone"
+
+
+def test_three_lost_and_two_moved_is_a_shift() -> None:
+    """Чужие названия у двух id — вывод на месте, он съехал: это сдвиг,
+    сколько бы названий ни пропало."""
+    sheet = _known_sheet(id_1="Сахар", id_2="Томаты", id_3="", id_4="", id_5="")
+
+    assert _trouble(sheet) == "shift"
 
 
 def test_sheet_in_order_is_no_trouble() -> None:
@@ -425,7 +438,10 @@ def test_sheet_in_order_is_no_trouble() -> None:
         ((), ("1", "2"), "shift"),
         ((), ("1", "2", "3"), "query_gone"),
         ((), ("1", "2", "3", "4"), "query_gone"),
-        (("9",), ("1", "2", "3"), "shift"),
+        # Было «shift» (задача 1); поправка Spec 2а от 15.10 — одно чужое
+        # название ниже порога сдвига и «пропал вывод» не отменяет.
+        (("9",), ("1", "2", "3"), "query_gone"),
+        (("8", "9"), ("1", "2", "3"), "shift"),
         ((), ("1", "1", "1"), "shift"),
     ],
     ids=[
@@ -437,14 +453,16 @@ def test_sheet_in_order_is_no_trouble() -> None:
         "три пропавших",
         "четыре пропавших",
         "три пропавших и чужое",
+        "три пропавших и два чужих",
         "один id в трёх строках",
     ],
 )
-def test_query_gone_from_three_lost_ids_without_moved(
+def test_query_gone_from_three_lost_ids_and_fewer_than_two_moved(
     moved: tuple[str, ...], lost: tuple[str, ...], trouble: IngTrouble | None
 ) -> None:
-    """«Пропал вывод» — ни одного чужого названия и пропавшие у
-    :data:`QUERY_GONE_MIN_LOST` разных id; прочее, что ловит признак, — сдвиг."""
+    """«Пропал вывод» — чужих названий меньше, чем у :data:`SHIFT_MIN_MOVED`
+    id, а пропавшие — у :data:`QUERY_GONE_MIN_LOST` разных id и больше;
+    прочее, что ловит признак, — сдвиг."""
     assert ing_trouble(_moved_ids(*moved), _lost_ids(*lost)) == trouble
     assert QUERY_GONE_MIN_LOST == 3
 

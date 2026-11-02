@@ -15,6 +15,11 @@
   своя: совет сдвига («очистите строки без названия») стёр бы цены всей зоны.
   База отвергла данные книги при переносе — откатывается только эта книга
   (своя точка сохранения), и причина тоже уходит на сайт.
+* **Сдвиг строк ING принимают только вручную и только точным числом**
+  (`accept_shift`, его передаёт лишь `scripts/import_sheets.py`): лист верен,
+  а база старше — в ней уже лежат сдвинутые названия. Число id признака не
+  совпало — лист изменился, пока его сверяли, и это отказ. Ни сдвиг колонок,
+  ни непрочитанный лист, ни пропавший вывод `QUERY` флаг не обходит.
 * **Только изменения.** Отпечаток книги совпал с перенесённым — в базу
   пишется одна отметка «проверено».
 * **Сбой в журнал — один раз**, когда причина появилась или сменилась. Рядом
@@ -41,6 +46,7 @@ from kitchen.domain.ing_shift import (
     lost_names,
     moved_id_count,
     moved_names,
+    shift_id_count,
 )
 from kitchen.sync import specs
 from kitchen.sync.client import GspreadClient
@@ -60,7 +66,7 @@ if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
 
     from kitchen.config import Settings
-    from kitchen.domain.ing_shift import LostName, MovedName
+    from kitchen.domain.ing_shift import IngTrouble, LostName, MovedName
     from kitchen.sync.ownership import SheetSpec
 
 BOOKS: dict[str, tuple[SheetSpec, ...]] = {
@@ -280,7 +286,8 @@ def query_gone_problem(lost: Sequence[LostName]) -> str:
     Не сдвиг: ручные колонки на месте, пусты названия. Совет сдвига —
     «очистите строки без названия» — здесь стёр бы цены и потери всей зоны,
     поэтому совет обратный: колонки не трогать, чинить формулу и доступ.
-    Подробности — :func:`shift_details` без чужих названий.
+    Одно чужое название, если оно есть, в тексте не упоминается: на сайт —
+    беда, а полный список чужих и пропавших — :func:`shift_details`.
     """
     return (
         f"{QUERY_GONE_START}: у {lost_id_count(lost)} id нет названия — "
@@ -352,7 +359,14 @@ class BookOutcome:
     action: Action
     problem: str | None = None
     details: str | None = None
-    """Исходный текст ошибок читателя (см. `Verdict.details`) — для лога."""
+    """Исходный текст ошибок читателя (см. `Verdict.details`) — для лога. У
+    сдвига строк ING — полный список строк признака, и принятого вручную тоже."""
+    shift_ids: int | None = None
+    """Сколько разных id задел сдвиг строк ING — число для `--accept-shift`.
+    Есть, когда у кухни беда «строки съехали»: и при отказе, и при принятии.
+    В тексте причины чисел два, и id в обоих видах посчитан там дважды."""
+    shift_accepted: bool = False
+    """Сдвиг строк ING принят вручную, и книга кухни перенесена."""
 
 
 @dataclass(slots=True)
@@ -461,6 +475,38 @@ def _record_failure(
     session.add(models.SyncRun(finished_at=now, ok=False, note=note))
 
 
+@dataclass(frozen=True, slots=True)
+class _AcceptedShift:
+    """Сдвиг строк ING, принятый флагом: число id и полный список строк."""
+
+    ids: int
+    details: str
+
+
+def _record_accepted(session: Session, book: str, shift: _AcceptedShift, now: datetime) -> None:
+    """Сдвиг принят вручную — отдельная запись журнала с подробностями, как у
+    сбоев: по ней потом видно, какие названия приняли и кто был до них.
+
+    Только после состоявшегося переноса книги: упади он — в журнале рядом
+    легли бы «принят» и сбой переноса.
+    """
+    note = f"{book}: сдвиг строк ING принят вручную: {shift.ids} id — {shift.details[:500]}"
+    session.add(models.SyncRun(finished_at=now, ok=True, note=note))
+
+
+def _flag_refused(trouble: IngTrouble, found: int | None, accept_shift: int | None) -> str:
+    """Почему `--accept-shift` не принял беду листа ING — в начало подробностей.
+
+    Без флага — пусто: подробности те же, что у воркера. Причина на сайт и
+    запись о сбое от флага не зависят — отказ с флагом тот же, что без него.
+    """
+    if accept_shift is None:
+        return ""
+    if trouble == "query_gone":
+        return "--accept-shift не принимает «пропал вывод формулы QUERY»; "
+    return f"в флаге --accept-shift {accept_shift}, найдено сейчас {found}; "
+
+
 class SyncCycle:
     """Один цикл: прочитать книги, решить по каждой, перенести нужное."""
 
@@ -479,13 +525,26 @@ class SyncCycle:
         self._lock_timeout = lock_timeout
         self._statement_timeout = statement_timeout
 
-    def run(self, *, force: bool = False, books: Sequence[str] | None = None) -> CycleResult:
+    def run(
+        self,
+        *,
+        force: bool = False,
+        books: Sequence[str] | None = None,
+        accept_shift: int | None = None,
+    ) -> CycleResult:
         """`force` — переносить и без изменений (ручной запуск).
 
         `books` — какие книги прочитать и перенести; по умолчанию все. Сразу
         после записи карточки переносится одна книга карточек: карточка
         попадает в базу обычным путём, а кухню незачем ни читать (квота
         Google), ни трогать. Неизвестная книга — ValueError до чтения.
+
+        `accept_shift` — ручной обход сдвига строк ING, его передаёт только
+        `scripts/import_sheets.py`: у кухни беда «строки съехали», и разных id
+        в признаке ровно столько — книга переносится, несмотря на признак, а
+        в журнал ложится запись «принят вручную». Число не совпало или беда
+        другая — отказ, как без флага, с пояснением в начале `details`.
+        Воркер, «Сверка» и короткий перенос его не передают никогда.
         """
         chosen = tuple(BOOKS) if books is None else tuple(books)
         unknown = [book for book in chosen if book not in BOOKS]
@@ -506,6 +565,7 @@ class SyncCycle:
             now = self._clock()
             states = {state.book: state for state in session.scalars(select(models.SyncState))}
             to_import: list[str] = []
+            accepted: dict[str, _AcceptedShift] = {}
 
             for book, verdict in verdicts.items():
                 state = states.get(book)
@@ -525,7 +585,17 @@ class SyncCycle:
                 elif force or state.fingerprint != verdict.fingerprint:
                     moved, lost = _ing_shift(session, sheets) if book == "kitchen" else ((), ())
                     trouble = ing_trouble(moved, lost)
-                    if trouble is not None:
+                    shift_ids = shift_id_count(moved, lost) if trouble == "shift" else None
+                    if trouble is None:
+                        to_import.append(book)
+                    elif shift_ids is not None and shift_ids == accept_shift:
+                        # Ручной обход: лист сверили с подробностями и сочли
+                        # верным, а число id то же, что видели, — лист с тех
+                        # пор не менялся. Запись «принят» — только после
+                        # переноса, ниже.
+                        accepted[book] = _AcceptedShift(shift_ids, shift_details(moved, lost))
+                        to_import.append(book)
+                    else:
                         problem = (
                             shift_problem(moved, lost)
                             if trouble == "shift"
@@ -533,9 +603,12 @@ class SyncCycle:
                         )
                         details = shift_details(moved, lost)
                         _record_failure(session, state, problem, details, now)
-                        result.outcomes[book] = BookOutcome("failed", problem, details)
-                    else:
-                        to_import.append(book)
+                        result.outcomes[book] = BookOutcome(
+                            "failed",
+                            problem,
+                            _flag_refused(trouble, shift_ids, accept_shift) + details,
+                            shift_ids=shift_ids,
+                        )
                 else:
                     _mark_checked(state, now)
                     result.outcomes[book] = BookOutcome("unchanged")
@@ -552,6 +625,7 @@ class SyncCycle:
             # подбираются по уже обновлённому справочнику.
             for book in to_import:
                 state = states[book]
+                shift = accepted.get(book)
                 wanted = {sheet_label(spec) for spec in BOOKS[book]}
                 try:
                     # Своя точка сохранения у каждой книги. База отвергла данные
@@ -570,7 +644,11 @@ class SyncCycle:
                     problem = explain_import(error)
                     details = describe_error(error)
                     _record_failure(session, state, problem, details, now)
-                    result.outcomes[book] = BookOutcome("failed", problem, details)
+                    # Сдвиг по-прежнему в листе и в базе: число для флага —
+                    # и в этом итоге, а записи «принят» нет.
+                    result.outcomes[book] = BookOutcome(
+                        "failed", problem, details, shift_ids=shift.ids if shift else None
+                    )
                     continue
 
                 result.imported[book] = imported
@@ -580,6 +658,12 @@ class SyncCycle:
                 state.fingerprint = fingerprint
                 state.read_started_at = read_started_at
                 _mark_checked(state, now)
-                result.outcomes[book] = BookOutcome("imported")
+                if shift is None:
+                    result.outcomes[book] = BookOutcome("imported")
+                else:
+                    _record_accepted(session, book, shift, now)
+                    result.outcomes[book] = BookOutcome(
+                        "imported", details=shift.details, shift_ids=shift.ids, shift_accepted=True
+                    )
 
         return result

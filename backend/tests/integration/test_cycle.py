@@ -13,7 +13,7 @@ from sqlalchemy.exc import OperationalError
 
 from kitchen.db import models
 from kitchen.sync import specs
-from kitchen.sync.cycle import QUERY_GONE_START, SHIFT_PROBLEM_START, SyncCycle
+from kitchen.sync.cycle import QUERY_GONE_START, SHIFT_PROBLEM_START, BookOutcome, SyncCycle
 from kitchen.sync.importer import take_import_lock
 from kitchen.sync.reader import BOOK_OPEN_FAILED, SheetsReader
 from tests.fake_sheets import IDS, cards_sheet, header, kitchen_sheets, row, sheets_client
@@ -611,6 +611,7 @@ def test_shifted_ing_rows_block_kitchen_but_not_cards(sessions) -> None:
 
     kitchen = result.outcomes["kitchen"]
     assert kitchen.action == "failed"
+    assert (kitchen.shift_ids, kitchen.shift_accepted) == (4, False), "число для --accept-shift"
     assert kitchen.problem.startswith(
         f"{SHIFT_PROBLEM_START}: у 3 id название пришло от другого id, у 1 id название пропало — "
     )
@@ -735,6 +736,7 @@ def test_query_output_gone_blocks_kitchen_without_advice_to_clear(sessions) -> N
 
     kitchen = result.outcomes["kitchen"]
     assert kitchen.action == "failed"
+    assert kitchen.shift_ids is None, "--accept-shift его не принимает — и числа нет"
     assert kitchen.problem == (
         f"{QUERY_GONE_START}: у 7 id нет названия — "
         "стр. 2, id 1: было «Томаты», стало пусто; "
@@ -794,6 +796,191 @@ def test_first_import_has_nothing_to_compare(sessions) -> None:
 
     assert result.outcomes["kitchen"].action == "imported"
     assert _names(sessions)["4"] == "Фритюрное масло"
+
+
+# ---------------------------------------------------------------------------
+# Ручной обход: --accept-shift N — только сдвиг и только точным числом (Spec 3)
+# ---------------------------------------------------------------------------
+
+ACCEPTED = "сдвиг строк ING принят вручную"
+
+_OLDER_BASE_DETAILS = (
+    "стр. 6, id 5: «Лук репчатый» → «Фритюрное масло» (было у id 4); "
+    "стр. 7, id 6: «Сыр чеддер» → «Лук репчатый» (было у id 5); "
+    "стр. 8, id 7: «» → «Сыр чеддер» (было у id 6)"
+)
+"""Подробности признака, когда лист выровнен, а база старше: «было» — это
+сдвинутые названия базы, «стало» — верные названия листа."""
+
+
+def _base_older_than_sheet(sessions, clock: Clock) -> None:
+    """В базе — сдвинутые названия, как после восстановления из ночного дампа
+    04–11.10: первому переносу сравнивать не с чем, и съехавший лист ложится
+    в базу. Выровненный лист после этого признак считает сдвигом — у 3 id."""
+    _cycle(sessions, clock, kitchen={"ING": _query_lost("4")}).run()
+    clock.tick()
+
+
+def _accepted_notes(sessions) -> list[str]:
+    """Записи журнала «сдвиг принят вручную» — по порядку."""
+    query = select(models.SyncRun.note).where(models.SyncRun.note.contains(ACCEPTED))
+    with sessions() as session:
+        return list(session.scalars(query.order_by(models.SyncRun.id)))
+
+
+def test_cycle_without_flag_refuses_shift_and_names_the_count(sessions) -> None:
+    """Воркер флага не получает никогда: база старше листа — отказ, как при
+    настоящем сдвиге. Число для флага — в итоге: его печатает ручной импорт."""
+    clock = Clock()
+    _base_older_than_sheet(sessions, clock)
+    before = _names(sessions)
+
+    result = _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+
+    kitchen = result.outcomes["kitchen"]
+    assert (kitchen.action, kitchen.shift_ids, kitchen.shift_accepted) == ("failed", 3, False)
+    assert kitchen.problem.startswith(
+        f"{SHIFT_PROBLEM_START}: у 3 id название пришло от другого id — "
+    )
+    assert kitchen.details == _OLDER_BASE_DETAILS
+    assert _names(sessions) == before
+    assert _accepted_notes(sessions) == []
+
+
+def test_accept_shift_with_exact_count_imports_kitchen(sessions) -> None:
+    """Лист верен, база старше, число совпало: книга кухни переносится,
+    причина снимается, в журнале — отдельная запись «принят вручную» с полным
+    списком, на экран — он же."""
+    clock = Clock()
+    _base_older_than_sheet(sessions, clock)
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    assert _state(sessions, "kitchen").problem is not None, "воркер держит кухню"
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run(force=True, accept_shift=3)
+
+    kitchen = result.outcomes["kitchen"]
+    assert (kitchen.action, kitchen.shift_ids, kitchen.shift_accepted) == ("imported", 3, True)
+    assert kitchen.details == _OLDER_BASE_DETAILS
+    assert _names(sessions) == {ref_id: name for ref_id, name, _ in _SEVEN}, "названия из листа"
+    state = _state(sessions, "kitchen")
+    assert (state.problem, state.problem_since) == (None, None)
+    assert state.checked_at == clock.now
+    assert _accepted_notes(sessions) == [f"kitchen: {ACCEPTED}: 3 id — {_OLDER_BASE_DETAILS}"]
+    assert result.outcomes["ingredient_cards"].action == "imported"
+
+
+@pytest.mark.parametrize("given", [2, 4], ids=["меньше", "больше"])
+def test_accept_shift_with_wrong_count_is_refused(sessions, given: int) -> None:
+    """Число не совпало — лист изменился, пока смотрели: отказ, как без флага
+    (та же причина, та же запись о сбое), а в подробностях — сколько найдено
+    сейчас."""
+    clock = Clock()
+    _base_older_than_sheet(sessions, clock)
+    before = _names(sessions)
+
+    result = _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run(
+        force=True, accept_shift=given
+    )
+
+    kitchen = result.outcomes["kitchen"]
+    assert (kitchen.action, kitchen.shift_ids, kitchen.shift_accepted) == ("failed", 3, False)
+    assert kitchen.details == (
+        f"в флаге --accept-shift {given}, найдено сейчас 3; {_OLDER_BASE_DETAILS}"
+    )
+    assert _names(sessions) == before
+    assert _failure_notes(sessions) == [f"kitchen: {kitchen.problem} — {_OLDER_BASE_DETAILS}"]
+    assert _accepted_notes(sessions) == []
+    clock.tick()
+
+    plain = _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+
+    assert plain.outcomes["kitchen"].problem == kitchen.problem, "причина та же, что без флага"
+    assert len(_failure_notes(sessions)) == 1
+
+
+def test_accept_shift_does_not_take_query_gone(sessions) -> None:
+    """Пропал вывод формулы — не сдвиг: принять его значило бы стереть названия
+    в базе. Флаг не помогает и при числе, равном числу пустых id."""
+    clock = Clock()
+    _cycle(sessions, clock, kitchen={"ING": _ing(*_SEVEN)}).run()
+    before = _names(sessions)
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _query_gone()}).run(force=True, accept_shift=7)
+
+    kitchen = result.outcomes["kitchen"]
+    assert (kitchen.action, kitchen.shift_ids, kitchen.shift_accepted) == ("failed", None, False)
+    assert kitchen.problem.startswith(QUERY_GONE_START)
+    refused = "--accept-shift не принимает «пропал вывод формулы QUERY»; "
+    assert kitchen.details.startswith(f"{refused}стр. 2, id 1: «Томаты» → пусто; ")
+    plain = kitchen.details.removeprefix(refused)
+    assert plain.count("→ пусто") == 7
+    assert _names(sessions) == before
+    assert _failure_notes(sessions) == [f"kitchen: {kitchen.problem} — {plain}"]
+    assert _accepted_notes(sessions) == []
+
+
+def test_accept_shift_without_trouble_is_a_plain_import(sessions) -> None:
+    """Признака нет — флаг ни на что не влияет: обычный перенос, лишних
+    записей журнала нет."""
+    clock = Clock()
+    _cycle(sessions, clock).run()
+    clock.tick()
+    runs = _runs(sessions)
+
+    result = _cycle(sessions, clock, kitchen={"ING": _cheaper_tomato()}).run(
+        force=True, accept_shift=3
+    )
+
+    assert result.outcomes["kitchen"] == BookOutcome("imported")
+    assert _tomato_price(sessions) == "170.00"
+    assert _accepted_notes(sessions) == []
+    assert _runs(sessions) == runs + 2, "переносы обеих книг — и ничего сверх них"
+
+
+def test_accept_shift_does_not_bypass_shifted_columns(sessions) -> None:
+    """Сдвиг колонок флаг не обходит: колонки читаются по позиции, и цена
+    приехала бы из чужой колонки."""
+    clock = Clock()
+    _cycle(sessions, clock).run()
+    clock.tick()
+
+    result = _cycle(sessions, clock, kitchen={"ING": _shifted(_cheaper_tomato())}).run(
+        force=True, accept_shift=1
+    )
+
+    kitchen = result.outcomes["kitchen"]
+    assert (kitchen.action, kitchen.shift_ids, kitchen.details) == ("failed", None, None)
+    assert "в листе «ING» сдвинулись колонки" in kitchen.problem
+    assert _tomato_price(sessions) == "177.00"
+    assert _accepted_notes(sessions) == []
+
+
+def test_accepted_shift_is_not_journaled_when_import_fails(sessions) -> None:
+    """База отвергла данные листа — записи «принят» нет: иначе в журнале рядом
+    легли бы «принят» и сбой переноса. Сдвиг по-прежнему держит кухню, число
+    для флага — в итоге."""
+    clock = Clock()
+    _base_older_than_sheet(sessions, clock)
+    before = _names(sessions)
+    ing = _ing(*_SEVEN)
+    ing[1] = row(
+        specs.INGREDIENTS,
+        id="1",
+        name="Томаты",
+        price_per_kg="177",
+        losses_total="150",
+        status="активное",
+    )
+
+    result = _cycle(sessions, clock, kitchen={"ING": ing}).run(force=True, accept_shift=3)
+
+    kitchen = result.outcomes["kitchen"]
+    assert (kitchen.action, kitchen.problem) == ("failed", IMPORT_FAILED)
+    assert (kitchen.shift_ids, kitchen.shift_accepted) == (3, False)
+    assert _names(sessions) == before, "кухня откатилась целиком"
+    assert _accepted_notes(sessions) == []
 
 
 # ---------------------------------------------------------------------------
