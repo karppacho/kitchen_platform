@@ -3,38 +3,48 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import import_sheets
 import pytest
 
-from kitchen.sync.cycle import BookOutcome, CycleResult
+from kitchen.sync.cycle import SHIFT_PROBLEM_START, BookOutcome, CycleResult
 from kitchen.sync.importer import ImportResult
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 ACCESS = "доступ платформы к таблице закрыт — проверьте, что сервисному аккаунту открыт доступ"
+SHIFTED = f"{SHIFT_PROBLEM_START}: у 74 id название пришло от другого id — …"
+SHIFT_DETAILS = "стр. 5, id 4: «Сырная котлета» → «Фритюрное масло» (было у id 5); …"
 
 
-def _run(monkeypatch: pytest.MonkeyPatch, result: CycleResult) -> tuple[int, list[bool]]:
-    """Код выхода `main()` на готовом итоге цикла и `force` каждого запуска.
+def _run(
+    monkeypatch: pytest.MonkeyPatch, result: CycleResult, argv: Sequence[str] = ()
+) -> tuple[int, list[dict[str, object]]]:
+    """Код выхода `main(argv)` на готовом итоге цикла и параметры каждого запуска.
 
     Настройки — заглушка: настоящие читали бы окружение и backend/.env, а
     скрипт лишь передаёт их подменённым `reader_from` и `make_session_factory`.
+    Параметры запуска — как их получил цикл: без флага `accept_shift` не
+    передаётся вовсе или передаётся `None` — для цикла это одно и то же.
     """
     settings = SimpleNamespace(database_url="postgresql+psycopg://тест")
-    forced: list[bool] = []
+    calls: list[dict[str, object]] = []
 
     class Cycle:
         def __init__(self, reader: object, sessions: object) -> None:
             assert (reader, sessions) == (("читатель", settings), ("сессии", settings.database_url))
 
-        def run(self, *, force: bool = False) -> CycleResult:
-            forced.append(force)
+        def run(self, *, force: bool = False, accept_shift: int | None = None) -> CycleResult:
+            calls.append({"force": force, "accept_shift": accept_shift})
             return result
 
     monkeypatch.setattr(import_sheets, "load_settings", lambda: settings)
     monkeypatch.setattr(import_sheets, "reader_from", lambda given: ("читатель", given))
     monkeypatch.setattr(import_sheets, "make_session_factory", lambda url: ("сессии", url))
     monkeypatch.setattr(import_sheets, "SyncCycle", Cycle)
-    return import_sheets.main(), forced
+    return import_sheets.main(list(argv)), calls
 
 
 def test_manual_import_forces_transfer_and_shows_hidden_rows(
@@ -53,10 +63,10 @@ def test_manual_import_forces_transfer_and_shows_hidden_rows(
     )
     outcomes = {"kitchen": BookOutcome("imported"), "ingredient_cards": BookOutcome("unchanged")}
 
-    code, forced = _run(monkeypatch, CycleResult(outcomes=outcomes, imported={"kitchen": imported}))
+    code, calls = _run(monkeypatch, CycleResult(outcomes=outcomes, imported={"kitchen": imported}))
     out = capsys.readouterr().out
 
-    assert forced == [True]
+    assert calls == [{"force": True, "accept_shift": None}], "без флага сдвиг не принимается"
     assert code == 0
     assert "ING: скрыто строк, которых больше нет в листе, — 2" in out
     assert out.index("СКРЫТО И ВОЗВРАЩЕНО (1)") < out.index("ЗАМЕЧАНИЯ (1)")
@@ -135,3 +145,95 @@ def test_manual_import_fails_when_book_not_transferred(
     assert f"НЕ перенесена — {ACCESS}" in out
     assert raw in out
     assert "sync_runs.id = 8" in out, "перенесённая книга показана и при сбое другой"
+    assert "--accept-shift" not in out, "обход предлагается только при сдвиге строк ING"
+
+
+# ---------------------------------------------------------------------------
+# Ручной обход сдвига строк ING: --accept-shift N
+# ---------------------------------------------------------------------------
+
+
+def test_accept_shift_passes_the_exact_number_to_the_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outcomes = {"kitchen": BookOutcome("unchanged"), "ingredient_cards": BookOutcome("unchanged")}
+
+    code, calls = _run(monkeypatch, CycleResult(outcomes=outcomes), ["--accept-shift", "74"])
+
+    assert calls == [{"force": True, "accept_shift": 74}]
+    assert code == 0
+
+
+@pytest.mark.parametrize("given", ["0", "-1", "abc", "7.5"])
+def test_accept_shift_takes_only_a_whole_number_from_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], given: str
+) -> None:
+    """Сдвиг без единого id не бывает: 0, отрицательное и не число — ошибка
+    разбора (код 2), и цикл не запускается вовсе."""
+    outcomes = {"kitchen": BookOutcome("unchanged"), "ingredient_cards": BookOutcome("unchanged")}
+
+    with pytest.raises(SystemExit) as stopped:
+        _run(monkeypatch, CycleResult(outcomes=outcomes), ["--accept-shift", given])
+
+    assert stopped.value.code == 2
+    assert "--accept-shift" in capsys.readouterr().err
+
+
+def test_accept_shift_is_not_run_on_bad_number(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ошибка разбора — до настроек и цикла: неверный флаг не переносит ничего."""
+    started: list[str] = []
+    monkeypatch.setattr(import_sheets, "load_settings", lambda: started.append("настройки"))
+
+    with pytest.raises(SystemExit):
+        import_sheets.main(["--accept-shift", "0"])
+
+    assert started == []
+
+
+def test_shift_refusal_shows_the_number_for_the_flag(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Сдвиг держит кухню — вывод даёт полный список и число для флага: в
+    тексте причины два числа, и id в обоих видах посчитан там дважды."""
+    outcomes = {
+        "kitchen": BookOutcome("failed", SHIFTED, SHIFT_DETAILS, shift_ids=74),
+        "ingredient_cards": BookOutcome("unchanged"),
+    }
+
+    code, _ = _run(monkeypatch, CycleResult(outcomes=outcomes))
+    out = capsys.readouterr().out
+
+    assert code == 1
+    assert f"подробности: {SHIFT_DETAILS}" in out
+    hint = f"  {'':24} для обхода (только если лист ING верен, а база старше): --accept-shift 74\n"
+    assert hint in out
+    assert out.index("подробности:") < out.index("для обхода"), "сначала список, потом флаг"
+
+
+def test_accepted_shift_is_shown_with_full_list(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Сдвиг принят — на экране, сколько id принято, и полный список: по нему
+    сверяют, что приняли."""
+    outcomes = {
+        "kitchen": BookOutcome(
+            "imported", details=SHIFT_DETAILS, shift_ids=74, shift_accepted=True
+        ),
+        "ingredient_cards": BookOutcome("unchanged"),
+    }
+    imported = ImportResult(run_id=9, counts={"ингредиенты": 74})
+
+    code, _ = _run(
+        monkeypatch,
+        CycleResult(outcomes=outcomes, imported={"kitchen": imported}),
+        ["--accept-shift", "74"],
+    )
+    out = capsys.readouterr().out
+
+    assert code == 0
+    assert "таблица кухни" in out and "перенесена" in out
+    assert f"  {'':24} сдвиг принят вручную: 74 id\n" in out
+    assert f"  {'':24} подробности: {SHIFT_DETAILS}\n" in out
+    assert out.index("сдвиг принят вручную") < out.index("подробности:")
+    assert "для обхода" not in out
+    assert "sync_runs.id = 9" in out
