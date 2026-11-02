@@ -3,8 +3,8 @@
 Перенесён из `kitchen_bot/src/calc/costs.py` без изменения поведения.
 Эталон в `tests/golden/dishes_uc.json` снят со старого кода, и совпадать
 обязано до копейки — включая тексты предупреждений: шеф читает именно их,
-а не наши намерения. Отличие от бота одно, и оно осознанное: предупреждение
-о штучных с нетто меньше 10 % веса штуки.
+а не наши намерения. Отличие от бота одно, и оно осознанное: у штучных
+значение в ТТК меньше 10 % веса штуки читается как число штук.
 
 **Числа считает этот модуль, не модель.** LLM получает готовый результат и
 пересказывает его. Никакой арифметики в промптах.
@@ -16,9 +16,12 @@
 * Тепловые потери читаются, но не применяются. Осознанный пробел.
 * Нет цены, цена ровно `0`, штучный без веса штуки — стоимость 0 И
   предупреждение. Заниженный UC без замечания подрывает доверие к цифрам.
-* Штучный с нетто меньше 10 % веса штуки (или 0 г) — предупреждение: в ТТК
-  почти наверняка вписано количество штук, а не граммы. Себестоимость при
-  этом прежняя: лист правит шеф (решение 23.09.2026).
+* Штучный, у которого в ТТК больше 0 и меньше 10 % веса штуки, — это число
+  штук: нетто = штуки × вес 1 шт, дальше как граммы (потери сверху, выход и
+  КБЖУ по граммам), и шефу справка, как прочитана запись. Нетто 0 у
+  штучного — стоимость 0 и замечание. Решение Александра 03.10.2026 заменило
+  решение 23.09 «только предупреждать, лист правит шеф»: шеф пишет штуки, и
+  считать их — дело платформы.
 * Нет цены меню — маржа `None`, а не ноль.
 * Себестоимость выше цены — почти всегда ошибка в данных, и молчать
   нельзя: 04.08.2026 так создалось блюдо с UC 1398 ₽ при цене 280 ₽.
@@ -53,11 +56,12 @@ _GRAMS_IN_KG = Decimal("1000")
 COVERAGE_COMPLETE = Decimal("0.999")
 COVERAGE_POOR = Decimal("0.5")
 
-# Доля веса штуки, ниже которой нетто штучного почти наверняка записано в
-# штуках, а не в граммах: «1» у круассана весом 60 г. На данных эталона
-# (10.09.2026) у 26 строк состава доля не больше ~5 %, у остальных штучных —
-# от 30 %: порог между ними ложных срабатываний не даёт.
-PIECE_SHARE_SUSPICIOUS = Decimal("0.1")
+# Доля веса штуки, ниже которой значение в ТТК у штучного — число штук, а не
+# граммы: «1» у круассана весом 60 г. Столько от штуки граммами не берут. На
+# живых данных (03.10.2026) у 24 строк вписано 1–2 (не больше 10 % веса
+# штуки), у 27 — от 39 до 180 (от 30 %): порог между ними не ошибается. Ровно
+# 10 % — уже граммы.
+PIECE_COUNT_SHARE = Decimal("0.1")
 
 
 def money_text(value: Decimal) -> str:
@@ -127,8 +131,9 @@ def gross_weight_g(ingredient: IngredientSpec, net_weight_g: Decimal) -> Decimal
 def ingredient_cost(ingredient: IngredientSpec, net_weight_g: Decimal) -> Decimal:
     """Стоимость нетто-веса с учётом потерь.
 
-    Весовые: цена за кг (или литр) на количество. Штучные: в ТТК записано
-    «столько-то граммов этой штуки», и перевести в штуки можно только через
+    Весовые: цена за кг (или литр) на количество. Штучные: сюда приходят
+    граммы этой штуки (вписанное в ТТК число штук уже переведено
+    `_Accumulator._net_grams`), и перевести их в штуки можно только через
     вес одной — отсюда обязательность колонки «Вес 1 шт».
     """
     if ingredient.price_per_unit is None:
@@ -274,7 +279,10 @@ class _Accumulator:
                 f"последним известным данным, поправьте ТТК"
             )
 
-        cost = self._main_cost(ingredient, component.net_weight_g)
+        # Дальше всё — стоимость, брутто, выход, КБЖУ — по граммам: штуки,
+        # вписанные в ТТК, переводятся здесь и только здесь.
+        net_weight_g, pieces = self._net_grams(ingredient, component.net_weight_g)
+        cost = self._main_cost(ingredient, net_weight_g)
 
         self.items.append(
             ComponentCost(
@@ -282,17 +290,45 @@ class _Accumulator:
                 short_name=ingredient.short_name,
                 row_type=ROW_MAIN,
                 unit=ingredient.unit,
-                net_weight_g=component.net_weight_g,
-                gross_weight_g=round_money(gross_weight_g(ingredient, component.net_weight_g)),
+                net_weight_g=net_weight_g,
+                gross_weight_g=round_money(gross_weight_g(ingredient, net_weight_g)),
                 price_per_unit=ingredient.price_per_unit,
                 weight_per_piece_g=ingredient.weight_per_piece_g,
                 cost_rub=round_money(cost),
+                pieces=pieces,
             )
         )
         self.total_cost += cost
         # Съедобный выход — только основные строки, и только нетто.
-        self.output_grams += component.net_weight_g
-        self._add_kbju(ingredient, component.net_weight_g)
+        self.output_grams += net_weight_g
+        self._add_kbju(ingredient, net_weight_g)
+
+    def _net_grams(
+        self, ingredient: IngredientSpec, value: Decimal
+    ) -> tuple[Decimal, Decimal | None]:
+        """Нетто в граммах и число штук, если в ТТК вписаны штуки.
+
+        У штучных шеф пишет и граммы («140» у тортильи весом 70 г), и штуки
+        («1» у круассана весом 60 г). Различает их порог: больше 0 и меньше
+        10 % веса штуки — штуки (решение Александра 03.10.2026). Ветку
+        выбирает единица `шт`, а не заполненная колонка «Вес 1 шт». Без веса
+        штуки переводить нечем: значение остаётся как есть, о весе скажет
+        `_main_cost`.
+
+        Пересчёт делается и без цены: от граммов зависят выход и КБЖУ.
+        Справка — не замечание о беде: число посчитано верно, шефу лишь
+        показано, как прочитана его запись.
+        """
+        piece = ingredient.weight_per_piece_g
+        if ingredient.unit != UNIT_PIECE or not piece:
+            return value, None
+        if not _ZERO < value < piece * PIECE_COUNT_SHARE:
+            return value, None
+        self.warnings.append(
+            f"Штучный «{ingredient.name}»: в ТТК {money_text(value)} — посчитано штуками: "
+            f"1 шт = {money_text(piece)} г"
+        )
+        return value * piece, value
 
     def _main_cost(self, ingredient: IngredientSpec, net_weight_g: Decimal) -> Decimal:
         """Стоимость строки, и предупреждение вместо молчания.
@@ -300,6 +336,10 @@ class _Accumulator:
         Ингредиент остаётся в составе даже при нулевой стоимости: его вес
         входит в выход, КБЖУ и рецептуру. Выбросить его значило бы отдать
         неполную карту и заниженный выход.
+
+        Строка без цены или штучная без веса штуки получает одно замечание о
+        стоимости — замечание о нуле в ТТК к ней не добавляется: шефу уже
+        сказано, чего не хватает.
         """
         if ingredient.price_per_unit is None or ingredient.price_per_unit == _ZERO:
             self.warnings.append(
@@ -308,20 +348,20 @@ class _Accumulator:
             )
             return _ZERO
         if ingredient.unit == UNIT_PIECE:
-            piece = ingredient.weight_per_piece_g
-            if not piece:
+            if not ingredient.weight_per_piece_g:
                 self.warnings.append(
                     f"У штучного ингредиента «{ingredient.name}» не указан вес 1 шт — "
                     f"в UC не учтён (стоимость 0)"
                 )
                 return _ZERO
-            if net_weight_g < piece * PIECE_SHARE_SUSPICIOUS:
-                # Стоимость не трогаем: лист правит шеф, а не догадка.
+            if net_weight_g == _ZERO:
+                # Ни штук, ни граммов: B114 и B115 при цене 133,33 ₽ за штуку.
+                # Ноль молча занизил бы себестоимость — шеф должен вписать число.
                 self.warnings.append(
-                    f"Штучный «{ingredient.name}»: нетто {money_text(net_weight_g)} г "
-                    f"при весе штуки {money_text(piece)} г — похоже, вписано "
-                    f"количество штук, а не граммы; себестоимость занижена"
+                    f"Штучный «{ingredient.name}»: в ТТК нетто 0 — в себестоимости "
+                    f"не учтён, впишите штуки или граммы"
                 )
+                return _ZERO
         return ingredient_cost(ingredient, net_weight_g)
 
     def _add_kbju(self, ingredient: IngredientSpec, net_weight_g: Decimal) -> None:

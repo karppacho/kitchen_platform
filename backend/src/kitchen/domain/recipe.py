@@ -78,7 +78,9 @@ class Component:
     row_type: str
     net_weight_g: Decimal
     """Шеф пишет НЕТТО — сколько должно оказаться в блюде. Потери
-    калькулятор накидывает сверху. Для строки упаковки это количество штук."""
+    калькулятор накидывает сверху. Для строки упаковки это количество штук.
+    У штучного ингредиента значение меньше 10 % веса штуки — тоже число
+    штук: в граммы его переводит калькулятор (решение 03.10.2026)."""
 
     ingredient: IngredientSpec | None = None
     packaging: PackagingSpec | None = None
@@ -103,11 +105,17 @@ class ComponentCost:
     row_type: str
     unit: str
     net_weight_g: Decimal
+    """Нетто в граммах, у упаковки — штуки. Если в ТТК у штучного
+    ингредиента вписано число штук, здесь уже граммы: штуки × вес 1 шт."""
+
     gross_weight_g: Decimal | None
     price_per_unit: Decimal | None
     weight_per_piece_g: Decimal | None
     cost_rub: Decimal
     share_percent: Decimal | None = None
+    pieces: Decimal | None = None
+    """Число штук, если значение в ТТК прочитано как штуки, иначе `None`.
+    В ответ API пока не входит — оставлено для будущего показа."""
 
 
 @dataclass(slots=True)
