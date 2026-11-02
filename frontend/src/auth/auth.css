@@ -1,7 +1,10 @@
 .vhod {
   display: grid;
   place-items: center;
+  /* dvh — высота без адресной строки телефона; старые Safari его не знают
+     и возьмут строку выше (здесь и у .otkaz, .sboy). */
   min-height: 100vh;
+  min-height: 100dvh;
   padding: calc(var(--shag) * 4);
 }
 
@@ -77,6 +80,7 @@
   place-items: center;
   gap: var(--shag);
   min-height: 100vh;
+  min-height: 100dvh;
   padding: calc(var(--shag) * 4);
   text-align: center;
 }
@@ -94,4 +98,11 @@
   background: var(--poverhnost);
   font: inherit;
   cursor: pointer;
+}
+
+/* Под палец: на сенсорном экране кнопка входа не ниже 44 px. */
+@media (pointer: coarse) {
+  .vhod-forma button {
+    min-height: 44px;
+  }
 }
