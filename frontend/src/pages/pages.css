@@ -54,6 +54,13 @@ h1 {
   border-block: 1px solid var(--granitsa);
 }
 
+/* На телефоне четыре показателя — сеткой 2×2, а не в ряд с переносом «3 + 1». */
+.obolochka--telefon .krupno {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: calc(var(--shag) * 4) calc(var(--shag) * 6);
+}
+
 /* align-content: start — в ряду показатели растягиваются по высоте самого
    высокого (у себестоимости выше цены под числом подпись), и без этого
    строки сетки делили бы лишнее место: число соседа сползало бы вниз. */
@@ -148,6 +155,16 @@ h1 {
 .nazad {
   color: var(--aktsent);
   text-decoration: none;
+}
+
+/* «← Блюда» — цель под палец, не мельче 44 px; текст остаётся ссылкой. */
+@media (pointer: coarse) {
+  .nazad {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding-right: calc(var(--shag) * 3);
+  }
 }
 
 h2 {

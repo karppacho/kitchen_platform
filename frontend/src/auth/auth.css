@@ -102,7 +102,15 @@
 
 /* Под палец: на сенсорном экране кнопка входа не ниже 44 px. */
 @media (pointer: coarse) {
-  .vhod-forma button {
+  .vhod-forma button,
+  .sboy button {
     min-height: 44px;
+  }
+}
+
+/* Поле мельче 16 px iOS Safari при фокусе приближает, и страница уезжает. */
+@media (pointer: coarse) {
+  .vhod-forma input {
+    font-size: 16px;
   }
 }
