@@ -53,7 +53,7 @@ from kitchen.sync.reader import SheetsReader
 from kitchen.sync.writer import SHEET_WRITE_LOCK_KEY, CardSheetWriter, hold_limit
 from kitchen.web import auth, cards
 from kitchen.web.app import create_app
-from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet
+from tests.conftest import FakeSheetsClient, FakeSpreadsheet, FakeWorksheet, api_error
 from tests.fake_drive import FOLDER_ID, FakeDrive
 from tests.fake_sheets import IDS, cards_sheet, header, sheets_client
 from tests.integration.test_cards_drafts_api import (
@@ -90,6 +90,10 @@ FREE_ROW = 6
 карточки в строках 3–5."""
 
 BUSY = "Таблица занята — попробуйте ещё раз через минуту"
+FORBIDDEN = (
+    "Google не дал записать в таблицу карточек: у сервисного аккаунта нет прав — "
+    "сообщите администратору. Черновик сохранён."
+)
 DATABASE_DOWN = "Сервер временно не может записать — черновик сохранён"
 
 
@@ -423,6 +427,7 @@ def test_two_submits_at_once(
     after = submit(cook, draft["id"])
 
     assert [reply.status_code for reply in during] == [409]
+    assert during[0].json()["code"] == "submit_running"
     assert (
         during[0]
         .json()["detail"]
@@ -450,6 +455,7 @@ def test_missing_fields_is_422_with_titles(
     assert reply.status_code == 422
     missing = ["Поставщик", "Категория", "Фото этикетки", "Согласован ли продукт"]
     assert reply.json()["missing"] == missing
+    assert reply.json()["code"] == "missing_fields"
     assert all(title in reply.json()["detail"] for title in missing)
     assert book(sheets).calls == []
     assert journal(sessions) == []
@@ -468,6 +474,7 @@ def test_duplicate_in_sheet_not_yet_in_database_is_409(
     assert reply.status_code == 409
     assert "уже есть в таблице — строка 3" in reply.json()["detail"]
     assert reply.json()["row"] == 3
+    assert reply.json()["code"] == "duplicate"
     assert writes(sheets) == 0
     assert_still_active(sessions, draft["id"])
 
@@ -487,6 +494,7 @@ def test_shifted_header_is_503_and_draft_stays(
 
     assert reply.status_code == 503
     assert "сдвинулись колонки" in reply.json()["detail"]
+    assert reply.json()["code"] == "columns_shifted"
     assert "Черновик сохранён" in reply.json()["detail"]
     assert writes(sheets) == 0
     assert_still_active(sessions, draft["id"])
@@ -503,10 +511,50 @@ def test_google_refusal_is_502_draft_saved(
 
     assert reply.status_code == 502
     assert "Черновик сохранён" in reply.json()["detail"]
+    assert reply.json()["code"] == "write_refused"
     assert_still_active(sessions, draft["id"])
     [write] = journal(sessions)
     assert write.status == FAILED
     assert submit(cook, draft["id"]).status_code == 200, "повтор пишет заново"
+
+
+@pytest.mark.parametrize("status", [400, 500])
+def test_other_google_refusals_stay_write_refused(
+    cook: TestClient, sheets: FakeSheetsClient, status: int
+) -> None:
+    """Отказ Google не по правам (400, 500) — прежний «отправьте ещё раз»."""
+    draft = ready(cook)
+    book(sheets).fail_next("values_batch_update", applied=False, error=api_error(status, "no"))
+
+    reply = submit(cook, draft["id"])
+
+    assert reply.status_code == 502
+    assert reply.json()["code"] == "write_refused"
+    assert "отправьте ещё раз" in reply.json()["detail"]
+
+
+def test_google_forbidden_is_502_ask_administrator(
+    cook: TestClient, sheets: FakeSheetsClient, sessions: sessionmaker[Session]
+) -> None:
+    """Google отказал в правах (403): повтор не поможет — «сообщите
+    администратору». Журнал и лист — как при прочем отказе записи: failed,
+    лист не тронут, черновик цел."""
+    draft = ready(cook)
+    book(sheets).fail_next(
+        "values_batch_update",
+        applied=False,
+        error=api_error(403, "The caller does not have permission", "PERMISSION_DENIED"),
+    )
+
+    reply = submit(cook, draft["id"])
+
+    assert reply.status_code == 502
+    assert reply.json() == {"detail": FORBIDDEN, "code": "write_forbidden"}
+    assert line(sheets, FREE_ROW) == [""] * WIDTH
+    assert_still_active(sessions, draft["id"])
+    [write] = journal(sessions)
+    assert write.status == FAILED
+    assert write.error is not None and "403" in write.error
 
 
 def test_busy_sheet_is_503(
@@ -534,7 +582,7 @@ def test_busy_sheet_is_503(
         holder.close()
 
     assert reply.status_code == 503
-    assert reply.json() == {"detail": BUSY}
+    assert reply.json() == {"detail": BUSY, "code": "sheet_busy"}
     assert book(sheets).calls == []
     assert_still_active(sessions, draft["id"])
 
@@ -556,7 +604,7 @@ def test_database_down_at_writers_queue_is_503(
     reply = submit(client, draft["id"])
 
     assert reply.status_code == 503
-    assert reply.json() == {"detail": DATABASE_DOWN}
+    assert reply.json() == {"detail": DATABASE_DOWN, "code": "database_down"}
     assert book(sheets).calls == []
     assert_still_active(sessions, draft["id"])
 
@@ -571,6 +619,7 @@ def test_sheet_not_configured_is_503(
 
     assert reply.status_code == 503
     assert "не настроена" in reply.json()["detail"]
+    assert reply.json()["code"] == "not_configured"
     assert_still_active(sessions, draft["id"])
 
 
@@ -647,6 +696,7 @@ def test_writing_closed_by_ownership_rule_is_503(
 
     assert reply.status_code == 503
     assert "Запись в таблицу сейчас закрыта" in reply.json()["detail"]
+    assert reply.json()["code"] == "writing_closed"
     assert book(sheets).calls == []
     assert_still_active(sessions, draft["id"])
 
@@ -685,6 +735,7 @@ def test_row_written_but_draft_not_marked_tells_the_row_and_repeat_is_safe(
 
     assert first.status_code == 503
     assert f"Карточка записана в строку {FREE_ROW}" in first.json()["detail"]
+    assert first.json()["code"] == "written_not_marked"
     assert stuck is release_fails
     assert again.status_code == 200, again.text
     assert (again.json()["row"], again.json()["already_written"]) == (FREE_ROW, True)
@@ -731,7 +782,7 @@ def test_journal_trouble_after_the_write_asks_to_repeat(
     again = submit(client, draft["id"])
 
     assert first.status_code == 502
-    assert first.json() == {"detail": UNCONFIRMED}
+    assert first.json() == {"detail": UNCONFIRMED, "code": "unconfirmed"}
     assert write.status == "pending"
     assert again.status_code == 200, again.text
     assert (again.json()["row"], again.json()["already_written"]) == (FREE_ROW, True)
@@ -773,7 +824,7 @@ def test_unreadable_journal_after_database_trouble_asks_to_repeat(
     again = submit(client, draft["id"])
 
     assert first.status_code == 502
-    assert first.json() == {"detail": UNCONFIRMED}
+    assert first.json() == {"detail": UNCONFIRMED, "code": "unconfirmed"}
     assert again.status_code == 200, again.text
     assert (again.json()["row"], again.json()["already_written"]) == (FREE_ROW, True)
     assert writes(sheets) == 1
@@ -855,7 +906,10 @@ def test_submit_waits_for_running_recognition(
     stale = submit(cook, draft["id"])
 
     assert fresh.status_code == 409
-    assert fresh.json() == {"detail": "Дождитесь окончания распознавания"}
+    assert fresh.json() == {
+        "detail": "Дождитесь окончания распознавания",
+        "code": "recognition_running",
+    }
     assert stale.status_code == 200, stale.text
     assert writes(sheets) == 1
 
@@ -1019,7 +1073,8 @@ def test_stale_submit_mark_does_not_lock_the_draft(
     minutes = math.ceil((window - timedelta(seconds=10)) / timedelta(minutes=1))
     assert fresh.json() == {
         "detail": "Карточка отправляется или отправка прервалась — попробуйте через "
-        f"{minutes} минут"
+        f"{minutes} минут",
+        "code": "submit_running",
     }
     assert stale.status_code == 200, stale.text
 
@@ -1072,6 +1127,7 @@ def test_foreign_and_cancelled_drafts_are_404(
     cancelled = submit(cook, draft["id"])
 
     assert (foreign.status_code, cancelled.status_code) == (404, 404)
+    assert "code" not in foreign.json(), "ручка без кода: тело прежнее"
     assert book(sheets).calls == []
 
 

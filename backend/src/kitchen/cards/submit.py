@@ -63,6 +63,7 @@ from kitchen.sync.writer import (
     DuplicateNameError,
     HeaderDriftError,
     SheetBusyError,
+    WriteForbiddenError,
     WriteRefusedError,
     hold_limit,
 )
@@ -107,6 +108,10 @@ WAIT_FOR_RECOGNITION = "Дождитесь окончания распознав
 BUSY = "Таблица занята — попробуйте ещё раз через минуту"
 DATABASE_DOWN = "Сервер временно не может записать — черновик сохранён"
 UNCONFIRMED = "Не удалось подтвердить запись — нажмите «Отправить» ещё раз: второй строки не будет"
+FORBIDDEN = (
+    "Google не дал записать в таблицу карточек: у сервисного аккаунта нет прав — "
+    "сообщите администратору. Черновик сохранён."
+)
 NOT_CONFIGURED = "Таблица карточек не настроена — сообщите администратору. Черновик сохранён."
 WRITING_CLOSED = "Запись в таблицу сейчас закрыта — сообщите администратору. Черновик сохранён."
 SAVED = "Черновик сохранён."
@@ -141,22 +146,24 @@ class MissingFieldsError(CardsError):
     """Не хватает обязательного: ``missing`` — названия полей для повара."""
 
     def __init__(self, missing: Sequence[str]) -> None:
-        super().__init__(f"Чтобы отправить карточку, заполните: {', '.join(missing)}")
+        super().__init__(
+            f"Чтобы отправить карточку, заполните: {', '.join(missing)}", code="missing_fields"
+        )
         self.missing = tuple(missing)
 
     def extra(self) -> dict[str, object]:
-        return {"missing": list(self.missing)}
+        return {**super().extra(), "missing": list(self.missing)}
 
 
 class DuplicateCardError(CardsError):
     """Такая карточка уже есть в листе; ``row`` — её строка."""
 
     def __init__(self, message: str, *, row: int) -> None:
-        super().__init__(message)
+        super().__init__(message, code="duplicate")
         self.row = row
 
     def extra(self) -> dict[str, object]:
-        return {"row": self.row}
+        return {**super().extra(), "row": self.row}
 
 
 class SubmitUnavailableError(CardsError):
@@ -264,14 +271,14 @@ def _not_claimed(
     data = None if draft is None else draft_data(draft)
     if status == store.ACTIVE and store.recognition_running(session, draft_id, STALE_AFTER):
         session.rollback()
-        raise DraftConflictError(WAIT_FOR_RECOGNITION)
+        raise DraftConflictError(WAIT_FOR_RECOGNITION, code="recognition_running")
     written = store.open_sheet_write(session, submit_request_key(draft_id))
     left = store.submit_left(session, draft_id, window)
     session.rollback()
     if data is None or status not in (store.ACTIVE, store.SUBMITTED):
         raise DraftNotFoundError
     if status == store.ACTIVE and written != VERIFIED:
-        raise DraftConflictError(submitting_text(left))
+        raise DraftConflictError(submitting_text(left), code="submit_running")
 
     # Записано раньше: писатель ответит из журнала, без единого запроса к Google.
     result = _append(session, writer, data, owner_id, draft_id)
@@ -307,21 +314,24 @@ def _append(
     if missing:
         raise MissingFieldsError(missing)
     if writer is None:
-        raise SubmitUnavailableError(NOT_CONFIGURED)
+        raise SubmitUnavailableError(NOT_CONFIGURED, code="not_configured")
     values = card_row(data)
     try:
         return writer.append(values, actor_id=owner_id, request_key=submit_request_key(draft_id))
     except DuplicateNameError as error:
         refusal: CardsError = DuplicateCardError(str(error), row=error.row)
     except HeaderDriftError as error:
-        refusal = SubmitUnavailableError(str(error))
+        refusal = SubmitUnavailableError(str(error), code="columns_shifted")
     except SheetBusyError:
-        refusal = SubmitUnavailableError(BUSY)
+        refusal = SubmitUnavailableError(BUSY, code="sheet_busy")
+    except WriteForbiddenError as error:
+        log.error("черновик %s: Google отказал в правах на запись — %s", draft_id, error)
+        refusal = SubmitFailedError(FORBIDDEN, code="write_forbidden")
     except WriteRefusedError as error:
-        refusal = SubmitFailedError(_saved(str(error)))
+        refusal = SubmitFailedError(_saved(str(error)), code="write_refused")
     except ForbiddenWriteError as error:
         log.error("черновик %s: запись в лист закрыта правилом владения — %s", draft_id, error)
-        refusal = SubmitUnavailableError(WRITING_CLOSED)
+        refusal = SubmitUnavailableError(WRITING_CLOSED, code="writing_closed")
     except SQLAlchemyError as error:
         refusal = _database_trouble(session, draft_id, error)
     raise refusal
@@ -348,7 +358,7 @@ def _database_trouble(session: Session, draft_id: uuid.UUID, error: SQLAlchemyEr
             _first_line(error),
             _first_line(unreadable),
         )
-        return SubmitFailedError(UNCONFIRMED)
+        return SubmitFailedError(UNCONFIRMED, code="unconfirmed")
     if written in (PENDING, VERIFIED):
         log.error(
             "черновик %s: база не ответила посреди записи (журнал — %s), исход решит повтор — %s",
@@ -356,13 +366,13 @@ def _database_trouble(session: Session, draft_id: uuid.UUID, error: SQLAlchemyEr
             written,
             _first_line(error),
         )
-        return SubmitFailedError(UNCONFIRMED)
+        return SubmitFailedError(UNCONFIRMED, code="unconfirmed")
     log.error(
         "черновик %s: база не ответила на входе в очередь писателей — %s",
         draft_id,
         _first_line(error),
     )
-    return SubmitUnavailableError(DATABASE_DOWN)
+    return SubmitUnavailableError(DATABASE_DOWN, code="database_down")
 
 
 def _saved(message: str) -> str:
@@ -389,7 +399,8 @@ def _mark_submitted(session: Session, draft_id: uuid.UUID, result: AppendResult)
         )
         raise SubmitUnavailableError(
             f"Карточка записана в строку {result.row}, но сервер не успел это запомнить — "
-            "нажмите «Отправить» ещё раз: второй строки не будет."
+            "нажмите «Отправить» ещё раз: второй строки не будет.",
+            code="written_not_marked",
         ) from None
     if not marked and not _marked_by_twin(session, draft_id, result):
         log.error(

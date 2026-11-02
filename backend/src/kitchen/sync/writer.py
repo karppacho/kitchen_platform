@@ -74,6 +74,7 @@ from kitchen.sync.sheet_write import SentValue as SentValue
 from kitchen.sync.sheet_write import SheetBusyError as SheetBusyError
 from kitchen.sync.sheet_write import SheetJournal as SheetJournal
 from kitchen.sync.sheet_write import SheetUnavailableError as SheetUnavailableError
+from kitchen.sync.sheet_write import WriteForbiddenError as WriteForbiddenError
 from kitchen.sync.sheet_write import WriteNotConfirmedError as WriteNotConfirmedError
 from kitchen.sync.sheet_write import WriteRefusedError as WriteRefusedError
 from kitchen.sync.sheet_write import WritersLock as WritersLock
@@ -102,6 +103,13 @@ _WORST_REQUESTS = 12
 """Запросов к Google в худшей записи — с запасом: открыть таблицу и лист,
 прочитать, дописать сетку, записать, перечитать дважды, очистить, перечитать
 ещё раз — около одиннадцати."""
+
+
+def _forbidden(failure: Exception) -> bool:
+    """Google отказал в правах (403) — по коду ответа или голому
+    ``PermissionError`` (так gspread отвечает на 403 при открытии книги)."""
+    status = getattr(getattr(failure, "response", None), "status_code", None)
+    return status == 403 or isinstance(failure, PermissionError)
 
 
 def hold_limit(settings: Settings) -> timedelta:
@@ -755,7 +763,10 @@ class CardSheetWriter:
                 after={"rows": seen.rows(row)},
             )
             log.warning("«%s»: запись в строку %s не легла — %s", SPEC.title, row, cause)
-            raise WriteNotConfirmedError(
+            # Журнал и откат те же; различается только класс отказа: на 403
+            # повтор не поможет, и повару нужно «сообщите администратору».
+            refusal = WriteForbiddenError if _forbidden(failure) else WriteNotConfirmedError
+            raise refusal(
                 "Google не принял запись — в таблице ничего не изменилось. Черновик сохранён, "
                 "отправьте ещё раз.",
                 row=row,

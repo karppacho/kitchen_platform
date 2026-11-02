@@ -101,6 +101,12 @@ class WriteNotConfirmedError(WriteRefusedError):
         self.layout_confirmed = layout_confirmed
 
 
+class WriteForbiddenError(WriteNotConfirmedError):
+    """Google отказал в записи правами (403): у сервисного аккаунта нет доступа
+    к книге. Лист не тронут. Повтор не поможет — чинит администратор, поэтому
+    слою карточек нужен свой исход, а не общее «отправьте ещё раз»."""
+
+
 class SheetBusyError(WriteRefusedError):
     """Очередь писателей недоступна: занята дольше предела или потеряна."""
 

@@ -135,11 +135,18 @@ def submit_request_key(draft_id: uuid.UUID) -> str:
 # Отказы — текст для повара
 # ---------------------------------------------------------------------------
 class CardsError(Exception):
-    """Отказ, который увидит повар: текст исключения — для него."""
+    """Отказ, который увидит повар: текст исключения — для него.
+
+    ``code`` — необязательный машинный код исхода: экран различает исходы по
+    нему, а текст остаётся запасным. Нет кода — в теле поля ``code`` нет."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
     def extra(self) -> dict[str, object]:
         """Что ещё положить в тело отказа рядом с текстом (поле, строку…)."""
-        return {}
+        return {} if self.code is None else {"code": self.code}
 
 
 class DraftNotFoundError(CardsError):
@@ -162,7 +169,7 @@ class DraftFieldError(CardsError):
         self.field = field
 
     def extra(self) -> dict[str, object]:
-        return {"field": self.field}
+        return {**super().extra(), "field": self.field}
 
 
 class PhotoTooLargeError(CardsError):

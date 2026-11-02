@@ -49,6 +49,7 @@ from kitchen.sync.writer import (
     LockLostError,
     SheetBusyError,
     SheetUnavailableError,
+    WriteForbiddenError,
     WriteNotConfirmedError,
     WriteRefusedError,
     find_free_row,
@@ -762,6 +763,46 @@ def test_not_applied_is_failed_and_nothing_cleared() -> None:
     assert set(record.before) == {"rows"}
     assert rig.writes() == ["values_batch_update"]
     assert rig.line(6) == [""] * WIDTH
+
+
+def test_forbidden_write_is_its_own_refusal_with_same_journal() -> None:
+    """Google отказал в правах (403), ничего не записав: свой класс отказа
+    (повтор не поможет), но журнал и лист — как при прочем отказе записи."""
+    rig = _rig()
+    rig.book.fail_next(
+        "values_batch_update",
+        applied=False,
+        error=api_error(403, "The caller does not have permission", "PERMISSION_DENIED"),
+    )
+
+    with pytest.raises(WriteForbiddenError) as caught:
+        rig.append()
+
+    assert isinstance(caught.value, WriteNotConfirmedError)
+    assert (caught.value.row, caught.value.journal_id, caught.value.layout_confirmed) == (
+        6,
+        1,
+        True,
+    )
+    record = rig.journal.only()
+    assert record.status == FAILED
+    assert record.error is not None and "403" in record.error
+    assert set(record.before) == {"rows"}
+    assert rig.writes() == ["values_batch_update"]
+    assert rig.line(6) == [""] * WIDTH
+
+
+@pytest.mark.parametrize("code", [400, 429, 500])
+def test_other_google_refusals_are_not_forbidden(code: int) -> None:
+    """Отказ не по правам — прежний отказ записи, не «сообщите администратору»."""
+    rig = _rig()
+    rig.book.fail_next("values_batch_update", applied=False, error=api_error(code, "no"))
+
+    with pytest.raises(WriteNotConfirmedError) as caught:
+        rig.append()
+
+    assert not isinstance(caught.value, WriteForbiddenError)
+    assert rig.journal.only().status == FAILED
 
 
 def test_cell_changed_after_write_clears_only_ours() -> None:
