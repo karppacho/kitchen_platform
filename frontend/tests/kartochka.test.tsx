@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterAll, afterEach, beforeAll, expect, test } from 'vitest'
 
 import { DishDetailPage } from '../src/pages/DishDetail'
+import { setViewport } from './setup'
 
 // Ответ настоящий, из раздела 4 ТЗ.
 const B001 = {
@@ -302,3 +303,42 @@ test.each(EKRANY.flatMap((e) => SOSTOYANIYA.map((s) => ({ ...e, ...s }))))(
     expect(tsel.pathname).toBe('/dishes')
   },
 )
+
+test('на 360 px состав — список с подписанными числами, без таблицы', async () => {
+  setViewport(360)
+  narisovat()
+  await screen.findByText('Салат айсберг пф')
+  expect(screen.queryByRole('table')).not.toBeInTheDocument()
+
+  const pozitsii = screen.getAllByRole('listitem')
+  const aysberg = pozitsii.find((li) => li.textContent?.includes('Салат айсберг пф'))!
+  const chisla = [...aysberg.querySelectorAll('dt')].map((dt) => dt.textContent)
+  expect(chisla).toEqual(['нетто', 'брутто', 'цена', 'стоимость', 'доля'])
+  expect(aysberg).toHaveTextContent('16 г')
+  expect(aysberg).toHaveTextContent('22,19 г')
+  expect(aysberg).toHaveTextContent('213,38 ₽/кг')
+  expect(aysberg).toHaveTextContent('4,74 ₽')
+  expect(aysberg).toHaveTextContent('5,6 %')
+  // Полное имя — под коротким.
+  expect(within(aysberg).getByText('Салат айсберг')).toHaveClass('polnoe-imya')
+})
+
+test('на 360 px упаковка — своя группа: заголовок, штуки, без брутто', async () => {
+  setViewport(360)
+  narisovat()
+  await screen.findByText('Салат айсберг пф')
+  expect(screen.getByRole('heading', { level: 3, name: /Упаковка/ })).toBeInTheDocument()
+  const konteyner = screen.getAllByRole('listitem').find((li) => li.textContent?.includes('Контейнер'))!
+  expect([...konteyner.querySelectorAll('dt')].map((dt) => dt.textContent)).toEqual(['нетто', 'цена', 'стоимость', 'доля'])
+  expect(konteyner).toHaveTextContent('1 шт')
+})
+
+test('на 1440 px состав по-прежнему таблица', async () => {
+  setViewport(1440)
+  narisovat()
+  await screen.findByText('Салат айсберг пф')
+  expect(screen.getByRole('table')).toBeInTheDocument()
+  // Список замечаний на карточке есть и на компьютере, поэтому ищем именно
+  // список состава, а не любой list.
+  expect(document.querySelector('.sostav-spisok')).toBeNull()
+})

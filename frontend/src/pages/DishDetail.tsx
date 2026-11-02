@@ -7,6 +7,7 @@ import type { Component } from '../api/types'
 import { dorozhe, PODPIS_DOROZHE } from '../domain/tseny'
 import { Num } from '../ui/Num'
 import { estDannye, SboyObnovleniya, Sostoyanie } from '../ui/Sostoyanie'
+import { useWide } from '../ui/useWide'
 // Ruling 3: классы `.tablitsa` из table.css нужны здесь напрямую — этот
 // экран не гарантированно рисуется рядом с <DataTable>, который сам
 // импортирует table.css. Без явного импорта состав блюда выглядел бы
@@ -182,6 +183,8 @@ function Pokazatel({
 const KOLONKI = ['Ингредиент', 'Нетто', 'Брутто', 'Цена за единицу', 'Стоимость', 'Доля']
 
 function Sostav({ osnova, upakovka }: { osnova: Component[]; upakovka: Component[] }) {
+  const wide = useWide()
+  if (!wide) return <SostavSpiskom osnova={osnova} upakovka={upakovka} />
   return (
     <div className="tablitsa-obolochka">
       <table className="tablitsa">
@@ -222,6 +225,84 @@ function Sostav({ osnova, upakovka }: { osnova: Component[]; upakovka: Component
         )}
       </table>
     </div>
+  )
+}
+
+/**
+ * Состав на телефоне — список: таблица из шести колонок на 360 px
+ * прокручивалась внутри рамки, и стоимость с долей были видны только после
+ * сдвига вбок (ТЗ, раздел 2: на узком экране — список). Упаковка — своя
+ * группа: в выход блюда не входит, брутто у неё нет.
+ */
+function SostavSpiskom({ osnova, upakovka }: { osnova: Component[]; upakovka: Component[] }) {
+  return (
+    <div className="sostav-spisok">
+      <ul className="sostav-gruppa">
+        {osnova.map((k, nomer) => (
+          <PozitsiyaSostava key={`osnova-${nomer}`} k={k} />
+        ))}
+      </ul>
+      {upakovka.length > 0 && (
+        <>
+          <h3 className="sostav-zagolovok">
+            Упаковка <span className="sostav-poyasnenie">· в выход блюда не входит, брутто нет</span>
+          </h3>
+          <ul className="sostav-gruppa">
+            {upakovka.map((k, nomer) => (
+              <PozitsiyaSostava key={`upakovka-${nomer}`} k={k} />
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  )
+}
+
+function PozitsiyaSostava({ k }: { k: Component }) {
+  const upakovka = k.row_type === 'packaging'
+  // Для упаковки в net_weight_g штуки, а не граммы (см. StrokaSostava).
+  const edinitsa = upakovka ? 'шт' : 'г'
+  return (
+    <li className="pozitsiya">
+      <span className="pozitsiya-imya imya-ingredienta">
+        {k.short_name || k.name}
+        {k.short_name && <span className="polnoe-imya">{k.name}</span>}
+      </span>
+      <dl className="pozitsiya-chisla">
+        <div>
+          <dt>нетто</dt>
+          <dd>
+            <Num value={k.net_weight_g} unit={edinitsa} />
+          </dd>
+        </div>
+        {!upakovka && (
+          <div>
+            <dt>брутто</dt>
+            <dd>
+              <Num value={k.gross_weight_g} unit="г" />
+            </dd>
+          </div>
+        )}
+        <div>
+          <dt>цена</dt>
+          <dd>
+            <Num value={k.price_per_unit} fraction={2} unit={`₽/${k.unit}`} />
+          </dd>
+        </div>
+        <div>
+          <dt>стоимость</dt>
+          <dd>
+            <Num value={k.cost_rub} fraction={2} unit="₽" />
+          </dd>
+        </div>
+        <div>
+          <dt>доля</dt>
+          <dd>
+            <Num value={k.share_percent} fraction={1} unit="%" />
+          </dd>
+        </div>
+      </dl>
+    </li>
   )
 }
 

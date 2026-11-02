@@ -171,3 +171,48 @@ h2 {
   font-size: 15px;
   margin: calc(var(--shag) * 5) 0 calc(var(--shag) * 2);
 }
+
+/* Состав списком на телефоне. */
+.sostav-gruppa {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--poverhnost);
+}
+
+.pozitsiya {
+  padding: calc(var(--shag) * 2) calc(var(--shag) * 3);
+  border-bottom: 1px solid var(--granitsa);
+}
+
+.pozitsiya-imya {
+  display: block;
+  margin-bottom: var(--shag);
+}
+
+/* Числа — плиткой по три в ряд: подпись сверху мелким, значение снизу. */
+.pozitsiya-chisla {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--shag) calc(var(--shag) * 2);
+  margin: 0;
+}
+
+.pozitsiya-chisla dt {
+  color: var(--priglushyonnyy);
+  font-size: 11px;
+}
+
+.pozitsiya-chisla dd {
+  margin: 0;
+}
+
+.sostav-zagolovok {
+  margin: calc(var(--shag) * 4) 0 calc(var(--shag) * 2);
+  font-size: 14px;
+}
+
+.sostav-poyasnenie {
+  font-weight: 400;
+  color: var(--priglushyonnyy);
+}
