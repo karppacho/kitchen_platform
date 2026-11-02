@@ -106,8 +106,11 @@ class ImportResult:
         self.counts[entity] = number
 
 
-def _text(value: CellValue) -> str:
-    """Текст ячейки. `None` и числа приводятся к строке без выдумок."""
+def cell_text(value: CellValue) -> str:
+    """Текст ячейки. `None` и числа приводятся к строке без выдумок.
+
+    Открыт: так же читает id и названия ING проверка сдвига строк в цикле
+    синхронизации — признак и перенос не должны расходиться в чтении."""
     if value is None:
         return ""
     return str(value).strip()
@@ -256,28 +259,28 @@ class Importer:
 
         present: set[str] = set()
         for row in _identified(data.rows, "id", result, "ING"):
-            key = _text(row["id"])
+            key = cell_text(row["id"])
             present.add(key)
             item = existing.get(key) or models.Ingredient(legacy_id=key)
-            item.name = _text(row["name"])
-            item.full_name = _text(row["full_name"])
-            item.short_name = _text(row["short_name"])
-            item.category = _text(row["category"])
-            item.manufacturer = _text(row["manufacturer"])
-            item.composition = _text(row["composition"])
+            item.name = cell_text(row["name"])
+            item.full_name = cell_text(row["full_name"])
+            item.short_name = cell_text(row["short_name"])
+            item.category = cell_text(row["category"])
+            item.manufacturer = cell_text(row["manufacturer"])
+            item.composition = cell_text(row["composition"])
             item.protein = _num(row["protein"])
             item.fat = _num(row["fat"])
             item.carbs = _num(row["carbs"])
             item.kcal = _num(row["kcal"])
             item.price_per_kg = _num(row["price_per_kg"])
             item.price_per_pack = _num(row["price_per_pack"])
-            item.unit = _text(row["unit"])
+            item.unit = cell_text(row["unit"])
             item.weight_per_piece_g = _num(row["weight_per_piece_g"])
             item.losses_total = _num(row["losses_total"])
             item.losses_unpacking = _num(row["losses_unpacking"])
             item.losses_cutting = _num(row["losses_cutting"])
             item.losses_thermal = _num(row["losses_thermal"])
-            item.status = _text(row["status"])
+            item.status = cell_text(row["status"])
             _stamp(item, row)
             session.add(item)
             existing[key] = item
@@ -298,16 +301,16 @@ class Importer:
 
         present: set[str] = set()
         for row in _identified(data.rows, "id", result, "Упаковка"):
-            key = _text(row["id"])
+            key = cell_text(row["id"])
             present.add(key)
             item = existing.get(key) or models.Packaging(legacy_id=key)
-            item.name = _text(row["name"])
-            item.full_name = _text(row["full_name"])
+            item.name = cell_text(row["name"])
+            item.full_name = cell_text(row["full_name"])
             item.price_per_piece = _num(row["price_per_piece"])
-            item.dish_category = _text(row["dish_category"])
-            item.supplier = _text(row["supplier"])
-            item.status = _text(row["status"])
-            item.comment = _text(row["comment"])
+            item.dish_category = cell_text(row["dish_category"])
+            item.supplier = cell_text(row["supplier"])
+            item.status = cell_text(row["status"])
+            item.comment = cell_text(row["comment"])
             _stamp(item, row)
             session.add(item)
             existing[key] = item
@@ -328,15 +331,15 @@ class Importer:
 
         present: set[str] = set()
         for row in _identified(data.rows, "id", result, "Способы приготовления"):
-            key = _text(row["id"])
+            key = cell_text(row["id"])
             present.add(key)
             item = existing.get(key) or models.CookingMethod(legacy_id=key)
-            item.position = _text(row["position"])
-            item.method = _text(row["method"])
+            item.position = cell_text(row["position"])
+            item.method = cell_text(row["method"])
             item.absorption_rate = _num(row["absorption_rate"])
             item.oil_per_100g = _num(row["oil_per_100g"])
-            item.recommendation = _text(row["recommendation"])
-            item.comment = _text(row["comment"])
+            item.recommendation = cell_text(row["recommendation"])
+            item.comment = cell_text(row["comment"])
             _stamp(item, row)
             session.add(item)
             existing[key] = item
@@ -357,15 +360,15 @@ class Importer:
 
         present: set[str] = set()
         for row in _identified(data.rows, "id", result, "Блюда"):
-            key = _text(row["id"])
+            key = cell_text(row["id"])
             present.add(key)
             item = existing.get(key) or models.Dish(legacy_id=key)
-            item.name = _text(row["name"])
-            item.category = _text(row["category"])
+            item.name = cell_text(row["name"])
+            item.category = cell_text(row["category"])
             item.price_menu = _num(row["price_menu"])
             item.uc_actual = _num(row["uc_actual"])
-            item.status = _text(row["status"])
-            item.comment = _text(row["comment"])
+            item.status = cell_text(row["status"])
+            item.comment = cell_text(row["comment"])
             _stamp(item, row)
             session.add(item)
             existing[key] = item
@@ -398,7 +401,7 @@ class Importer:
 
         imported = 0
         for row in data.rows:
-            dish_key = _text(row["dish_id"])
+            dish_key = cell_text(row["dish_id"])
             dish: models.Dish | None = dishes.get(dish_key)
             if dish is None:
                 if dish_key:
@@ -407,8 +410,8 @@ class Importer:
                     )
                 continue
 
-            ingredient = ingredients.get(_text(row["ingredient_id"]))
-            pack = packaging.get(_text(row["packaging_id"]))
+            ingredient = ingredients.get(cell_text(row["ingredient_id"]))
+            pack = packaging.get(cell_text(row["packaging_id"]))
 
             # Ограничение базы требует ровно одну ссылку. Строка с обеими
             # или без единой — испорченные данные: первая даст двойной счёт
@@ -426,17 +429,18 @@ class Importer:
                     ingredient_id=ingredient.id if ingredient else None,
                     packaging_id=pack.id if pack else None,
                     cooking_method_id=(
-                        methods[_text(row["cooking_method_id"])].id
-                        if _text(row["cooking_method_id"]) in methods
+                        methods[cell_text(row["cooking_method_id"])].id
+                        if cell_text(row["cooking_method_id"]) in methods
                         else None
                     ),
                     net_weight_g=_num(row["net_weight_g"]),
                     row_type=(
                         "packaging"
-                        if pack is not None or _text(row["row_type"]).lower() == _ROW_TYPE_PACKAGING
+                        if pack is not None
+                        or cell_text(row["row_type"]).lower() == _ROW_TYPE_PACKAGING
                         else "main"
                     ),
-                    comment=_text(row["comment"]),
+                    comment=cell_text(row["comment"]),
                     source_row=row.number,
                     content_hash=row.content_hash,
                 )
@@ -462,7 +466,7 @@ class Importer:
 
         seen: set[str] = set()
         for row in data.rows:
-            name = _text(row["name"])
+            name = cell_text(row["name"])
             if not name:
                 continue
             key = normalise_name(name)
@@ -478,27 +482,27 @@ class Importer:
 
             card = existing.get(key) or models.IngredientCard(name=name)
             card.name = name
-            card.category = _text(row["category"])
-            card.label_name = _text(row["label_name"])
-            card.description = _text(row["description"])
-            card.manufacturer = _text(row["manufacturer"])
-            card.supplier = _text(row["supplier"])
-            card.composition = _text(row["composition"])
+            card.category = cell_text(row["category"])
+            card.label_name = cell_text(row["label_name"])
+            card.description = cell_text(row["description"])
+            card.manufacturer = cell_text(row["manufacturer"])
+            card.supplier = cell_text(row["supplier"])
+            card.composition = cell_text(row["composition"])
             card.protein = _num(row["protein"])
             card.fat = _num(row["fat"])
             card.carbs = _num(row["carbs"])
             card.kcal = _num(row["kcal"])
-            card.shelf_life_sealed = _text(row["shelf_life_sealed"])
-            card.shelf_life_defrost = _text(row["shelf_life_defrost"])
-            card.shelf_life_after = _text(row["shelf_life_after"])
-            card.defrost_conditions = _text(row["defrost_conditions"])
-            card.label_url = _text(row["label_url"])
-            card.package_url = _text(row["package_url"])
-            card.before_url = _text(row["before_url"])
-            card.after_url = _text(row["after_url"])
-            card.declaration = _text(row["declaration"])
-            card.halal_certificate = _text(row["halal_certificate"])
-            card.approval_status = _text(row["approval_status"])
+            card.shelf_life_sealed = cell_text(row["shelf_life_sealed"])
+            card.shelf_life_defrost = cell_text(row["shelf_life_defrost"])
+            card.shelf_life_after = cell_text(row["shelf_life_after"])
+            card.defrost_conditions = cell_text(row["defrost_conditions"])
+            card.label_url = cell_text(row["label_url"])
+            card.package_url = cell_text(row["package_url"])
+            card.before_url = cell_text(row["before_url"])
+            card.after_url = cell_text(row["after_url"])
+            card.declaration = cell_text(row["declaration"])
+            card.halal_certificate = cell_text(row["halal_certificate"])
+            card.approval_status = cell_text(row["approval_status"])
             _stamp(card, row)
 
             session.add(card)
@@ -632,7 +636,7 @@ def _identified(
     комментарий, недописанная позиция. Пропускаем, но называем вслух.
     """
     for row in rows:
-        if _text(row[key_field]):
+        if cell_text(row[key_field]):
             yield row
         else:
             result.warnings.append(f"{sheet} строка {row.number}: пустой id, пропущена")

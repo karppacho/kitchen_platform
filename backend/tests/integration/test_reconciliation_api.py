@@ -14,6 +14,8 @@
 * на каждую строку таблицы «Ответы человеку» спеки — свой код и текст;
 * числа в ответах — строками, потери для формы — в процентах;
 * повтор после обрыва второй записи не даёт — «уже в справочнике»;
+* пока у книги кухни причина «строки ING съехали», перенос и его
+  предпросмотр отказывают, не позвав писателя; «Это он» работает;
 * список «Сверки» — кандидаты у спорных пар обоих видов, ``approved`` и
   ``actions``.
 """
@@ -33,6 +35,8 @@ from kitchen.cards.reference import (
     NOT_A_CANDIDATE,
     NOT_CONFIGURED,
     NOT_IMPORTED,
+    SHIFT_NOT_IMPORTED,
+    SHIFT_POSTPONED,
     WRITING_CLOSED,
 )
 from kitchen.cards.submit import IMPORT_GOOGLE_TIMEOUT
@@ -41,14 +45,16 @@ from kitchen.db import models
 from kitchen.db.journal import DbJournal
 from kitchen.db.links import known_reference_ids
 from kitchen.domain.cards import APPROVED, REJECTED
+from kitchen.domain.ing_shift import MovedName
 from kitchen.domain.reference_row import NotFound
 from kitchen.sync import ownership, specs
+from kitchen.sync.cycle import SHIFT_PROBLEM_START, shift_problem
 from kitchen.sync.reference_writer import HEADER_DRIFT, NOT_CONFIRMED, ReferenceRowFiller
 from kitchen.sync.sheet_write import SHEET_WRITE_LOCK_KEY
 from kitchen.web import auth, reconciliation
 from kitchen.web.app import create_app
 from kitchen.web.csrf import REJECTED as CSRF_REJECTED
-from tests.conftest import CARDS_ORDER, FakeSheetsClient, Formula, ing_sheet
+from tests.conftest import CARDS_ORDER, FakeSheetsClient, Formula, Spill, ing_sheet
 from tests.fake_sheets import IDS, cards_sheet, kitchen_sheets, row, sheets_client
 from tests.integration.test_database import _url
 from tests.integration.test_reference_flow import (
@@ -69,6 +75,9 @@ if TYPE_CHECKING:
 
     import httpx
     from sqlalchemy.orm import Session, sessionmaker
+
+    from kitchen.domain.reference_row import ReferenceForm, ReferenceFormError
+    from kitchen.sync.reference_writer import FillResult, RowPreview
 
 pytestmark = pytest.mark.integration
 
@@ -1027,3 +1036,196 @@ def test_writing_closed_by_ownership_rule_is_503(
     assert reply.status_code == 503
     assert reply.json() == {"detail": WRITING_CLOSED}
     assert _writes(world) == []
+
+
+# ---------------------------------------------------------------------------
+# Строки ING съехали — перенос в справочник отложен
+# ---------------------------------------------------------------------------
+SHIFTED = shift_problem(
+    [
+        MovedName(ref_id="129", row=5, was="Кетчуп", now="Моцарелла", owner="130"),
+        MovedName(ref_id="130", row=6, was="Моцарелла", now="Кетчуп", owner="129"),
+    ]
+)
+"""Причина книги кухни, когда цикл узнал сдвиг строк ING: Кетчуп и Моцарелла
+поменялись названиями."""
+
+
+def _kitchen_problem(sessions: sessionmaker[Session], problem: str) -> None:
+    """Причина книги кухни в ``sync_state`` — как её оставляет цикл."""
+    with sessions.begin() as session:
+        state = session.get(models.SyncState, "kitchen")
+        assert state is not None
+        state.problem = problem
+        state.problem_since = func.now()
+
+
+def _kitchen_problem_now(sessions: sessionmaker[Session]) -> str | None:
+    with sessions() as session:
+        state = session.get(models.SyncState, "kitchen")
+        assert state is not None
+        return state.problem
+
+
+class _Watched(ReferenceRowFiller):
+    """Настоящий писатель строки ING, который помнит, что его звали."""
+
+    def __init__(self, world: FakeSheetsClient, sessions: sessionmaker[Session]) -> None:
+        super().__init__(
+            world,
+            DbJournal(sessions),
+            kitchen_id=IDS["kitchen"],
+            cards_id=IDS["ingredient_cards"],
+            known_ids=lambda: known_reference_ids(sessions),
+        )
+        self.calls: list[str] = []
+
+    def preview(self, card_name: str, *, confirmed: bool) -> RowPreview:
+        self.calls.append("preview")
+        return super().preview(card_name, confirmed=confirmed)
+
+    def fill(
+        self,
+        card_name: str,
+        form: ReferenceForm | ReferenceFormError,
+        *,
+        actor_id: uuid.UUID | None,
+        request_key: str,
+        confirmed: bool,
+    ) -> FillResult:
+        self.calls.append("fill")
+        return super().fill(
+            card_name, form, actor_id=actor_id, request_key=request_key, confirmed=confirmed
+        )
+
+
+def test_shifted_ing_postpones_transfer_and_its_preview(
+    sessions: sessionmaker[Session], world: FakeSheetsClient
+) -> None:
+    """Пока у книги кухни причина «строки ING съехали», «Добавить в
+    справочник» и предпросмотр его формы — 503 словами спеки. Отказ — до
+    писателя: лист не читали, записи и журнала нет, книгу кухни в базу не
+    переносили — причина та, что оставил цикл."""
+    _kitchen_problem(sessions, SHIFTED)
+    filler = _Watched(world, sessions)
+    client = make_client(world, filler=lambda: filler)
+    card = _card(sessions, "Соус Барбекю")
+    opened = len(world.opened)
+
+    replies = [transfer(client, card.id), preview(client, card.id)]
+
+    assert [(reply.status_code, reply.json()) for reply in replies] == [
+        (503, {"detail": SHIFT_POSTPONED})
+    ] * 2
+    assert SHIFT_POSTPONED == (
+        "Перенос в справочник отложен: в листе ING строки съехали относительно id, и таблица "
+        "кухни не переносится на сайт. Сначала выровняйте лист ING"
+    )
+    assert filler.calls == []
+    assert len(world.opened) == opened, "лист не читали"
+    _untouched(sessions, world)
+    assert _kitchen_problem_now(sessions) == SHIFTED
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "лист «ТТК» не прочитан",
+        "в листе «ING» сдвинулись колонки — колонка C: ожидался заголовок «Наименование "
+        "ингредиента», в листе «Что-то другое»",
+    ],
+    ids=["sheet-not-read", "columns-shifted"],
+)
+def test_other_kitchen_problem_does_not_postpone_transfer(
+    sessions: sessionmaker[Session], world: FakeSheetsClient, problem: str
+) -> None:
+    """Другие причины книги кухни — лист не прочитан, сдвинулись колонки —
+    перенос не откладывают: предпросмотр и запись идут, как прежде, а лист
+    писатель сверяет сам свежим чтением."""
+    _kitchen_problem(sessions, problem)
+    filler = _Watched(world, sessions)
+    client = make_client(world, filler=lambda: filler)
+    card = _card(sessions, "Соус Барбекю")
+
+    seen = preview(client, card.id)
+    reply = transfer(client, card.id)
+
+    assert seen.status_code == 200, seen.text
+    assert (seen.json()["row"], seen.json()["ready"]) == (7, True)
+    assert reply.status_code == 200, reply.text
+    body = reply.json()
+    assert (body["row"], body["ref_id"], body["linked"]) == (7, "131", True)
+    assert filler.calls == ["preview", "fill"]
+    assert _ing(world).cell("A7") == 131
+
+
+def test_transfer_that_finds_the_shift_itself_says_align_the_sheet(
+    sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
+) -> None:
+    """Строки ING съехали (Кетчуп и Моцарелла поменялись названиями), а цикл
+    ещё не записал причину: запрета нет, строка записана, но короткий перенос
+    книги кухни находит сдвиг и книгу не переносит. 200, ``imported=false``,
+    пара — как при любом неудачном переносе; оговорка — не «появится через
+    несколько минут» (само не появится), а «выровняйте лист ING»."""
+    _ing(world).put("C5", Spill("Моцарелла"))
+    _ing(world).put("C6", Spill("Кетчуп"))
+    card = _card(sessions, "Соус Барбекю")
+
+    reply = transfer(chef, card.id)
+
+    assert reply.status_code == 200, reply.text
+    body = reply.json()
+    assert (body["row"], body["ref_id"], body["already"]) == (7, "131", False)
+    assert (body["imported"], body["linked"], body["ingredient_id"]) == (False, False, None)
+    assert body["notes"] == [SHIFT_NOT_IMPORTED]
+    assert SHIFT_NOT_IMPORTED == (
+        "Ингредиент записан в справочник, но на сайт не перенесён: в листе ING строки "
+        "съехали относительно id. Выровняйте лист ING — ингредиент появится со следующим "
+        "обновлением"
+    )
+    assert _ing(world).cell("A7") == 131
+    assert _pair(_card(sessions, "Соус Барбекю")) == (None, "orphan", False)
+    problem = _kitchen_problem_now(sessions)
+    assert problem is not None and problem.startswith(SHIFT_PROBLEM_START)
+
+
+def test_this_is_it_works_while_ing_is_shifted(
+    sessions: sessionmaker[Session], world: FakeSheetsClient, chef: TestClient
+) -> None:
+    """«Это он» — только база, в таблицу не ходит: сдвиг строк ING его не
+    останавливает."""
+    _kitchen_problem(sessions, SHIFTED)
+    card = _card(sessions, "Сахар")
+    chosen = _ingredient_id(sessions, "98")
+
+    reply = confirm(chef, card.id, chosen)
+
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["message"] == "Пара подтверждена: ингредиент «Сахар», id 98"
+    assert _pair(_card(sessions, "Сахар")) == (chosen, "linked", True)
+    assert _writes(world) == []
+
+
+def test_missing_card_and_book_are_told_before_the_shift(
+    sessions: sessionmaker[Session], world: FakeSheetsClient
+) -> None:
+    """Порядок отказов: карточки нет (404), таблица не настроена (503) — и
+    только потом «строки ING съехали»."""
+    _kitchen_problem(sessions, SHIFTED)
+    card = _card(sessions, "Соус Барбекю")
+    client = make_client(world)
+    unconfigured = make_client(world, config=settings(sheets_id_kitchen=""))
+
+    replies = [
+        preview(client, 999_999),
+        transfer(client, 999_999),
+        preview(unconfigured, card.id),
+        transfer(unconfigured, card.id),
+    ]
+
+    assert [(reply.status_code, reply.json()) for reply in replies] == [
+        (404, {"detail": CARD_NOT_FOUND}),
+        (404, {"detail": CARD_NOT_FOUND}),
+        (503, {"detail": NOT_CONFIGURED}),
+        (503, {"detail": NOT_CONFIGURED}),
+    ]
