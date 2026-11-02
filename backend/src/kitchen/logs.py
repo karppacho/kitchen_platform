@@ -9,6 +9,9 @@ stderr голым текстом.
 Секретов в журнал не пишем: ни ключей, ни кук, ни токенов — каждый
 ``log.*`` в ``kitchen`` пишет только номера, состояния и первую строку
 ошибки; причину отказа polza.ai перед журналом маскирует клиент.
+
+``httpx`` и ``httpcore`` держим на WARNING: строка «HTTP Request» на каждый
+вход, продление и распознавание — шум, а адрес запроса журналу не нужен.
 """
 
 from __future__ import annotations
@@ -16,12 +19,16 @@ from __future__ import annotations
 import logging
 
 FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+_QUIET = ("httpx", "httpcore")
 
 
 def configure_logging() -> None:
     """Записи от INFO — в stderr, со временем, уровнем и именем.
 
     Корневой журнал уже настроен (второй старт в том же процессе, тесты) —
-    ничего не меняет: строки не задваиваются.
+    ничего не меняет: строки не задваиваются. Уровни ``httpx`` и ``httpcore``
+    выставляются при каждом вызове.
     """
     logging.basicConfig(level=logging.INFO, format=FORMAT)
+    for name in _QUIET:
+        logging.getLogger(name).setLevel(logging.WARNING)
