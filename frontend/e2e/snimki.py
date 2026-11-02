@@ -102,15 +102,16 @@ INGREDIENTS = [
         ("12", "Молоко 3,2%", "Молочные продукты", "л", "активный", "78.00", None, True),
     ]
 ]
+# Строки «Сверки» — как у бэкенда: approved и actions обязательны, без actions экран падает.
 RECON = {
     "total": 101, "linked": 85, "needs_human": 16,
     "rows": [
-        {"card_id": 1, "name": "Соус барбекю РБК", "link_status": "ambiguous", "supplier": "Метро",
+        {"card_id": 1, "name": "Соус барбекю РБК", "link_status": "ambiguous", "supplier": "Метро", "approved": True, "actions": [],
          "candidates": [{"ingredient_id": 21, "legacy_id": "21", "name": "Соус барбекю РБК", "score": None},
                         {"ingredient_id": 22, "legacy_id": "22", "name": "Соус барбекю РБК", "score": None}]},
-        {"card_id": 2, "name": "Огурцы не резаные", "link_status": "candidate", "supplier": "Восток",
+        {"card_id": 2, "name": "Огурцы не резаные", "link_status": "candidate", "supplier": "Восток", "approved": True, "actions": ["confirm"],
          "candidates": [{"ingredient_id": 7, "legacy_id": "7", "name": "Огурцы резаные", "score": None}]},
-        {"card_id": 3, "name": "Тостовый хлеб", "link_status": "orphan", "supplier": "Хлебозавод", "candidates": []},
+        {"card_id": 3, "name": "Тостовый хлеб", "link_status": "orphan", "supplier": "Хлебозавод", "approved": False, "actions": ["to_reference"], "candidates": []},
     ],
 }
 
