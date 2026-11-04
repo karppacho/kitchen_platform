@@ -113,14 +113,15 @@ def test_empty_dev_token_setting_lets_nobody_in(
 
 
 def test_dev_token_lists_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Список инструментов приходит по HTTP; здесь — что инструменты чтения на месте
-    (их состав и поведение — в ``test_mcp_tools_read``)."""
+    """Список инструментов приходит по HTTP; здесь — что инструменты чтения и
+    карточек на месте (их поведение — в ``test_mcp_tools_read`` и
+    ``test_mcp_cards_tools``)."""
     with _build(monkeypatch, _settings()) as client:
         reply = client.post("/mcp", content=_rpc("tools/list"), headers=_bearer(DEV_TOKEN))
 
     assert reply.status_code == 200
     names = {tool["name"] for tool in _result(reply)["tools"]}
-    assert {"poisk_ingredienta", "blyudo", "svezhest"} <= names
+    assert {"poisk_ingredienta", "blyudo", "svezhest", "chernovik_po_etiketke", "eto_on"} <= names
 
 
 def test_foreign_host_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
