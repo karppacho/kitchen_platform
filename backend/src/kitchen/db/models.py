@@ -25,6 +25,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -634,4 +635,101 @@ class CardDraft(Base):
             unique=True,
             postgresql_where=text("status = 'active'"),
         ),
+    )
+
+
+class McpOauthClient(Base):
+    """Клиент OAuth (Claude, ChatGPT, Claude Code), зарегистрированный сам (DCR).
+
+    ``metadata_json`` — регистрационные данные клиента как есть (адреса
+    возврата, способ входа на ``/token``, название). ``client_secret`` лежит
+    открытым: SDK сверяет присланный секрет с этим значением и хеша не
+    принимает; секрет клиента без PKCE и входа человека ничего не открывает,
+    а токены, коды и refresh хранятся только хешами (``McpOauthToken``,
+    ``McpOauthCode``). ``completed_at`` — когда клиент впервые получил токены;
+    незавершённых (``completed_at is null``) старше суток уборка удаляет.
+    """
+
+    __tablename__ = "mcp_oauth_clients"
+
+    client_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client_secret: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict[str, object]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_mcp_oauth_clients_created_at", "created_at"),)
+
+
+class McpOauthCode(Base):
+    """Запрос на вход и выданный по нему одноразовый код.
+
+    Одна строка проходит три состояния. Пока человек не вошёл: ``subject`` и
+    ``issued_at`` пусты, ``code_hash`` — хеш номера запроса (он в ссылке на
+    страницу входа). После входа и согласия: ``code_hash`` заменён хешем кода,
+    ``issued_at`` и срок (10 минут) проставлены. После обмена: ``used_at``.
+    Сами номер запроса, код и ключ защиты формы в базе не лежат — только хеши.
+    """
+
+    __tablename__ = "mcp_oauth_codes"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    client_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("mcp_oauth_clients.client_id", ondelete="CASCADE")
+    )
+    redirect_uri: Mapped[str] = mapped_column(Text)
+    redirect_uri_explicit: Mapped[bool] = mapped_column(Boolean)
+    code_challenge: Mapped[str] = mapped_column(Text)
+    scopes: Mapped[str] = mapped_column(Text, server_default="")
+    resource: Mapped[str | None] = mapped_column(Text)
+    client_state: Mapped[str | None] = mapped_column(Text)
+    subject: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("profiles.id", ondelete="CASCADE")
+    )
+    form_key_hash: Mapped[str | None] = mapped_column(String(64))
+    login_attempts: Mapped[int] = mapped_column(Integer, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_mcp_oauth_codes_client_id", "client_id"),
+        Index("ix_mcp_oauth_codes_subject", "subject"),
+        Index("ix_mcp_oauth_codes_expires_at", "expires_at"),
+    )
+
+
+class McpOauthToken(Base):
+    """Access- и refresh-токен — только хеш sha256.
+
+    ``family_id`` — цепочка от одного кода (id кода): продление вращается
+    внутри неё, а отзыв и обнаруженный повтор refresh гасят цепочку целиком.
+    ``used_at`` у refresh — он уже обменян на новую пару.
+    """
+
+    __tablename__ = "mcp_oauth_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    kind: Mapped[str] = mapped_column(String(8))
+    family_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    client_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("mcp_oauth_clients.client_id", ondelete="CASCADE")
+    )
+    subject: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("profiles.id", ondelete="CASCADE"))
+    scopes: Mapped[str] = mapped_column(Text, server_default="")
+    resource: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("kind in ('access', 'refresh')", name="ck_mcp_oauth_tokens_kind"),
+        Index("ix_mcp_oauth_tokens_family_id", "family_id"),
+        Index("ix_mcp_oauth_tokens_client_id", "client_id"),
+        Index("ix_mcp_oauth_tokens_subject", "subject"),
+        Index("ix_mcp_oauth_tokens_expires_at", "expires_at"),
     )
