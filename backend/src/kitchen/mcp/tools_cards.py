@@ -57,7 +57,11 @@ def _refusals() -> Iterator[None]:
 
 
 def _web_link(deps: McpDeps) -> str:
-    """Ссылка на мастер: домен платформы берём из допустимых хостов MCP."""
+    """Ссылка на мастер: адрес платформы (``MCP_PUBLIC_URL``), а без него — первый
+    допустимый хост MCP (разработка); совсем без настроек — путь от корня."""
+    public_url = deps.settings.mcp_public_url.rstrip("/")
+    if public_url:
+        return f"{public_url}{WIZARD_PATH}"
     for host in deps.settings.mcp_allowed_hosts:
         local = host.startswith(("localhost", "127."))
         return f"{'http' if local else 'https'}://{host}{WIZARD_PATH}"

@@ -45,11 +45,14 @@ def fill_from_label_text(
     if draft is None:
         try:
             draft = store.add_draft(session, owner_id)
-        except store.ActiveDraftExistsError:
+        except store.ActiveDraftExistsError as race:
             # Гонка двух вызовов: соседний успел создать — пишем в его черновик.
             draft = store.active_draft(session, owner_id, lock=True)
             created = False
-            assert draft is not None
+            if draft is None:
+                # Соседний черновик успел и создаться, и уйти — повтор вызова разберётся.
+                session.rollback()
+                raise DraftConflictError(WAIT_FOR_SUBMIT) from race
     else:
         if store.submitting(session, draft.id, submit_window):
             session.rollback()
