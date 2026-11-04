@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 _ZERO = Decimal("0")
 
 
-def _ingredient(row: models.Ingredient) -> IngredientSpec:
+def ingredient_spec(row: models.Ingredient) -> IngredientSpec:
     return IngredientSpec(
         key=row.legacy_id,
         name=row.name,
@@ -68,7 +68,7 @@ def load_recipes(session: Session) -> list[Recipe]:
     в четыре сотни запросов незачем.
     """
     ingredients = {
-        row.id: _ingredient(row) for row in session.scalars(select(models.Ingredient)).all()
+        row.id: ingredient_spec(row) for row in session.scalars(select(models.Ingredient)).all()
     }
     packagings = {
         row.id: _packaging(row) for row in session.scalars(select(models.Packaging)).all()
