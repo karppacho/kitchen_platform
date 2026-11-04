@@ -30,16 +30,13 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
 
-from kitchen.cards import reference
-from kitchen.db import models
-from kitchen.db.links import card_candidates
-from kitchen.domain.cards import APPROVED
+from kitchen.cards import catalog, reference
+from kitchen.cards.catalog import Action
 from kitchen.sync.cycle import SyncCycle
 from kitchen.sync.reference_writer import PreviewValue, ReferenceRowFiller, RowPreview
 from kitchen.web.auth import CurrentUser, SessionDep, require
@@ -63,14 +60,6 @@ _ID_MAX = 2**63 - 1
 CardId = Annotated[int, Path(ge=1, le=_ID_MAX, description="id карточки")]
 
 _HUNDRED = Decimal(100)
-
-Action = Literal["confirm", "to_reference"]
-"""Что можно сделать с карточкой на «Сверке»:
-
-* ``confirm`` — «Это он»: выбрать ингредиент из ``candidates``;
-* ``to_reference`` — форма переноса в справочник: «Добавить в справочник» у
-  карточки без пары, «Это новый» у спорной.
-"""
 
 
 def get_reference_filler(request: Request, google: GoogleDep) -> ReferenceRowFiller | None:
@@ -251,59 +240,24 @@ class TransferOut(BaseModel):
 # ---------------------------------------------------------------------------
 # Список «Сверки»
 # ---------------------------------------------------------------------------
-def _actions(approved: bool, candidates: tuple[object, ...]) -> list[Action]:
-    """«Это он» — когда есть из кого выбрать; форма переноса — только для
-    согласованной карточки: иначе её откажет запись."""
-    found: list[Action] = []
-    if candidates:
-        found.append("confirm")
-    if approved:
-        found.append("to_reference")
-    return found
-
-
 @router.get("", response_model=ReconciliationSummary)
 def reconciliation(session: SessionDep, user: ReconcilerDep) -> ReconciliationSummary:
     """Карточки, по которым решение принимает человек, — список дел.
 
-    Автоматически склеенное сюда не попадает. Здесь только спорное: тёзки,
-    похожие имена и то, чему пары нет вовсе. Подставить не тот ингредиент
-    хуже, чем не подставить никакого.
+    Выбор карточек и кандидатов — в ``kitchen.cards.catalog``.
     """
-    # Явным циклом, а не через dict(): у SQLAlchemy строка результата
-    # типизирована как Row, и dict() от неё mypy не принимает, а
-    # dict-comprehension не принимает ruff.
-    counts: dict[str, int] = {}
-    for link_status, number in session.execute(
-        select(models.IngredientCard.link_status, func.count())
-        .where(models.IngredientCard.removed_at.is_(None))
-        .group_by(models.IngredientCard.link_status)
-    ).all():
-        counts[link_status] = number
-
-    cards = session.scalars(
-        select(models.IngredientCard)
-        .where(
-            models.IngredientCard.link_status != "linked",
-            models.IngredientCard.removed_at.is_(None),
-        )
-        .order_by(models.IngredientCard.link_status, models.IngredientCard.name)
-    ).all()
-    # Кандидаты — тем же подбором, что у импорта и у проверки «Это он»: из
-    # этого списка человек выбирает, по нему же проверяют выбор.
-    candidates = card_candidates(session, cards)
-
-    rows: list[ReconciliationRow] = []
-    for card in cards:
-        approved = card.approval_status == APPROVED
-        offered = candidates[card.id]
-        rows.append(
+    overview = catalog.reconciliation_overview(session)
+    return ReconciliationSummary(
+        total=overview.total,
+        linked=overview.linked,
+        needs_human=overview.needs_human,
+        rows=[
             ReconciliationRow(
-                card_id=card.id,
-                name=card.name,
-                link_status=card.link_status,
-                supplier=card.supplier,
-                approved=approved,
+                card_id=item.card.id,
+                name=item.card.name,
+                link_status=item.card.link_status,
+                supplier=item.card.supplier,
+                approved=item.approved,
                 candidates=[
                     CandidateRow(
                         ingredient_id=c.ingredient_id,
@@ -311,15 +265,13 @@ def reconciliation(session: SessionDep, user: ReconcilerDep) -> ReconciliationSu
                         name=c.name,
                         score=c.score,
                     )
-                    for c in offered
+                    for c in item.candidates
                 ],
-                actions=_actions(approved, offered),
+                actions=item.actions,
             )
-        )
-
-    total = sum(counts.values())
-    linked = counts.get("linked", 0)
-    return ReconciliationSummary(total=total, linked=linked, needs_human=total - linked, rows=rows)
+            for item in overview.items
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------

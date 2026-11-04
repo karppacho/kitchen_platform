@@ -13,23 +13,19 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 
+from kitchen.cards import catalog
+from kitchen.cards.sync_status import SyncStatus, read_sync_status
 from kitchen.config import Settings
-from kitchen.db import models
-from kitchen.db.recipes import load_recipes
-from kitchen.domain.costs import calculate
 from kitchen.web.auth import CurrentUser, CurrentUserDep, SessionDep, get_settings, require
-from kitchen.web.sync_status import BookRow, SyncStatus, build_sync_status
 
 if TYPE_CHECKING:
+    from kitchen.db import models
     from kitchen.domain.recipe import DishCost
 
 router = APIRouter(prefix="/api")
@@ -102,17 +98,6 @@ class DishDetail(DishRow):
 
 
 # ---------------------------------------------------------------------------
-def _share(value: Decimal) -> Decimal:
-    """Доля для показа: три знака, не двадцать восемь.
-
-    В домене это результат деления и хранится с полной точностью — там она
-    нужна, потому что доля сравнивается с порогами. Наружу столько знаков
-    отдавать незачем: фронтенд получал «0.7777777777777777777777777778»
-    и был обязан сам решать, до чего это округлять.
-    """
-    return value.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
-
-
 def _to_row(cost: DishCost, dish: models.Dish) -> DishRow:
     return DishRow(
         legacy_id=dish.legacy_id,
@@ -141,48 +126,20 @@ def ingredients(
     status_filter: Annotated[str, Query(alias="status")] = "",
     limit: Annotated[int, Query(ge=1, le=500)] = 200,
 ) -> list[IngredientRow]:
-    """Справочник ингредиентов.
-
-    Архивные не прячем: они стоят в составе живых блюд, и вопрос «почему
-    у этого блюда такая себестоимость» без них не разобрать. Фильтр по
-    статусу есть, умолчание — показывать всё. Удалённые из листа — прячем:
-    шеф сказал, что позиции больше нет; в составе блюда она остаётся видна
-    с замечанием «удалён из справочника».
-    """
-    query = (
-        select(models.Ingredient)
-        .where(models.Ingredient.removed_at.is_(None))
-        .order_by(models.Ingredient.name)
-    )
-    if search:
-        query = query.where(models.Ingredient.name.ilike(f"%{search}%"))
-    if status_filter:
-        query = query.where(models.Ingredient.status == status_filter)
-
-    rows = session.scalars(query.limit(limit)).all()
-    linked = {
-        card.ingredient_id
-        for card in session.scalars(
-            select(models.IngredientCard).where(
-                models.IngredientCard.ingredient_id.is_not(None),
-                models.IngredientCard.removed_at.is_(None),
-            )
-        ).all()
-    }
-
+    """Справочник ингредиентов (запрос и правила — в ``kitchen.cards.catalog``)."""
     return [
         IngredientRow(
-            id=row.id,
-            legacy_id=row.legacy_id,
-            name=row.name,
-            category=row.category,
-            unit=row.unit,
-            status=row.status,
-            price_per_kg=row.price_per_kg,
-            weight_per_piece_g=row.weight_per_piece_g,
-            has_card=row.id in linked,
+            id=entry.row.id,
+            legacy_id=entry.row.legacy_id,
+            name=entry.row.name,
+            category=entry.row.category,
+            unit=entry.row.unit,
+            status=entry.row.status,
+            price_per_kg=entry.row.price_per_kg,
+            weight_per_piece_g=entry.row.weight_per_piece_g,
+            has_card=entry.has_card,
         )
-        for row in rows
+        for entry in catalog.list_ingredients(session, search, status_filter, limit)
     ]
 
 
@@ -193,29 +150,11 @@ def dishes(
     search: Annotated[str, Query(description="часть названия")] = "",
     status_filter: Annotated[str, Query(alias="status")] = "",
 ) -> list[DishRow]:
-    """Блюда со свежесчитанной себестоимостью.
-
-    Себестоимость не хранится, а считается: хранимое число живёт своей
-    жизнью и однажды разойдётся с ценами в справочнике, а объяснить
-    расхождение будет некому.
-    """
-    recipes = {recipe.key: recipe for recipe in load_recipes(session)}
-
-    query = (
-        select(models.Dish).where(models.Dish.removed_at.is_(None)).order_by(models.Dish.legacy_id)
-    )
-    if search:
-        query = query.where(models.Dish.name.ilike(f"%{search}%"))
-    if status_filter:
-        query = query.where(models.Dish.status == status_filter)
-
-    result: list[DishRow] = []
-    for dish in session.scalars(query).all():
-        recipe = recipes.get(dish.legacy_id)
-        if recipe is None:
-            continue
-        result.append(_to_row(calculate(recipe), dish))
-    return result
+    """Блюда со свежесчитанной себестоимостью (считает ``kitchen.cards.catalog``)."""
+    return [
+        _to_row(entry.cost, entry.dish)
+        for entry in catalog.list_dishes(session, search, status_filter)
+    ]
 
 
 @router.get("/dishes/{legacy_id}", response_model=DishDetail)
@@ -229,30 +168,23 @@ def dish_detail(
     Замечания отдаются полностью, а не числом: именно они объясняют, почему
     себестоимость такая, и без них цифра — просто цифра.
     """
-    dish = session.scalar(
-        select(models.Dish)
-        .options(selectinload(models.Dish.components))
-        .where(models.Dish.legacy_id == legacy_id)
-    )
-    if dish is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="блюдо не найдено")
-    if dish.removed_at is not None:
+    try:
+        entry = catalog.get_dish(session, legacy_id)
+    except catalog.DishRemovedError as error:
         # Не 404: блюдо было, шеф убрал строку из листа. Вернёт — появится снова.
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="блюдо удалено из таблицы")
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=error.detail) from error
+    except catalog.DishLookupError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=error.detail) from error
 
-    recipe = next((r for r in load_recipes(session) if r.key == legacy_id), None)
-    if recipe is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="блюдо не найдено")
-
-    cost = calculate(recipe)
-    base = _to_row(cost, dish)
+    cost = entry.cost
+    base = _to_row(cost, entry.dish)
     return DishDetail(
         **base.model_dump(),
         protein_g=cost.protein_g,
         fat_g=cost.fat_g,
         carbs_g=cost.carbs_g,
         kcal=cost.kcal,
-        kbju_coverage=_share(cost.kbju_coverage),
+        kbju_coverage=catalog.rounded_share(cost.kbju_coverage),
         components=[
             ComponentRow(
                 name=item.name,
@@ -278,16 +210,4 @@ def sync(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> SyncStatus:
     """Насколько свежи данные — для строки над каждым экраном."""
-    rows = [
-        BookRow(
-            book=state.book,
-            checked_at=state.checked_at,
-            changed_at=state.changed_at,
-            problem=state.problem,
-            problem_since=state.problem_since,
-        )
-        for state in session.scalars(select(models.SyncState)).all()
-    ]
-    return build_sync_status(
-        rows, datetime.now(UTC), timedelta(seconds=settings.sync_stale_after_seconds)
-    )
+    return read_sync_status(session, settings.sync_stale_after_seconds)
