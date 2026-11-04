@@ -1,40 +1,28 @@
-"""Кто вошёл и что ему можно.
+"""Кто вошёл и что ему можно — обёртка FastAPI.
 
-Учётки, пароли и выдачу токенов ведёт Supabase Auth (GoTrue). Наше дело —
-проверить подпись пришедшего токена и сопоставить его с профилем: роли
-живут у нас, потому что они про предметную область, а не про вход.
-
-Проверяем **подпись, а не наличие**. Токен без проверки — это утверждение
-пользователя о самом себе; звучит очевидно, но именно так обычно и
-появляется дыра.
+Проверка токена, профиль и роли живут ниже, в ``kitchen.identity`` (их же
+использует MCP). Здесь — только то, что про HTTP: откуда взять токен (заголовок
+или кука), как превратить отказ в 401/403 и зависимости для ручек.
 """
 
 from __future__ import annotations
 
-import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
 from typing import Annotated
 
-import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
+from kitchen import identity
 from kitchen.config import Settings
-from kitchen.db import models
+from kitchen.identity import CurrentUser
 
 # Settings и Session импортируются в РАНТАЙМЕ, а не под TYPE_CHECKING.
 # Из-за `from __future__ import annotations` аннотации становятся строками,
 # и FastAPI не может разрешить типы зависимостей. Симптом коварный: модуль
 # импортируется нормально, а падает сборка приложения — PydanticUserError
 # «is not fully defined».
-
-# Токены GoTrue подписаны HS256 общим секретом. Список закрытый: принимать
-# алгоритм из самого токена — классическая дыра, вплоть до `none`.
-ALGORITHMS = ["HS256"]
-AUDIENCE = "authenticated"
 
 # Имена кук. Фронтенд их не читает — они httpOnly, — но бэкенд и тесты
 # должны называть их из одного места.
@@ -43,18 +31,20 @@ REFRESH_COOKIE = "kp_refresh"
 
 bearer = HTTPBearer(auto_error=False)
 
-
-@dataclass(frozen=True, slots=True)
-class CurrentUser:
-    """Вошедший пользователь."""
-
-    id: uuid.UUID
-    email: str
-    display_name: str
-    roles: frozenset[str]
-
-    def has(self, *roles: str) -> bool:
-        return bool(self.roles & set(roles))
+__all__ = [
+    "ACCESS_COOKIE",
+    "REFRESH_COOKIE",
+    "AuthError",
+    "CurrentUser",
+    "CurrentUserDep",
+    "SessionDep",
+    "current_user",
+    "decode_token",
+    "get_session",
+    "get_settings",
+    "load_user",
+    "require",
+]
 
 
 class AuthError(HTTPException):
@@ -66,61 +56,27 @@ class AuthError(HTTPException):
         )
 
 
-def decode_token(token: str, settings: Settings) -> dict[str, object]:
-    """Разобрать и проверить токен.
+def _http_error(error: identity.IdentityError) -> HTTPException:
+    """401 — не представился, 403 — представился, но нельзя."""
+    if isinstance(error, identity.AccessDeniedError):
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=error.detail)
+    return AuthError(error.detail)
 
-    Причина отказа наружу не уточняется: «подпись не сошлась» и «срок
-    истёк» вместе рассказывают о нашем устройстве больше, чем нужно тому,
-    кто подбирает.
-    """
-    secret = settings.supabase_jwt_secret.get_secret_value()
-    if not secret:
-        # Пустой секрет молча пропускал бы любые токены.
-        raise AuthError("вход не настроен")
+
+def decode_token(token: str, settings: Settings) -> dict[str, object]:
+    """Проверка токена из ``identity`` с отказом в виде HTTP-ошибки."""
     try:
-        payload: dict[str, object] = jwt.decode(
-            token,
-            secret,
-            algorithms=ALGORITHMS,
-            audience=AUDIENCE,
-            options={"require": ["exp", "sub"]},
-        )
-    except jwt.PyJWTError as error:
-        raise AuthError("токен недействителен") from error
-    return payload
+        return identity.decode_token(token, settings)
+    except identity.IdentityError as error:
+        raise _http_error(error) from error
 
 
 def load_user(session: Session, subject: str) -> CurrentUser:
-    """Профиль и роли по идентификатору из токена.
-
-    Действующий токен без профиля — не ошибка пользователя, а недоделка
-    администратора: учётка в Supabase есть, а в нашей таблице её не
-    завели. Отвечаем 403, а не 401: входить он умеет, доступа нет.
-    """
+    """Профиль и роли из ``identity`` с отказом в виде HTTP-ошибки."""
     try:
-        profile_id = uuid.UUID(subject)
-    except ValueError as error:
-        raise AuthError("токен недействителен") from error
-
-    profile = session.scalar(
-        select(models.Profile)
-        .options(selectinload(models.Profile.roles))
-        .where(models.Profile.id == profile_id)
-    )
-    if profile is None:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="профиль не заведён — обратитесь к администратору",
-        )
-    if not profile.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="доступ отключён")
-
-    return CurrentUser(
-        id=profile.id,
-        email=profile.email,
-        display_name=profile.display_name,
-        roles=frozenset(link.role_code for link in profile.roles),
-    )
+        return identity.load_user(session, subject)
+    except identity.IdentityError as error:
+        raise _http_error(error) from error
 
 
 def get_settings(request: Request) -> Settings:
@@ -173,11 +129,9 @@ def require(*roles: str) -> Callable[[CurrentUser], CurrentUser]:
     """
 
     def guard(user: CurrentUserDep) -> CurrentUser:
-        if not user.has(*roles):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"нужна роль: {', '.join(sorted(roles))}",
-            )
-        return user
+        try:
+            return identity.require_roles(user, *roles)
+        except identity.IdentityError as error:
+            raise _http_error(error) from error
 
     return guard

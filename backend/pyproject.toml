@@ -22,6 +22,7 @@ dependencies = [
     "loguru>=0.7",
     "python-multipart>=0.0.17",
     "pyjwt[crypto]>=2.10",
+    "mcp>=2.3.0",
 ]
 
 [project.optional-dependencies]
@@ -185,10 +186,16 @@ name = "Слои: web и worker сверху, domain снизу"
 type = "layers"
 layers = [
     "kitchen.web | kitchen.worker",
+    # MCP-транспорт: web.app монтирует его на /mcp, поэтому он ниже web и не
+    # может импортировать web.auth; роли и проверка токена для него и для
+    # сайта общие и лежат ниже — в kitchen.identity.
+    "kitchen.mcp",
     # Слой приложения карточек: ручки и воркер зовут его, а он — обмен с
     # Google, модель и базу. Решения живут здесь, а не в ручках.
     "kitchen.cards",
     "kitchen.sync | kitchen.llm",
+    # Кто вошёл и какие у него роли (токен -> профиль), без привязки к транспорту.
+    "kitchen.identity",
     "kitchen.db",
     "kitchen.domain",
 ]

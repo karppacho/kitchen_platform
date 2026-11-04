@@ -66,11 +66,19 @@ class Health(BaseModel):
 
 
 @asynccontextmanager
-async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Старт приложения — одна точка настройки журнала процесса api: при
-    старте под uvicorn, а не при импорте модуля (импортируют его и тесты)."""
+    старте под uvicorn, а не при импорте модуля (импортируют его и тесты).
+
+    Смонтированное приложение MCP своего lifespan не получает: менеджер
+    сессий SDK запускаем здесь, и только если MCP включён."""
     configure_logging()
-    yield
+    mcp_server = getattr(app.state, "mcp", None)
+    if mcp_server is None:
+        yield
+        return
+    async with mcp_server.session_manager.run():
+        yield
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -151,7 +159,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def healthz() -> Health:
         return Health(version=config.app_version, release=__version__, env=config.app_env)
 
+    # Монтируем ПОСЛЕДНИМ: Mount на корень перехватывает всё, что не нашлось выше.
+    if config.mcp_enabled:
+        _mount_mcp(app, config)
+
     return app
+
+
+def _mount_mcp(app: FastAPI, config: Settings) -> None:
+    """Подключить MCP (Streamable HTTP, без состояния) на ``/mcp``.
+
+    Импорт здесь, а не вверху: при выключенном флаге SDK не грузится вовсе.
+    """
+    from kitchen.mcp.server import build_mcp, build_mcp_app
+
+    server = build_mcp(app.state.sessions, config)
+    app.state.mcp = server
+    app.mount("/", build_mcp_app(server, config))
 
 
 def _once(build: Callable[[], LabelReader | None]) -> Callable[[], LabelReader | None]:

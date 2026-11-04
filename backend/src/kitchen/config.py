@@ -101,6 +101,18 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     session_cookie_secure: bool = True
 
+    # --- MCP: ИИ по подписке пользователя (ADR-0004) ------------------------
+    # По умолчанию выключен: без флага /mcp в приложении нет вовсе.
+    mcp_enabled: bool = False
+    # Допустимые значения заголовка Host (защита от DNS rebinding): за nginx
+    # это домен платформы. Пусто при включённом MCP — любой запрос отклонится.
+    mcp_allowed_hosts: list[str] = Field(default_factory=list)
+    # Локальный токен разработчика — временный вход, пока нет OAuth (M3); и
+    # после него остаётся только при app_env=development. Пусто — выключен.
+    mcp_dev_token: SecretStr = SecretStr("")
+    # От чьего имени (id профиля) действует токен разработчика.
+    mcp_dev_user_id: str = ""
+
     @property
     def google_timeout(self) -> tuple[int, int]:
         return (self.google_connect_timeout, self.google_read_timeout)
