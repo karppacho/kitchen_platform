@@ -9,14 +9,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Annotated
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr
 
+from kitchen import gotrue
 from kitchen.config import Settings
+from kitchen.gotrue import GOTRUE_TIMEOUT as GOTRUE_TIMEOUT
+from kitchen.gotrue import Tokens
 from kitchen.web.api import Me
 from kitchen.web.auth import (
     ACCESS_COOKIE,
@@ -33,19 +35,11 @@ router = APIRouter(prefix="/api/auth", tags=["вход"])
 # Продление живёт месяц. Дольше — значит держать пропуск в браузере кухни
 # бессрочно; короче — заставлять шефа вводить пароль каждую неделю.
 REFRESH_MAX_AGE = 30 * 24 * 3600
-GOTRUE_TIMEOUT = 10.0
 
 
 class LoginBody(BaseModel):
     email: EmailStr
     password: str
-
-
-@dataclass(frozen=True, slots=True)
-class Tokens:
-    access: str
-    refresh: str
-    expires_in: int
 
 
 def get_http(request: Request) -> httpx.Client:
@@ -64,68 +58,23 @@ def token_request(
     payload: dict[str, str],
     denied: str,
 ) -> Tokens:
-    """Сходить в GoTrue за парой токенов.
+    """Сходить в GoTrue за парой токенов (запрос и разбор — ``kitchen.gotrue``).
 
-    Три исхода разделены намеренно: спутать любые два значит заставить
-    человека перебирать пароли, когда чинить нужно не пароль.
-
-    - 400 — отказ по существу. Так GoTrue отвечает и на неверную пару
-      логин/пароль, и на протухший или уже использованный refresh-токен
-      (``invalid_grant``). Только этот код даёт 401 наружу.
-    - 401 и 403 — это не GoTrue, а шлюз Supabase перед ней: так он
-      отвечает на пустой или неверный ``SUPABASE_ANON_KEY``. Поломка
-      конфигурации, 502 «Вход настроен неверно».
-    - всё остальное, обрыв и таймаут — служба недоступна, 502.
+    Исходы переводятся в ответы так: отказ по существу — 401 (только он),
+    поломка настройки и недоступность службы — 502 с разными текстами.
     """
-    anon_key = settings.supabase_anon_key.get_secret_value()
-    if not anon_key:
-        # Идти в сеть незачем: шлюз ответит 401, а ответ заранее известен.
-        raise _misconfigured()
     try:
-        reply = client.post(
-            f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
-            params={"grant_type": grant_type},
-            json=payload,
-            headers={"apikey": anon_key},
-            timeout=GOTRUE_TIMEOUT,
-        )
-    except httpx.HTTPError as error:
-        raise _unavailable() from error
-
-    if reply.status_code == 400:
-        raise AuthError(denied)
-    if reply.status_code in (401, 403):
-        raise _misconfigured()
-    if reply.status_code != 200:
-        raise _unavailable()
-
-    # На 200 GoTrue обязана прислать JSON-объект, но «обязана» — не «пришлёт»:
-    # nginx-заглушка, пустое тело или обрыв на полпути дают то же самое 200 с
-    # мусором. Разбор тела — тоже часть недоступности службы, а не наша
-    # внутренняя ошибка.
-    try:
-        body = reply.json()
-    except ValueError as error:
-        raise _unavailable() from error
-    if not isinstance(body, dict):
-        raise _unavailable()
-
-    access, refresh = body.get("access_token"), body.get("refresh_token")
-    if not isinstance(access, str) or not isinstance(refresh, str):
-        raise _unavailable()
-    expires = body.get("expires_in")
-    return Tokens(access, refresh, expires if isinstance(expires, int) else 3600)
-
-
-def _unavailable() -> HTTPException:
-    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Служба входа не отвечает")
+        return gotrue.token_request(client, settings, grant_type, payload, denied)
+    except gotrue.GoTrueError as error:
+        if error.kind == "denied":
+            raise AuthError(error.message) from error
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=error.message
+        ) from error
 
 
 def _misconfigured() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_502_BAD_GATEWAY,
-        detail="Вход настроен неверно: обратитесь к администратору",
-    )
+    return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=gotrue.MISCONFIGURED)
 
 
 def set_cookies(response: Response, tokens: Tokens, settings: Settings) -> None:

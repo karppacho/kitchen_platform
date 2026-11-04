@@ -27,7 +27,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import anyio.to_thread
 from mcp.server.auth.provider import (
@@ -92,7 +92,7 @@ def redirect_allowed(uri: str, settings: Settings) -> bool:
     # ``..`` в пути — приём обхода префиксной проверки.
     if parts.username is not None or parts.password is not None or parts.fragment:
         return False
-    if ".." in parts.path.split("/"):
+    if ".." in unquote(parts.path).split("/"):
         return False
     if (
         settings.mcp_allow_loopback_redirects
@@ -297,6 +297,7 @@ class KitchenOAuthProvider:
                     models.McpOauthCode.client_id == client.client_id,
                     models.McpOauthCode.issued_at.is_not(None),
                     models.McpOauthCode.used_at.is_(None),
+                    models.McpOauthCode.expires_at > now,
                     models.McpOauthCode.subject.is_not(None),
                 )
                 .values(used_at=now)

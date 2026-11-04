@@ -1,12 +1,8 @@
-"""Вход по паролю через GoTrue — тем же путём, что ``POST /api/auth/login`` сайта.
+"""Вход по паролю через GoTrue для страницы согласия OAuth.
 
-Код ``web/auth_api.py`` сюда не импортируется: ``kitchen.web`` стоит выше
-``kitchen.mcp`` в слоях, а его ``token_request`` ещё и говорит на языке FastAPI
-(``HTTPException``). Поэтому запрос тот же, исходы те же, тексты те же, а
-исключение — своё. Три исхода разведены намеренно, как на сайте: отказ по
-существу (400), поломка настройки (шлюз ответил 401/403 или нет ключа) и
-недоступность службы — спутать их значит заставить человека перебирать пароли,
-когда чинить нужно не пароль.
+Сам запрос и разбор ответа — общие с сайтом, в ``kitchen.gotrue``; здесь только
+перевод его отказов в ``LoginError`` (текст для человека и код ответа страницы)
+и фабрика клиента, которую тесты подменяют.
 """
 
 from __future__ import annotations
@@ -15,13 +11,22 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from kitchen import gotrue
+from kitchen.gotrue import GOTRUE_TIMEOUT, MISCONFIGURED, UNAVAILABLE
+
 if TYPE_CHECKING:
     from kitchen.config import Settings
 
-GOTRUE_TIMEOUT = 10.0
 DENIED = "Неверная почта или пароль"
-UNAVAILABLE = "Служба входа не отвечает"
-MISCONFIGURED = "Вход настроен неверно: обратитесь к администратору"
+
+__all__ = [
+    "DENIED",
+    "MISCONFIGURED",
+    "UNAVAILABLE",
+    "LoginError",
+    "make_http_client",
+    "password_login",
+]
 
 
 class LoginError(Exception):
@@ -40,32 +45,11 @@ def make_http_client() -> httpx.Client:
 
 def password_login(client: httpx.Client, settings: Settings, email: str, password: str) -> str:
     """Войти по паре почта/пароль и вернуть access-токен GoTrue (его ``sub`` — id профиля)."""
-    anon_key = settings.supabase_anon_key.get_secret_value()
-    if not anon_key:
-        # Идти в сеть незачем: шлюз ответит 401, а ответ заранее известен.
-        raise LoginError(MISCONFIGURED, 502)
     try:
-        reply = client.post(
-            f"{settings.supabase_url.rstrip('/')}/auth/v1/token",
-            params={"grant_type": "password"},
-            json={"email": email, "password": password},
-            headers={"apikey": anon_key},
-            timeout=GOTRUE_TIMEOUT,
+        tokens = gotrue.token_request(
+            client, settings, "password", {"email": email, "password": password}, denied=DENIED
         )
-    except httpx.HTTPError as error:
-        raise LoginError(UNAVAILABLE, 502) from error
-
-    if reply.status_code == 400:
-        raise LoginError(DENIED, 401)
-    if reply.status_code in (401, 403):
-        raise LoginError(MISCONFIGURED, 502)
-    if reply.status_code != 200:
-        raise LoginError(UNAVAILABLE, 502)
-    try:
-        body = reply.json()
-    except ValueError as error:
-        raise LoginError(UNAVAILABLE, 502) from error
-    access = body.get("access_token") if isinstance(body, dict) else None
-    if not isinstance(access, str):
-        raise LoginError(UNAVAILABLE, 502)
-    return access
+    except gotrue.GoTrueError as error:
+        # Как на сайте: только отказ по существу — 401, остальное — 502.
+        raise LoginError(error.message, 401 if error.kind == "denied" else 502) from error
+    return tokens.access

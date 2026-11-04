@@ -831,3 +831,47 @@ def test_ids_are_uuid_strings(client: TestClient, sessions: sessionmaker[Session
         subjects = set(session.scalars(select(models.McpOauthToken.subject)))
     assert subjects == {PROFILE_ID}
     assert isinstance(next(iter(subjects)), uuid.UUID)
+
+
+def test_expired_code_is_not_spent_even_if_sdk_check_is_bypassed(
+    client: TestClient, sessions: sessionmaker[Session]
+) -> None:
+    """Вторая линия защиты: погашение само проверяет срок, а не полагается на SDK.
+
+    Провайдер вызывается напрямую, в обход ``/token``: код истёк, но не погашен.
+    """
+    import asyncio
+
+    from mcp.server.auth.provider import AuthorizationCode, TokenError
+    from pydantic import AnyUrl
+
+    from kitchen.mcp.oauth import KitchenOAuthProvider
+
+    info = register(client)
+    _verifier, challenge = pkce()
+    code = get_code(client, info, challenge)
+    with sessions.begin() as session:
+        session.execute(
+            update(models.McpOauthCode).values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+    provider = KitchenOAuthProvider(sessions, _settings(), resource_url=RESOURCE)
+
+    async def attempt() -> None:
+        registered = await provider.get_client(info["client_id"])
+        assert registered is not None
+        stale = AuthorizationCode(
+            code=code,
+            scopes=[],
+            expires_at=datetime.now(UTC).timestamp() + 600,  # как будто срок ещё не вышел
+            client_id=info["client_id"],
+            code_challenge=challenge,
+            redirect_uri=AnyUrl(REDIRECT),
+            redirect_uri_provided_explicitly=True,
+        )
+        await provider.exchange_authorization_code(registered, stale)
+
+    with pytest.raises(TokenError):
+        asyncio.run(attempt())
+    with sessions() as session:
+        assert session.scalar(select(models.McpOauthToken)) is None
+        assert session.scalar(select(models.McpOauthCode.used_at)) is None

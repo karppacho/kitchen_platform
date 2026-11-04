@@ -159,3 +159,42 @@ def test_mcp_outside_development_requires_public_url() -> None:
 
 def test_public_url_loses_trailing_slash() -> None:
     assert _settings(mcp_public_url="https://x.test/").mcp_public_url == "https://x.test"
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "https://chatgpt.com/connector/oauth/%2e%2e/%2E%2E/x",
+        "https://chatgpt.com/connector/oauth/%2E%2E/x",
+        "https://chatgpt.com/connector/oauth/a%2f..%2fx",
+    ],
+)
+def test_encoded_dot_segments_are_refused(uri: str) -> None:
+    """Браузер превращает ``%2e%2e`` в ``..``: префиксная проверка так не обходится."""
+    assert not redirect_allowed(uri, _settings())
+
+
+# ---------------------------------------------------------------------------
+# Одна копия входа в GoTrue
+# ---------------------------------------------------------------------------
+def test_site_and_mcp_login_share_one_gotrue_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Сайт и MCP ходят в GoTrue одной функцией: правка тайм-аута или разбора касается обоих."""
+    from kitchen import gotrue as shared
+    from kitchen.web import auth_api
+
+    seen: list[str] = []
+
+    def fake(_client, _settings, grant_type, _payload, denied):  # type: ignore[no-untyped-def]
+        seen.append(grant_type)
+        raise shared.GoTrueError("denied", denied)
+
+    monkeypatch.setattr(shared, "token_request", fake)
+    client = httpx.Client(transport=httpx.MockTransport(lambda _r: httpx.Response(500)))
+
+    with pytest.raises(gotrue.LoginError):
+        gotrue.password_login(client, _settings(), "a@b.c", "pw")
+    with pytest.raises(Exception, match="Сессия истекла"):
+        auth_api.token_request(
+            client, _settings(), "refresh_token", {}, denied="Сессия истекла, войдите заново"
+        )
+    assert seen == ["password", "refresh_token"]
