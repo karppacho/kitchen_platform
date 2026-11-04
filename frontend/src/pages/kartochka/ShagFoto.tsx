@@ -37,12 +37,23 @@ function tekstOtkazaUdaleniya(oshibka: unknown): string {
  */
 export function ShagFoto({ chernovik }: { chernovik: Draft }) {
   const upravlenie = useShag(chernovik)
-  const zagruzki = {
-    package: useZagruzkaSnimka(chernovik, 'package'),
-    before: useZagruzkaSnimka(chernovik, 'before'),
-    after: useZagruzkaSnimka(chernovik, 'after'),
-  }
   const udalenie = useUdalenieFoto()
+  // Новое фото слота легло — прежний отказ удаления уже не о нём.
+  const posleZagruzki = { posle: udalenie.reset }
+  const zagruzki = {
+    package: useZagruzkaSnimka(chernovik, 'package', posleZagruzki),
+    before: useZagruzkaSnimka(chernovik, 'before', posleZagruzki),
+    after: useZagruzkaSnimka(chernovik, 'after', posleZagruzki),
+  }
+  // Слот, куда вернуть фокус, когда фото убрано: кнопка «Убрать» исчезла
+  // вместе с фото, и фокус иначе упал бы на страницу.
+  const [fokusVSlot, zadatFokusVSlot] = useState<VidProdukta | null>(null)
+  const slotyRef = useRef<Partial<Record<VidProdukta, HTMLFieldSetElement | null>>>({})
+  useEffect(() => {
+    if (fokusVSlot === null || udalenie.isPending) return
+    slotyRef.current[fokusVSlot]?.querySelector<HTMLInputElement>('input[type="file"]')?.focus()
+    zadatFokusVSlot(null)
+  }, [fokusVSlot, udalenie.isPending])
   const idyot = udalenie.isPending || SLOTY.some(({ vid }) => zagruzki[vid].idyot)
   const estFoto = SLOTY.some(({ vid }) => chernovik.photos[vid])
 
@@ -61,7 +72,13 @@ export function ShagFoto({ chernovik }: { chernovik: Draft }) {
       {SLOTY.map(({ vid, nazvanie, podpisi }) => {
         const ubiraem = udalenie.variables?.vid === vid
         return (
-          <fieldset key={vid} className="kartochka-gruppa">
+          <fieldset
+            key={vid}
+            className="kartochka-gruppa"
+            ref={(uzel) => {
+              slotyRef.current[vid] = uzel
+            }}
+          >
             <legend>{nazvanie}</legend>
             <ZagruzkaSnimka
               chernovik={chernovik}
@@ -76,12 +93,18 @@ export function ShagFoto({ chernovik }: { chernovik: Draft }) {
               <UbratFoto
                 nazvanie={nazvanie}
                 zablokirovano={zagruzki[vid].idyot || udalenie.isPending}
+                zagruzhaetsya={zagruzki[vid].idyot}
                 oshibka={ubiraem && udalenie.isError ? tekstOtkazaUdaleniya(udalenie.error) : null}
                 onUbrat={() =>
                   udalenie.mutate(
                     { id: chernovik.id, vid },
                     // Превью этой загрузки — уже не о том, что в черновике.
-                    { onSuccess: () => zagruzki[vid].sbrosit() },
+                    {
+                      onSuccess: () => {
+                        zagruzki[vid].sbrosit()
+                        zadatFokusVSlot(vid)
+                      },
+                    },
                   )
                 }
               />
@@ -101,11 +124,14 @@ export function ShagFoto({ chernovik }: { chernovik: Draft }) {
 function UbratFoto({
   nazvanie,
   zablokirovano,
+  zagruzhaetsya,
   oshibka,
   onUbrat,
 }: {
   nazvanie: string
   zablokirovano: boolean
+  /** Слот грузится: убирать нечего, пока не легло новое фото. */
+  zagruzhaetsya: boolean
   oshibka: string | null
   onUbrat: () => void
 }) {
@@ -135,6 +161,7 @@ function UbratFoto({
             <button
               type="button"
               className="kartochka-opasnaya"
+              disabled={zablokirovano}
               onClick={() => {
                 sprosit(false)
                 onUbrat()
@@ -143,12 +170,14 @@ function UbratFoto({
               Да, убрать
             </button>
           </div>
+          {zagruzhaetsya && <p className="kartochka-poyasnenie">Идёт загрузка…</p>}
         </div>
       ) : (
         <div className="kartochka-knopki">
           <button type="button" ref={ubrat} disabled={zablokirovano} onClick={() => sprosit(true)}>
             Убрать
           </button>
+          {zagruzhaetsya && <span className="kartochka-poyasnenie">Идёт загрузка…</span>}
         </div>
       )}
       {oshibka !== null && (
