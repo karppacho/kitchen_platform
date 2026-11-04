@@ -113,12 +113,13 @@ def test_empty_dev_token_setting_lets_nobody_in(
 
 
 def test_dev_token_lists_tools(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Пока инструментов нет (заглушки M2/M4): список пуст, но ответ настоящий."""
+    """Токен разработчика видит список инструментов (набор растёт с задачами)."""
     with _build(monkeypatch, _settings()) as client:
         reply = client.post("/mcp", content=_rpc("tools/list"), headers=_bearer(DEV_TOKEN))
 
     assert reply.status_code == 200
-    assert _result(reply)["tools"] == []
+    names = {tool["name"] for tool in _result(reply)["tools"]}
+    assert {"chernovik_po_etiketke", "eto_on"} <= names
 
 
 def test_foreign_host_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
