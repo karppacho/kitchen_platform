@@ -29,7 +29,7 @@ HEADERS = {"Accept": "application/json, text/event-stream", "Content-Type": "app
 
 def _settings(**over: Any) -> Settings:
     base: dict[str, Any] = {
-        "app_env": "test",
+        "app_env": "development",
         "mcp_enabled": True,
         "mcp_allowed_hosts": [HOST],
         "mcp_dev_token": DEV_TOKEN,

@@ -107,8 +107,26 @@ class Settings(BaseSettings):
     # Допустимые значения заголовка Host (защита от DNS rebinding): за nginx
     # это домен платформы. Пусто при включённом MCP — любой запрос отклонится.
     mcp_allowed_hosts: list[str] = Field(default_factory=list)
-    # Локальный токен разработчика — временный вход, пока нет OAuth (M3); и
-    # после него остаётся только при app_env=development. Пусто — выключен.
+    # Адрес платформы снаружи (https://домен, без слеша на конце): издатель
+    # OAuth и адрес ресурса в метаданных. Без него вне разработки MCP не
+    # поднимется — открытым или глухим молча он быть не должен.
+    mcp_public_url: str = ""
+    # Куда OAuth-клиентам можно возвращать человека: точный адрес или префикс
+    # со звёздочкой в конце. Остальные адреса не регистрируются и не
+    # открываются, даже если клиент их назвал.
+    mcp_redirect_allowlist: list[str] = Field(
+        default_factory=lambda: [
+            "https://claude.ai/api/mcp/auth_callback",
+            "https://claude.com/api/mcp/auth_callback",
+            "https://chatgpt.com/connector_platform_oauth_redirect",
+            "https://chatgpt.com/connector/oauth/*",
+        ]
+    )
+    # Claude Code принимает ответ на локальный порт (localhost/127.0.0.1/[::1],
+    # любой порт и путь, только http).
+    mcp_allow_loopback_redirects: bool = True
+    # Локальный токен разработчика: работает только при app_env=development
+    # (в бою его не принимают, даже если задан). Пусто — выключен.
     mcp_dev_token: SecretStr = SecretStr("")
     # От чьего имени (id профиля) действует токен разработчика.
     mcp_dev_user_id: str = ""
@@ -116,6 +134,11 @@ class Settings(BaseSettings):
     @property
     def google_timeout(self) -> tuple[int, int]:
         return (self.google_connect_timeout, self.google_read_timeout)
+
+    @field_validator("mcp_public_url")
+    @classmethod
+    def strip_public_url(cls, value: str) -> str:
+        return value.strip().rstrip("/")
 
     @field_validator("drive_cards_folder_id")
     @classmethod

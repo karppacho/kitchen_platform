@@ -1,10 +1,10 @@
 """Доступ к MCP: кто пришёл с запросом.
 
 Единственное место, которое знает, как проверяется вход. ``server.py`` лишь
-вызывает :func:`build_access` и подставляет результат в ``MCPServer``. Сегодня
-здесь временный вход «токен разработчика из настроек»; M3 заменит его
-своим OAuth 2.1, правя только этот файл (провайдер, страницы входа через
-``install``, субъект токена — id профиля).
+вызывает :func:`build_access` и подставляет результат в ``MCPServer``. Вход —
+свой OAuth 2.1 (``oauth.py``: провайдер SDK, ``oauth_login.py``: страница входа
+через ``install``); субъект токена — id профиля. Токен разработчика из
+настроек остаётся только при ``app_env=development``.
 """
 
 from __future__ import annotations
@@ -15,8 +15,11 @@ from typing import TYPE_CHECKING, Any
 
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, OAuthAuthorizationServerProvider, TokenVerifier
-from mcp.server.auth.settings import AuthSettings
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from pydantic import AnyHttpUrl
+
+from kitchen.mcp.oauth import KitchenOAuthProvider
+from kitchen.mcp.oauth_login import LoginPages
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -68,15 +71,50 @@ class DevTokenVerifier:
         return AccessToken(token=token, client_id=DEV_CLIENT_ID, scopes=[], subject=self._subject)
 
 
+# Путь MCP внутри приложения (тот же, что ``server.MCP_PATH``; здесь свой, потому что
+# ``server`` импортирует этот модуль).
+_RESOURCE_PATH = "/mcp"
+
+
 def build_access(settings: Settings, sessions: sessionmaker[Session]) -> McpAccess:
-    """Выбрать проверку доступа. ``sessions`` понадобится OAuth (M3): токены в базе."""
-    auth_settings = AuthSettings(
-        issuer_url=AnyHttpUrl(_LOCAL_URL),
-        resource_server_url=AnyHttpUrl(_LOCAL_URL),
-        # Токен разработчика не привязан к ресурсу; с OAuth (M3) включить True.
-        validate_token_resource=False,
+    """Выбрать проверку доступа.
+
+    С ``MCP_PUBLIC_URL`` — свой OAuth 2.1 (``oauth.py``) и страница входа; токен
+    разработчика в нём принимается только при ``app_env=development``. Без адреса
+    остаётся только токен разработчика, и только в разработке: вне её сервер без
+    адреса не поднимается (открытым он быть не должен, а глухим молча — не стоит).
+    """
+    dev = DevTokenVerifier(settings) if settings.app_env == "development" else None
+    public_url = settings.mcp_public_url
+    if not public_url:
+        if dev is None:
+            raise RuntimeError(
+                "MCP включён, но MCP_PUBLIC_URL не задан: без адреса платформы OAuth "
+                "не собрать, а токен разработчика вне разработки не принимается"
+            )
+        return McpAccess(
+            auth_settings=AuthSettings(
+                issuer_url=AnyHttpUrl(_LOCAL_URL),
+                resource_server_url=AnyHttpUrl(_LOCAL_URL),
+                # Токен разработчика не привязан к ресурсу.
+                validate_token_resource=False,
+            ),
+            token_verifier=dev,
+        )
+
+    resource_url = f"{public_url}{_RESOURCE_PATH}"
+    provider = KitchenOAuthProvider(sessions, settings, resource_url=resource_url, dev_verifier=dev)
+    return McpAccess(
+        auth_settings=AuthSettings(
+            issuer_url=AnyHttpUrl(public_url),
+            resource_server_url=AnyHttpUrl(resource_url),
+            validate_token_resource=True,
+            client_registration_options=ClientRegistrationOptions(enabled=True),
+            revocation_options=RevocationOptions(enabled=True),
+        ),
+        auth_server_provider=provider,
+        install=LoginPages(provider, settings).install,
     )
-    return McpAccess(auth_settings=auth_settings, token_verifier=DevTokenVerifier(settings))
 
 
 def current_subject() -> str | None:
