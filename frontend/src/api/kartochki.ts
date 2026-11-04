@@ -6,7 +6,7 @@ import {
   type QueryClient,
   type UseQueryResult,
 } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { ApiError, api } from './client'
 import type {
@@ -167,8 +167,10 @@ function vremyaPravki(chernovik: Draft): number {
  *
  * Ответ старше того, что уже лежит, не ложится: три фото продукта грузятся
  * разом, и опоздавший ответ первой загрузки (без второго фото) иначе
- * откатил бы экран. Сервер ставит время правки под блокировкой строки —
- * правки одного черновика идут по времени по очереди.
+ * откатил бы экран. Время правки база ставит как время начала транзакции
+ * (`now()`): правки одного черновика сервер ведёт по очереди под блокировкой
+ * строки, но время у позже начатой может оказаться раньше — поэтому оно
+ * лишь отсекает заведомо устаревший ответ, а не упорядочивает правки.
  */
 async function polozhitChernovik(queries: QueryClient, chernovik: Draft): Promise<void> {
   await ostanovitPerechityvanie(queries)
@@ -246,6 +248,25 @@ export type ZagruzkaFoto = { id: string; vid: VidFoto; foto: Blob }
 
 function pauza(ms: number): Promise<void> {
   return new Promise((gotovo) => setTimeout(gotovo, ms))
+}
+
+/** Пауза, которую можно оборвать: ушли со страницы — ждать больше некого. */
+function pauzaPoka(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((gotovo, otkaz) => {
+    if (signal.aborted) {
+      otkaz(new DOMException('Отправка прервана', 'AbortError'))
+      return
+    }
+    const prervat = () => {
+      clearTimeout(taimer)
+      otkaz(new DOMException('Отправка прервана', 'AbortError'))
+    }
+    const taimer = setTimeout(() => {
+      signal.removeEventListener('abort', prervat)
+      gotovo()
+    }, ms)
+    signal.addEventListener('abort', prervat, { once: true })
+  })
 }
 
 /**
@@ -383,11 +404,12 @@ export type KhodOtpravki = { popytka: number; zhdyomZapisi: boolean }
 
 /** Одна попытка отправки. Ответ 200, оборванный посреди тела, — это обрыв
  *  связи, а не отказ: строка, скорее всего, легла, и повтор её покажет. */
-async function popytkaOtpravki(id: string): Promise<Submitted> {
+async function popytkaOtpravki(id: string, signal: AbortSignal): Promise<Submitted> {
   try {
     return await api<Submitted>(`/cards/drafts/${encodeURIComponent(id)}/submit`, {
       method: 'POST',
       srok: SROK_OTPRAVKI,
+      signal,
     })
   } catch (oshibka) {
     if (oshibka instanceof ApiError && oshibka.status >= 200 && oshibka.status < 300) {
@@ -406,35 +428,74 @@ async function popytkaOtpravki(id: string): Promise<Submitted> {
  * минут» (N — предел отметки, до 17): живую отправку от умершей он не
  * отличит, а мы — отличим: была попытка без ответа. Тогда ждём её по 5 с,
  * до шести раз: закончилась — повтор отдаёт её строку (`already_written`);
- * упала и сняла отметку — повтор пишет обычным путём. Только потом — текст
- * сервера.
+ * упала и сняла отметку — повтор пишет обычным путём. Не дождались — один
+ * запрос состояния (`otpravlenaLi`): строка могла лечь уже после последней
+ * проверки. Только потом — текст сервера.
+ *
+ * Ушли со страницы (`signal`) — ни паузы, ни повторов: ждать некого, а при
+ * возврате отправка начнётся с чистого счёта.
  */
 async function otpravitSPovtorami(
   id: string,
   onKhod: (khod: KhodOtpravki) => void,
+  signal: AbortSignal,
 ): Promise<Submitted> {
   let obryvov = 0
   let ozhidaniy = 0
   for (;;) {
     try {
-      return await popytkaOtpravki(id)
+      return await popytkaOtpravki(id, signal)
     } catch (oshibka) {
-      if (!(oshibka instanceof ApiError)) throw oshibka
+      if (!(oshibka instanceof ApiError) || signal.aborted) throw oshibka
       if (oshibka.status === 0 && obryvov < POVTOROV_OTPRAVKI) {
         obryvov += 1
         onKhod({ popytka: obryvov + 1, zhdyomZapisi: false })
-        await pauza(PAUZA_PERED_POVTOROM)
+        await pauzaPoka(PAUZA_PERED_POVTOROM, signal)
         continue
       }
-      const svoyaPishet = oshibka.status === 409 && oshibka.row === null && obryvov > 0
+      const svoyaPishet = obryvov > 0 && eSvoyaOtpravka(oshibka)
       if (svoyaPishet && ozhidaniy < OZHIDANIY_ZAPISI) {
         ozhidaniy += 1
         onKhod({ popytka: obryvov + 1, zhdyomZapisi: true })
-        await pauza(PAUZA_OZHIDANIYA_ZAPISI)
+        await pauzaPoka(PAUZA_OZHIDANIYA_ZAPISI, signal)
         continue
+      }
+      if (svoyaPishet && (await otpravlenaLi(id, signal))) {
+        try {
+          return await popytkaOtpravki(id, signal)
+        } catch {
+          // Строки не дали — остаётся прежний отказ: он и объяснит.
+        }
       }
       throw oshibka
     }
+  }
+}
+
+/**
+ * Отказ «эта же отправка ещё идёт». По коду сервера — `submit_running`;
+ * ответ без кода (старый сервер) — по прежнему признаку: 409 без строки.
+ * `recognition_running` и дубль (с `row`) — не она.
+ */
+function eSvoyaOtpravka(oshibka: ApiError): boolean {
+  if (oshibka.code !== null) return oshibka.code === 'submit_running'
+  return oshibka.status === 409 && oshibka.row === null
+}
+
+/**
+ * Один запрос состояния после ожидания: черновик ушёл из «активных» (его
+ * нет или он другой) — значит, строка легла, и повторная отправка вернёт её
+ * номер. Не ответило — считаем, что нет: останется текст сервера.
+ */
+async function otpravlenaLi(id: string, signal: AbortSignal): Promise<boolean> {
+  try {
+    const tekushchiy = await api<Draft | null>('/cards/drafts/current', {
+      signal,
+      srok: SROK_CHTENIYA,
+    })
+    return tekushchiy === null || tekushchiy.id !== id || tekushchiy.status !== 'active'
+  } catch {
+    return false
   }
 }
 
@@ -463,9 +524,16 @@ export function useOtpravka() {
   const queries = useQueryClient()
   const [khod, zadatKhod] = useState(NACHALO_OTPRAVKI)
   const idyot = useRef(false)
+  // Оборвать ожидание, когда повар ушёл со страницы: иначе оно шло бы дальше,
+  // а при возврате второй круг дал бы ложное «попробуйте через N минут».
+  const ostanovka = useRef<AbortController | null>(null)
+  useEffect(() => () => ostanovka.current?.abort(), [])
   const mutatsiya = useMutation({
     onMutate: () => zadatKhod(NACHALO_OTPRAVKI),
-    mutationFn: (chernovik: Draft) => otpravitSPovtorami(chernovik.id, zadatKhod),
+    mutationFn: (chernovik: Draft) => {
+      ostanovka.current = new AbortController()
+      return otpravitSPovtorami(chernovik.id, zadatKhod, ostanovka.current.signal)
+    },
     onSuccess: () => {
       void queries.invalidateQueries({ queryKey: KLYUCH_CHERNOVIKA })
       void queries.invalidateQueries({ queryKey: ['reconciliation'] })

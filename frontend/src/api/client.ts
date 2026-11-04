@@ -8,6 +8,9 @@ export type PodrobnostiOtkaza = {
   missing?: readonly string[] | null
   reason?: string | null
   errors?: Readonly<Record<string, string>> | null
+  /** Исход отправки карточки кодом (`duplicate`, `submit_running`…): по нему
+   *  экран выбирает действие, а не по тексту. Старый сервер его не шлёт. */
+  code?: string | null
 }
 
 export class ApiError extends Error {
@@ -16,6 +19,7 @@ export class ApiError extends Error {
   readonly missing: readonly string[] | null
   readonly reason: string | null
   readonly errors: Readonly<Record<string, string>> | null
+  readonly code: string | null
 
   constructor(
     readonly status: number,
@@ -29,6 +33,7 @@ export class ApiError extends Error {
     this.missing = podrobnosti.missing ?? null
     this.reason = podrobnosti.reason ?? null
     this.errors = podrobnosti.errors ?? null
+    this.code = podrobnosti.code ?? null
   }
 }
 
@@ -136,9 +141,10 @@ async function razobratOtkaz(otvet: Response, zapas = NE_POLUCHILOS): Promise<Ot
       missing?: unknown
       reason?: unknown
       errors?: unknown
+      code?: unknown
     }
     if (typeof telo.detail === 'string') {
-      const { field, row, missing, reason, errors } = telo
+      const { field, row, missing, reason, errors, code } = telo
       return {
         tekst: telo.detail,
         podrobnosti: {
@@ -148,6 +154,7 @@ async function razobratOtkaz(otvet: Response, zapas = NE_POLUCHILOS): Promise<Ot
             Array.isArray(missing) && missing.every((m) => typeof m === 'string') ? missing : null,
           reason: typeof reason === 'string' ? reason : null,
           errors: oshibkiPoPolyam(errors),
+          code: typeof code === 'string' ? code : null,
         },
       }
     }

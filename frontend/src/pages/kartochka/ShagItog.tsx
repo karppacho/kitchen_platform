@@ -33,6 +33,23 @@ const SERVER_NE_OTVETIL =
   'Сервер не ответил. Черновик сохранён — нажмите «Отправить ещё раз» через минуту: ' +
   'второй строки в таблице не будет.'
 
+/** Коды отказов, после которых повтор не поможет: «сообщите администратору». */
+const KODY_ADMINISTRATORA: readonly string[] = ['not_configured', 'writing_closed', 'write_forbidden']
+
+/** Дубль названия в листе. Старый сервер кода не шлёт — тогда по прежнему
+ *  признаку: 409 со строкой листа. */
+function eDubl(otkaz: ApiError): boolean {
+  if (otkaz.code !== null) return otkaz.code === 'duplicate'
+  return otkaz.status === 409 && otkaz.row !== null
+}
+
+/** Нужен администратор. Без кода (старый сервер) — запасной путь по тексту:
+ *  503 с просьбой «сообщите». */
+function nuzhenAdministrator(otkaz: ApiError): boolean {
+  if (otkaz.code !== null) return KODY_ADMINISTRATORA.includes(otkaz.code)
+  return otkaz.status === 503 && otkaz.message.includes('сообщите')
+}
+
 /**
  * Что сказать об отказе отправки. Текст сервера написан для повара — что
  * случилось и что делать: «таблица занята», «колонки сдвинулись», «черновик
@@ -51,8 +68,8 @@ function tekstOtkaza(oshibka: unknown): string {
  * Чего не хватает — видно сразу, с переходом к шагу, где это заполняется;
  * пока не хватает, отправить нельзя. Отказ сервера — его текстом, а главное
  * действие — по исходу: дубль названия — «Изменить название» (повтор дал бы
- * тот же отказ); колонки съехали или запись не настроена — главного нет,
- * нужен шеф или администратор, повтор — простой кнопкой; прочее («таблица
+ * тот же отказ); запись не настроена, закрыта или нет прав — главного нет,
+ * нужен администратор, повтор — простой кнопкой (исход — по полю code отказа); прочее («таблица
  * занята», «черновик сохранён») — «Отправить ещё раз». Пока идёт отправка,
  * все кнопки ждут.
  */
@@ -64,12 +81,10 @@ export function ShagItog({ chernovik, otpravka }: { chernovik: Draft; otpravka: 
   const otkaz = otpravka.nachataV >= pokazan ? otpravka.oshibka : null
   const otkazPoPolyam = otkaz instanceof ApiError && otkaz.missing ? otkaz : null
   const nedostayot = otkazPoPolyam?.missing ?? chernovik.missing
-  const dubl = otkaz instanceof ApiError && otkaz.status === 409 && otkaz.row !== null
-  // Колонки съехали, запись не настроена или закрыта: сервер просит
-  // сообщить шефу или администратору. Различаем по его тексту, пока у отказа
-  // нет своего кода.
-  const nuzhenChelovek =
-    otkaz instanceof ApiError && otkaz.status === 503 && otkaz.message.includes('сообщите')
+  const dubl = otkaz instanceof ApiError && eDubl(otkaz)
+  // Запись не настроена, закрыта или нет прав: повтор не поможет, нужен
+  // администратор. Исход — по коду отказа.
+  const nuzhenChelovek = otkaz instanceof ApiError && nuzhenAdministrator(otkaz)
   const zanyato = otpravka.idyot || upravlenie.zanyato
 
   const perejti = (shag: Shag) => upravlenie.dalee({}, shag)

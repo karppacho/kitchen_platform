@@ -237,7 +237,7 @@ async function prodolzhit(
 ) {
   chernovik = nachalo
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  render(
+  const { unmount } = render(
     <QueryClientProvider client={queries}>
       <MemoryRouter initialEntries={['/cards']}>
         <App />
@@ -245,7 +245,7 @@ async function prodolzhit(
     </QueryClientProvider>,
   )
   await polzovatel.click(await screen.findByRole('button', { name: 'Продолжить' }))
-  return { queries }
+  return { queries, unmount }
 }
 
 /** Ответ, который держит тест: отпускается, когда тесту нужно. */
@@ -947,4 +947,248 @@ test('описание: отказ у поля (422) и «Назад» унос�
 
   expect(await screen.findByText('Шаг 7 из 9')).toBeInTheDocument()
   expect(pravki.at(-1)).toEqual({ description: 'Тянется', step: 'photos' })
+})
+
+// ---------------------------------------------------------------------------
+// Исход отправки — по коду отказа (договор сервера: поле `code`)
+// ---------------------------------------------------------------------------
+
+/** Отказ отправки с кодом, как его отдаёт сервер. */
+function otkazSKodom(status: number, code: string, detail: string, dop: object = {}): Otvet {
+  return () => HttpResponse.json({ detail, code, ...dop }, { status })
+}
+
+test.each([
+  // Тексты нарочно без слова «сообщите»: исход решает код, а не слово.
+  ['not_configured', 503, 'Таблица карточек не подключена. Черновик сохранён.'],
+  ['writing_closed', 503, 'Запись в таблицу сейчас закрыта. Черновик сохранён.'],
+  ['write_forbidden', 502, 'Google не дал записать в таблицу карточек. Черновик сохранён.'],
+])('код %s — нужен администратор: главной кнопки нет, повтор простой', async (code, status, tekst) => {
+  otvetyOtpravki = [otkazSKodom(status, code, tekst)]
+  await prodolzhit(chernovikNa('summary'))
+
+  await userEvent.click(knopka('Отправить в таблицу'))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(tekst)
+  expect(knopka('Отправить ещё раз')).not.toHaveClass('kartochka-glavnaya')
+  expect(screen.queryByRole('button', { name: 'Изменить название' })).not.toBeInTheDocument()
+})
+
+test('код columns_shifted: слово «сообщите» в тексте ничего не решает — повтор главный', async () => {
+  otvetyOtpravki = [otkazSKodom(503, 'columns_shifted', SDVIG)]
+  await prodolzhit(chernovikNa('summary'))
+
+  await userEvent.click(knopka('Отправить в таблицу'))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(SDVIG)
+  expect(knopka('Отправить ещё раз')).toHaveClass('kartochka-glavnaya')
+})
+
+test.each([
+  [
+    'written_not_marked',
+    503,
+    'Карточка записана в строку 128, но сервер не успел это запомнить — нажмите «Отправить» ещё раз: второй строки не будет.',
+  ],
+  [
+    'unconfirmed',
+    502,
+    'Не удалось подтвердить запись — нажмите «Отправить» ещё раз: второй строки не будет',
+  ],
+  ['sheet_busy', 503, ZANYATA],
+  ['write_refused', 502, GOOGLE_NE_PRINYAL],
+])('код %s — текст сервера и «Отправить ещё раз» главной кнопкой', async (code, status, tekst) => {
+  otvetyOtpravki = [otkazSKodom(status, code, tekst), () => zapisano({ already_written: true })]
+  await prodolzhit(chernovikNa('summary'))
+
+  await userEvent.click(knopka('Отправить в таблицу'))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(tekst)
+  expect(knopka('Отправить ещё раз')).toHaveClass('kartochka-glavnaya')
+  await userEvent.click(knopka('Отправить ещё раз'))
+  expect(await screen.findByRole('heading', { name: ZAPISANO })).toBeInTheDocument()
+})
+
+test('код duplicate (409 с row) — «Изменить название» главной кнопкой', async () => {
+  otvetyOtpravki = [
+    otkazSKodom(409, 'duplicate', '«Моцарелла» уже есть в таблице — строка 3.', { row: 3 }),
+  ]
+  await prodolzhit(chernovikNa('summary'))
+
+  await userEvent.click(knopka('Отправить в таблицу'))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('строка 3')
+  expect(knopka('Изменить название')).toHaveClass('kartochka-glavnaya')
+})
+
+test('код recognition_running: после обрыва это не наша отправка — не ждём, текст сервера', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyOtpravki = [
+    'obryv',
+    otkazSKodom(409, 'recognition_running', 'Дождитесь окончания распознавания'),
+  ]
+  await prodolzhit(chernovikNa('summary'), polzovatel)
+
+  await polzovatel.click(knopka('Отправить в таблицу'))
+  await screen.findByText(/попытка 2 из 3/)
+  await vperyod(2_000)
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Дождитесь окончания распознавания')
+  expect(screen.queryByText(ZAPISYVAETSYA)).not.toBeInTheDocument()
+  await vperyod(30_000)
+  expect(otpravki).toHaveLength(2)
+})
+
+test('код submit_running после обрыва — ждём свою отправку и показываем строку', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyOtpravki = [
+    'obryv',
+    otkazSKodom(409, 'submit_running', OTPRAVLYAETSYA_17),
+    () => zapisano({ already_written: true }),
+  ]
+  await prodolzhit(chernovikNa('summary'), polzovatel)
+
+  await polzovatel.click(knopka('Отправить в таблицу'))
+  await screen.findByText(/попытка 2 из 3/)
+  await vperyod(2_000)
+  expect(await screen.findByText(ZAPISYVAETSYA)).toBeInTheDocument()
+  await vperyod(5_000)
+
+  expect(await screen.findByRole('heading', { name: ZAPISANO })).toBeInTheDocument()
+  expect(otpravki).toHaveLength(3)
+})
+
+// ---------------------------------------------------------------------------
+// Ожидание своей отправки: уход со страницы и конец ожидания
+// ---------------------------------------------------------------------------
+
+test('уход со страницы во время ожидания: ни одного запроса после; возврат — один круг', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyOtpravki = [
+    'obryv',
+    otkazSKodom(409, 'submit_running', OTPRAVLYAETSYA_17),
+    otkazSKodom(409, 'submit_running', OTPRAVLYAETSYA_17),
+  ]
+  const { unmount } = await prodolzhit(chernovikNa('summary'), polzovatel)
+
+  await polzovatel.click(knopka('Отправить в таблицу'))
+  await screen.findByText(/попытка 2 из 3/)
+  await vperyod(2_000)
+  await screen.findByText(ZAPISYVAETSYA)
+  expect(otpravki).toHaveLength(2)
+
+  unmount()
+  await vperyod(120_000)
+  expect(otpravki).toHaveLength(2)
+
+  // Повар вернулся: одна отправка, без прежнего счёта обрывов и ожиданий.
+  await prodolzhit(chernovikNa('summary'), polzovatel)
+  await polzovatel.click(knopka('Отправить в таблицу'))
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(OTPRAVLYAETSYA_17)
+  await vperyod(60_000)
+  expect(otpravki).toHaveLength(3)
+})
+
+test('уход со страницы во время паузы после обрыва — повтор не уходит', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyOtpravki = ['obryv']
+  const { unmount } = await prodolzhit(chernovikNa('summary'), polzovatel)
+
+  await polzovatel.click(knopka('Отправить в таблицу'))
+  await screen.findByText(/попытка 2 из 3/)
+  unmount()
+  await vperyod(60_000)
+
+  expect(otpravki).toHaveLength(1)
+})
+
+test('ожидание кончилось, а строка легла — один запрос состояния, итог «строка N»', async () => {
+  const { polzovatel, vperyod } = chasy()
+  otvetyOtpravki = [
+    'obryv',
+    ...Array.from({ length: 6 }, () => otkazSKodom(409, 'submit_running', OTPRAVLYAETSYA_17)),
+    () => {
+      // Строка легла сразу после последней проверки: черновик отправлен.
+      stroka = STROKA
+      chernovik = null
+      return HttpResponse.json(
+        { detail: OTPRAVLYAETSYA_17, code: 'submit_running' },
+        { status: 409 },
+      )
+    },
+    () => zapisano({ already_written: true }),
+  ]
+  await prodolzhit(chernovikNa('summary'), polzovatel)
+
+  await polzovatel.click(knopka('Отправить в таблицу'))
+  await screen.findByText(/попытка 2 из 3/)
+  await vperyod(2_000)
+  await screen.findByText(ZAPISYVAETSYA)
+  for (let raz = 0; raz < 6; raz += 1) await vperyod(5_000)
+
+  expect(await screen.findByRole('heading', { name: ZAPISANO })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Начать' })).not.toBeInTheDocument()
+  // Обрыв, повтор, шесть ожиданий — и ровно одна проверка сверх.
+  expect(otpravki).toHaveLength(9)
+})
+
+// ---------------------------------------------------------------------------
+// Фото продукта: мелочи
+// ---------------------------------------------------------------------------
+
+test('вопрос «Убрать?» открыт, а слот начал грузиться — «Да, убрать» ждёт, подпись «Идёт загрузка…»', async () => {
+  const zagruzka = otlozhennyi()
+  otvetyZagruzki = [
+    async () => {
+      await zagruzka.zhdat
+      return undefined
+    },
+  ]
+  await prodolzhit(
+    chernovikNa('photos', { photos: { label: true, package: true, before: false, after: false } }),
+  )
+  const vUpakovke = screen.getByRole('group', { name: 'В упаковке' })
+
+  await userEvent.click(within(vUpakovke).getByRole('button', { name: 'Убрать' }))
+  await userEvent.upload(within(vUpakovke).getByLabelText('Переснять'), snimok(4032, 3024))
+
+  expect(await within(vUpakovke).findByText('Загружаем фото…')).toBeInTheDocument()
+  expect(within(vUpakovke).getByRole('button', { name: 'Да, убрать' })).toBeDisabled()
+  expect(within(vUpakovke).getByText('Идёт загрузка…')).toBeInTheDocument()
+  zagruzka.otpustit()
+  await waitFor(() =>
+    expect(within(vUpakovke).getByRole('button', { name: 'Да, убрать' })).toBeEnabled(),
+  )
+  expect(within(vUpakovke).queryByText('Идёт загрузка…')).not.toBeInTheDocument()
+})
+
+test('после «Да, убрать» фокус — на выбор фото этого же слота', async () => {
+  await prodolzhit(
+    chernovikNa('photos', { photos: { label: true, package: true, before: false, after: false } }),
+  )
+  const vUpakovke = screen.getByRole('group', { name: 'В упаковке' })
+
+  await userEvent.click(within(vUpakovke).getByRole('button', { name: 'Убрать' }))
+  await userEvent.click(within(vUpakovke).getByRole('button', { name: 'Да, убрать' }))
+
+  await waitFor(() => expect(within(vUpakovke).getByLabelText('Сфотографировать')).toHaveFocus())
+})
+
+test('отказ удаления фото не висит после новой успешной загрузки слота', async () => {
+  otvetyUdaleniya = [
+    () => HttpResponse.json({ detail: 'Карточка отправляется — подождите' }, { status: 409 }),
+  ]
+  await prodolzhit(
+    chernovikNa('photos', { photos: { label: true, package: true, before: false, after: false } }),
+  )
+  const vUpakovke = screen.getByRole('group', { name: 'В упаковке' })
+  await userEvent.click(within(vUpakovke).getByRole('button', { name: 'Убрать' }))
+  await userEvent.click(within(vUpakovke).getByRole('button', { name: 'Да, убрать' }))
+  expect(await within(vUpakovke).findByRole('alert')).toBeInTheDocument()
+
+  await userEvent.upload(within(vUpakovke).getByLabelText('Переснять'), snimok(4032, 3024))
+
+  await waitFor(() => expect(zagruzki).toHaveLength(1))
+  await waitFor(() => expect(within(vUpakovke).queryByRole('alert')).not.toBeInTheDocument())
 })
